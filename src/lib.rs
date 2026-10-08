@@ -28,6 +28,7 @@ mod lock;
 mod map;
 mod object;
 mod pubsub;
+mod semaphore;
 
 pub use atomic_long::AtomicLong;
 pub use bucket::Bucket;
@@ -38,3 +39,4 @@ pub use error::{Error, Result};
 pub use lock::{Lock, LockGuard, LockOptions};
 pub use map::Map;
 pub use object::Object;
+pub use semaphore::{Permits, Semaphore};

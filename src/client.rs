@@ -6,6 +6,7 @@ use crate::core::Core;
 use crate::lock::Lock;
 use crate::map::Map;
 use crate::object::Key;
+use crate::semaphore::Semaphore;
 use std::fmt;
 use std::sync::Arc;
 
@@ -52,5 +53,10 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`Semaphore`] named `name`.
+    pub fn semaphore(&self, name: impl Into<Arc<str>>) -> Semaphore {
+        Semaphore::new(Key::new(self.core.clone(), name))
     }
 }
