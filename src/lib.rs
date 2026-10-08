@@ -31,6 +31,8 @@ mod object;
 mod pubsub;
 mod rate_limiter;
 mod semaphore;
+mod shield;
+mod wait;
 
 pub use atomic_long::AtomicLong;
 pub use bucket::Bucket;

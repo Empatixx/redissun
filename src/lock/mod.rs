@@ -5,6 +5,7 @@ pub use guard::LockGuard;
 
 use crate::error::{Error, Result};
 use crate::object::{millis as to_millis, HasKey, Key};
+use crate::shield::shielded;
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::scripts::Script;
@@ -105,6 +106,11 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration) -> Result<boo
     Ok(renewed == 1)
 }
 
+enum Attempt {
+    Acquired(LockGuard),
+    Busy(i64),
+}
+
 /// Options for [`Lock::lock_with`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -138,7 +144,7 @@ impl LockOptions {
 ///
 /// Code that runs outside any spawned task (the body of `#[tokio::main]`, `block_on`, `spawn_blocking`) shares one owner per client, and futures joined inside a single task share that task's owner; neither case excludes the others.
 ///
-/// Dropping an acquire future while it is in flight can leave the lock held until its lease expires, so prefer `lock_for` to wrapping `lock` in a timeout.
+/// Acquiring is cancellation safe: dropping a pending `lock` future, for example through `tokio::time::timeout`, never leaves the lock held.
 #[derive(Clone)]
 pub struct Lock {
     key: Key,
@@ -200,20 +206,35 @@ impl Lock {
             tokio::pin!(notified);
             notified.as_mut().enable();
 
-            let pttl: Option<i64> = core
-                .eval(
-                    &ACQUIRE,
-                    vec![self.key.redis_key()],
-                    vec![lease_arg(lease)?, Bytes::from(owner.clone())],
-                )
-                .await?;
-
-            let Some(pttl) = pttl else {
-                let cancel = CancellationToken::new();
-                if watchdog {
-                    watchdog::spawn(self.key.clone(), owner.clone(), lease, cancel.clone());
-                }
-                return Ok(Some(LockGuard::new(self.key.clone(), owner, lease, cancel)));
+            let attempt = {
+                let key = self.key.clone();
+                let owner = owner.clone();
+                let argument = lease_arg(lease)?;
+                shielded(async move {
+                    let pttl: Option<i64> = key
+                        .core
+                        .eval(
+                            &ACQUIRE,
+                            vec![key.redis_key()],
+                            vec![argument, Bytes::from(owner.clone())],
+                        )
+                        .await?;
+                    Ok(match pttl {
+                        Some(pttl) => Attempt::Busy(pttl),
+                        None => {
+                            let cancel = CancellationToken::new();
+                            if watchdog {
+                                watchdog::spawn(key.clone(), owner.clone(), lease, cancel.clone());
+                            }
+                            Attempt::Acquired(LockGuard::new(key, owner, lease, cancel))
+                        }
+                    })
+                })
+                .await?
+            };
+            let pttl = match attempt {
+                Attempt::Acquired(guard) => return Ok(Some(guard)),
+                Attempt::Busy(pttl) => pttl,
             };
 
             let remaining = match deadline {

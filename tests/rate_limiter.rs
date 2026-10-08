@@ -1,6 +1,6 @@
 mod common;
 
-use common::{client, unique};
+use common::{client, raw_command, unique};
 use redissun::{Error, Object, RateType};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -282,4 +282,31 @@ async fn debug_shows_the_name() {
     let name = unique("rate");
     let limiter = client().await.rate_limiter(name.clone());
     assert!(format!("{limiter:?}").contains(&name));
+}
+
+async fn pttl(key: &str) -> i64 {
+    let reply = raw_command(&["PTTL", key]).await;
+    reply.trim().trim_start_matches(':').parse().unwrap()
+}
+
+#[tokio::test]
+async fn refreshing_expired_permits_keeps_the_ttl_of_the_value_key() {
+    let name = unique("rate");
+    let limiter = client().await.rate_limiter(name.clone());
+    limiter
+        .try_set_rate(RateType::Overall, 2, Duration::from_millis(400))
+        .await
+        .unwrap();
+    assert!(limiter.try_acquire(1).await.unwrap());
+    assert!(limiter.expire(Duration::from_secs(60)).await.unwrap());
+    assert!(limiter.try_acquire(1).await.unwrap());
+    let value_key = format!("{{{name}}}:value");
+    assert!(pttl(&value_key).await > 0);
+
+    sleep(Duration::from_millis(600)).await;
+    assert_eq!(limiter.available_permits().await.unwrap(), 2);
+    assert!(
+        pttl(&value_key).await > 0,
+        "the value key lost its expiry when expired permits were released"
+    );
 }

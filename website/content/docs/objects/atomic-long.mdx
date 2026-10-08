@@ -27,4 +27,6 @@ visits.add_and_get(10).await?;
 
 `compare_and_set` treats a missing counter as 0, like Redisson. `get_and_set` and `get_and_delete` need Redis 6.2 or newer.
 
+`set`, `get_and_set` and `compare_and_set` replace the value the way Redis `SET` does, so they also remove a time limit set with `expire`. `incr`, `decr`, `add_and_get` and `get_and_add` keep it.
+
 The value is stored as a plain integer, not through the codec. Other tools can read it. If the key holds something that is not an integer, the call returns an error.

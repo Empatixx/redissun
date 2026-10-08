@@ -1,5 +1,6 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
+use crate::wait::next_pause;
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
@@ -9,7 +10,6 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-const FALLBACK_POLL: Duration = Duration::from_secs(2);
 const ZERO_COUNT_MESSAGE: &str = "0";
 const NEW_COUNT_MESSAGE: &str = "1";
 
@@ -70,6 +70,9 @@ impl CountDownLatch {
 
     /// Sets the count, but only when the latch does not exist. Returns whether it was set.
     pub async fn try_set_count(&self, count: u64) -> Result<bool> {
+        if count == 0 {
+            return Err(Error::Config("count must be positive".into()));
+        }
         let set: i64 = self
             .key
             .core
@@ -145,15 +148,8 @@ impl CountDownLatch {
                 return Ok(true);
             }
 
-            let pause = match deadline {
-                Some(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Ok(false);
-                    }
-                    remaining.min(FALLBACK_POLL)
-                }
-                None => FALLBACK_POLL,
+            let Some(pause) = next_pause(deadline) else {
+                return Ok(false);
             };
             let _ = tokio::time::timeout(pause, notified).await;
         }

@@ -47,7 +47,7 @@ Code outside any spawned task (the body of `#[tokio::main]`, `block_on`, `spawn_
 
 ## Cancelling a wait
 
-If you drop a `lock()` future that is still waiting, for example with `tokio::time::timeout`, the lock can stay taken until its lease ends. This happens only if the server had already given you the lock. For a time limit, use `lock_for(wait)`.
+You can cancel a pending `lock()` at any moment, for example with `tokio::time::timeout`. A lock that the server granted at that moment is released again, so it never stays held by mistake.
 
 ## Lease and watchdog
 

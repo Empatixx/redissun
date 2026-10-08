@@ -1,5 +1,7 @@
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
+use crate::shield::shielded;
+use crate::wait::next_pause;
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
@@ -9,8 +11,6 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::time::Instant;
-
-const FALLBACK_POLL: Duration = Duration::from_secs(2);
 
 static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
@@ -182,23 +182,23 @@ impl Semaphore {
         self.acquire_inner(permits, Some(wait)).await
     }
 
-    async fn try_take(&self, permits: &Bytes) -> Result<bool> {
-        let taken: i64 = self
-            .key
-            .core
-            .eval(
-                &TRY_ACQUIRE,
-                vec![self.key.redis_key()],
-                vec![permits.clone()],
-            )
-            .await?;
-        Ok(taken == 1)
+    async fn try_take(&self, permits: u64, argument: &Bytes) -> Result<Option<Permits>> {
+        let key = self.key.clone();
+        let argument = argument.clone();
+        shielded(async move {
+            let taken: i64 = key
+                .core
+                .eval(&TRY_ACQUIRE, vec![key.redis_key()], vec![argument])
+                .await?;
+            Ok((taken == 1).then(|| Permits::new(key, permits)))
+        })
+        .await
     }
 
     async fn acquire_inner(&self, permits: u64, wait: Option<Duration>) -> Result<Option<Permits>> {
         let argument = positive(permits)?;
-        if self.try_take(&argument).await? {
-            return Ok(Some(Permits::new(self.key.clone(), permits)));
+        if let Some(taken) = self.try_take(permits, &argument).await? {
+            return Ok(Some(taken));
         }
         if wait.is_some_and(|wait| wait.is_zero()) {
             return Ok(None);
@@ -217,19 +217,12 @@ impl Semaphore {
             tokio::pin!(notified);
             notified.as_mut().enable();
 
-            if self.try_take(&argument).await? {
-                return Ok(Some(Permits::new(self.key.clone(), permits)));
+            if let Some(taken) = self.try_take(permits, &argument).await? {
+                return Ok(Some(taken));
             }
 
-            let pause = match deadline {
-                Some(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Ok(None);
-                    }
-                    remaining.min(FALLBACK_POLL)
-                }
-                None => FALLBACK_POLL,
+            let Some(pause) = next_pause(deadline) else {
+                return Ok(None);
             };
             let _ = tokio::time::timeout(pause, notified).await;
         }

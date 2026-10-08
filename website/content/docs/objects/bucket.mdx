@@ -30,7 +30,7 @@ A time limit must be longer than zero. Very small limits are rounded up to one m
 
 ## Methods for the key
 
-`Bucket`, `Map` and `Lock` all have the `Object` methods:
+Every object (`Bucket`, `Map`, `Lock`, `AtomicLong`, `Semaphore`, `CountDownLatch`, `RateLimiter`) has the `Object` methods:
 
 | Method | Redis command |
 |---|---|

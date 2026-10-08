@@ -42,5 +42,6 @@ This is how Redisson does it. The permits are a number in one Redis string. Taki
 
 ## Things to know
 
+- You can cancel a pending `acquire` at any moment. Permits that were taken at that moment are given back.
 - Permits have no owner. If a program crashes while it holds permits, they are lost until someone adds them back with `release` or `add_permits`.
 - `0` permits is an error.

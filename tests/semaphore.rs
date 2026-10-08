@@ -226,3 +226,13 @@ async fn object_operations_and_debug() {
     assert!(semaphore.del().await.unwrap());
     assert!(!semaphore.exists().await.unwrap());
 }
+
+#[tokio::test]
+async fn cancelling_an_acquire_at_any_moment_does_not_lose_permits() {
+    let semaphore = client().await.semaphore(unique("sem"));
+    semaphore.try_set_permits(3).await.unwrap();
+    for micros in (0..900).step_by(10) {
+        let _ = timeout(Duration::from_micros(micros), semaphore.acquire(1)).await;
+    }
+    eventually_permits(&semaphore, 3).await;
+}

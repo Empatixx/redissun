@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, subscribed_channels, unique};
-use redissun::Object;
+use redissun::{Error, Object};
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 
@@ -165,4 +165,14 @@ async fn debug_shows_the_name() {
     let name = unique("latch");
     let latch = client().await.count_down_latch(name.clone());
     assert!(format!("{latch:?}").contains(&name));
+}
+
+#[tokio::test]
+async fn a_zero_count_is_rejected_so_no_dead_key_is_left_behind() {
+    let latch = client().await.count_down_latch(unique("latch"));
+    assert!(matches!(
+        latch.try_set_count(0).await,
+        Err(Error::Config(_))
+    ));
+    assert!(!latch.exists().await.unwrap());
 }

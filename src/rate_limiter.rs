@@ -43,7 +43,7 @@ if currentValue ~= false then
         else
             currentValue = tonumber(currentValue) + released
         end
-        redis.call('SET', valueName, currentValue)
+        redis.call('SET', valueName, currentValue, 'KEEPTTL')
     end
 else
     currentValue = false
@@ -151,9 +151,14 @@ impl RateType {
 }
 
 fn tagged(name: &str) -> String {
-    match (name.find('{'), name.find('}')) {
-        (Some(open), Some(close)) if open < close => name.to_string(),
-        _ => format!("{{{name}}}"),
+    let has_tag = name
+        .find('{')
+        .and_then(|open| name[open + 1..].find('}'))
+        .is_some_and(|length| length > 0);
+    if has_tag {
+        name.to_string()
+    } else {
+        format!("{{{name}}}")
     }
 }
 
@@ -178,8 +183,12 @@ impl RateLimiter {
         Self { key }
     }
 
+    fn main_key(&self) -> String {
+        tagged(self.key.name())
+    }
+
     fn keys(&self) -> Vec<String> {
-        let base = tagged(self.key.name());
+        let base = self.main_key();
         let client = self.key.core.client_id();
         vec![
             base.clone(),
@@ -215,7 +224,7 @@ impl RateLimiter {
             .core
             .eval(
                 &TRY_SET_RATE,
-                vec![self.keys().remove(0)],
+                vec![self.main_key()],
                 Self::settings(rate_type, rate, interval)?,
             )
             .await?;
@@ -310,7 +319,7 @@ impl RateLimiter {
     }
 
     async fn exists_main(&self) -> Result<bool> {
-        let found: i64 = self.key.core.redis().exists(self.keys().remove(0)).await?;
+        let found: i64 = self.key.core.redis().exists(self.main_key()).await?;
         Ok(found > 0)
     }
 
@@ -328,7 +337,7 @@ impl RateLimiter {
     }
 
     async fn ttl_main(&self) -> Result<Option<Duration>> {
-        let remaining: i64 = self.key.core.redis().pttl(self.keys().remove(0)).await?;
+        let remaining: i64 = self.key.core.redis().pttl(self.main_key()).await?;
         Ok((remaining >= 0).then(|| Duration::from_millis(remaining as u64)))
     }
 
@@ -369,5 +378,18 @@ impl Object for RateLimiter {
 
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
         self.persist_all()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tagged;
+
+    #[test]
+    fn names_get_a_hash_tag_unless_they_already_have_a_real_one() {
+        assert_eq!(tagged("api"), "{api}");
+        assert_eq!(tagged("{team}:api"), "{team}:api");
+        assert_eq!(tagged("a{}b"), "{a{}b}");
+        assert_eq!(tagged("}a{"), "{}a{}");
     }
 }

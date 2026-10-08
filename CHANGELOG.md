@@ -13,6 +13,10 @@
 
 ### Fixed
 
+- Cancelling `Lock::lock` or `Semaphore::acquire` at any moment no longer leaves the lock held or the permits lost.
+- `RateLimiter` no longer drops the expiry of its value key when it releases old permits.
+- `RateLimiter` keys of a name like `a{}b` now get a hash tag.
+- `CountDownLatch::try_set_count(0)` is an error instead of leaving a key that blocks the latch forever.
 - Pub/sub subscriptions are now released when the last waiter on a channel leaves. Before, a process that waited on many different lock names kept every subscription until it exited.
 
 

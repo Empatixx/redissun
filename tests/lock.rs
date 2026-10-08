@@ -199,3 +199,19 @@ async fn zero_lease_is_rejected_and_a_sub_millisecond_lease_is_accepted() {
     let tiny = LockOptions::new().lease(Duration::from_micros(500));
     assert!(lock.lock_with(tiny).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn cancelling_a_lock_at_any_moment_does_not_leave_it_held() {
+    let lock = client().await.lock(unique("lock"));
+    for micros in (0..900).step_by(10) {
+        let _ = timeout(Duration::from_micros(micros), lock.try_lock()).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while lock.is_locked().await.unwrap() {
+        assert!(
+            Instant::now() < deadline,
+            "an abandoned acquire left the lock held"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+}
