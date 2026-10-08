@@ -60,7 +60,7 @@ static RENEW: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "if redis.call('DEL', KEYS[1]) == 1 then
             redis.call('PUBLISH', ARGV[1], 'unlocked')
@@ -72,88 +72,123 @@ static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
 
 static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 1 and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
-            return redis.call('PTTL', KEYS[1])
+        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        if mode == false then
+            redis.call('HSET', KEYS[1], 'mode', 'read')
+            redis.call('HSET', KEYS[1], ARGV[2], 1)
+            redis.call('SET', KEYS[2] .. ':1', 1)
+            redis.call('PEXPIRE', KEYS[2] .. ':1', ARGV[1])
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            return nil
         end
-        redis.call('INCR', KEYS[3])
-        redis.call('PEXPIRE', KEYS[3], ARGV[1])
-        redis.call('SADD', KEYS[2], ARGV[2])
-        if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[1]) then
-            redis.call('PEXPIRE', KEYS[2], ARGV[1])
+        if mode == 'read' or (mode == 'write' and redis.call('HEXISTS', KEYS[1], ARGV[3]) == 1) then
+            local index = redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
+            local hold = KEYS[2] .. ':' .. index
+            redis.call('SET', hold, 1)
+            redis.call('PEXPIRE', hold, ARGV[1])
+            local remain = redis.call('PTTL', KEYS[1])
+            redis.call('PEXPIRE', KEYS[1], math.max(remain, ARGV[1]))
+            return nil
         end
-        return nil",
+        return redis.call('PTTL', KEYS[1])",
     )
 });
 
 static WRITE_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 1 then
-            if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
-                redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
-                redis.call('PEXPIRE', KEYS[1], ARGV[1])
-                return nil
-            end
-            return redis.call('PTTL', KEYS[1])
+        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        if mode == false then
+            redis.call('HSET', KEYS[1], 'mode', 'write')
+            redis.call('HSET', KEYS[1], ARGV[2], 1)
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            return nil
         end
-        local wait = 0
-        for _, member in ipairs(redis.call('SMEMBERS', KEYS[2])) do
-            local ttl = redis.call('PTTL', ARGV[3] .. member)
-            if ttl == -2 then
-                redis.call('SREM', KEYS[2], member)
-            elseif ttl == -1 then
-                wait = math.max(wait, 1000)
-            else
-                wait = math.max(wait, ttl, 1)
-            end
+        if mode == 'write' and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
+            redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            return nil
         end
-        if wait > 0 then
-            return wait
-        end
-        redis.call('HSET', KEYS[1], ARGV[2], 1)
-        redis.call('PEXPIRE', KEYS[1], ARGV[1])
-        return nil",
+        return redis.call('PTTL', KEYS[1])",
     )
 });
 
 static READ_RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if not redis.call('GET', KEYS[3]) then
+        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        if mode == false then
+            redis.call('PUBLISH', KEYS[2], ARGV[1])
             return nil
         end
-        local count = redis.call('DECR', KEYS[3])
-        if count > 0 then
-            redis.call('PEXPIRE', KEYS[3], ARGV[1])
+        if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
+            return nil
+        end
+        local counter = redis.call('HINCRBY', KEYS[1], ARGV[2], -1)
+        if counter == 0 then
+            redis.call('HDEL', KEYS[1], ARGV[2])
+        end
+        redis.call('DEL', KEYS[3] .. ':' .. (counter + 1))
+        if redis.call('HLEN', KEYS[1]) > 1 then
+            local maxRemain = -3
+            for _, field in ipairs(redis.call('HKEYS', KEYS[1])) do
+                local held = tonumber(redis.call('HGET', KEYS[1], field))
+                if held then
+                    for i = held, 1, -1 do
+                        local remain = redis.call('PTTL', KEYS[4] .. ':' .. field .. ':rwlock_timeout:' .. i)
+                        maxRemain = math.max(remain, maxRemain)
+                    end
+                end
+            end
+            if maxRemain > 0 then
+                redis.call('PEXPIRE', KEYS[1], maxRemain)
+                return 0
+            end
+            if mode == 'write' then
+                return 0
+            end
+        end
+        redis.call('DEL', KEYS[1])
+        redis.call('PUBLISH', KEYS[2], ARGV[1])
+        return 1",
+    )
+});
+
+static WRITE_RELEASE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        if mode == false then
+            redis.call('PUBLISH', KEYS[2], ARGV[1])
+            return nil
+        end
+        if mode ~= 'write' or redis.call('HEXISTS', KEYS[1], ARGV[3]) == 0 then
+            return nil
+        end
+        local counter = redis.call('HINCRBY', KEYS[1], ARGV[3], -1)
+        if counter > 0 then
+            redis.call('PEXPIRE', KEYS[1], ARGV[2])
             return 0
         end
-        redis.call('DEL', KEYS[3])
-        redis.call('SREM', KEYS[2], ARGV[2])
-        redis.call('PUBLISH', ARGV[3], 'unlocked')
+        redis.call('HDEL', KEYS[1], ARGV[3])
+        if redis.call('HLEN', KEYS[1]) == 1 then
+            redis.call('DEL', KEYS[1])
+        else
+            redis.call('HSET', KEYS[1], 'mode', 'read')
+        end
+        redis.call('PUBLISH', KEYS[2], ARGV[1])
         return 1",
     )
 });
 
 static READ_RENEW: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 1 then
-            redis.call('PEXPIRE', KEYS[1], ARGV[1])
-            return 1
+        "local held = redis.call('HGET', KEYS[1], ARGV[2])
+        if held == false then
+            return 0
         end
-        return 0",
-    )
-});
-
-pub(crate) static RW_FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
-        "local released = redis.call('DEL', KEYS[1])
-        for _, member in ipairs(redis.call('SMEMBERS', KEYS[2])) do
-            released = released + redis.call('DEL', ARGV[2] .. member)
+        redis.call('PEXPIRE', KEYS[1], math.max(redis.call('PTTL', KEYS[1]), ARGV[1]))
+        for i = tonumber(held), 1, -1 do
+            redis.call('PEXPIRE', KEYS[2] .. ':' .. i, ARGV[1])
         end
-        released = released + redis.call('DEL', KEYS[2])
-        if released > 0 then
-            redis.call('PUBLISH', ARGV[1], 'unlocked')
-            return 1
-        end
-        return 0",
+        return 1",
     )
 });
 
@@ -164,16 +199,12 @@ pub(crate) enum Mode {
     Write,
 }
 
-pub(crate) fn readers_key(key: &Key) -> String {
-    format!("{}:readers", key.redis_key())
+fn write_field(owner: &str) -> String {
+    format!("{owner}:write")
 }
 
-pub(crate) fn read_prefix(key: &Key) -> String {
-    format!("{}:r:", key.redis_key())
-}
-
-fn read_key(key: &Key, owner: &str) -> String {
-    format!("{}{}", read_prefix(key), owner)
+fn timeout_prefix(key: &Key, owner: &str) -> String {
+    format!("{}:{}:rwlock_timeout", key.redis_key(), owner)
 }
 
 pub(crate) fn channel(name: &str) -> String {
@@ -185,21 +216,32 @@ fn lease_arg(duration: Duration) -> Result<Bytes> {
 }
 
 pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode) -> Result<()> {
+    let message = Bytes::from_static(b"unlocked");
     let outcome: Option<i64> = match mode {
         Mode::Read => {
             key.core
                 .eval(
                     &READ_RELEASE,
-                    vec![key.redis_key(), readers_key(key), read_key(key, owner)],
                     vec![
-                        lease_arg(lease)?,
-                        Bytes::from(owner.to_string()),
-                        Bytes::from(channel(key.name())),
+                        key.redis_key(),
+                        channel(key.name()),
+                        timeout_prefix(key, owner),
+                        key.redis_key(),
                     ],
+                    vec![message, Bytes::from(owner.to_string())],
                 )
                 .await?
         }
-        _ => {
+        Mode::Write => {
+            key.core
+                .eval(
+                    &WRITE_RELEASE,
+                    vec![key.redis_key(), channel(key.name())],
+                    vec![message, lease_arg(lease)?, Bytes::from(write_field(owner))],
+                )
+                .await?
+        }
+        Mode::Exclusive => {
             key.core
                 .eval(
                     &RELEASE,
@@ -222,12 +264,21 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration, mode: Mode) -
             key.core
                 .eval(
                     &READ_RENEW,
-                    vec![read_key(key, owner)],
-                    vec![lease_arg(lease)?],
+                    vec![key.redis_key(), timeout_prefix(key, owner)],
+                    vec![lease_arg(lease)?, Bytes::from(owner.to_string())],
                 )
                 .await?
         }
-        _ => {
+        Mode::Write => {
+            key.core
+                .eval(
+                    &RENEW,
+                    vec![key.redis_key()],
+                    vec![lease_arg(lease)?, Bytes::from(write_field(owner))],
+                )
+                .await?
+        }
+        Mode::Exclusive => {
             key.core
                 .eval(
                     &RENEW,
@@ -402,17 +453,17 @@ pub(crate) async fn acquire(
                     ),
                     Mode::Read => (
                         &READ_ACQUIRE,
-                        vec![key.redis_key(), readers_key(&key), read_key(&key, &owner)],
-                        vec![argument, Bytes::from(owner.clone())],
-                    ),
-                    Mode::Write => (
-                        &WRITE_ACQUIRE,
-                        vec![key.redis_key(), readers_key(&key)],
+                        vec![key.redis_key(), timeout_prefix(&key, &owner)],
                         vec![
                             argument,
                             Bytes::from(owner.clone()),
-                            Bytes::from(read_prefix(&key)),
+                            Bytes::from(write_field(&owner)),
                         ],
+                    ),
+                    Mode::Write => (
+                        &WRITE_ACQUIRE,
+                        vec![key.redis_key()],
+                        vec![argument, Bytes::from(write_field(&owner))],
                     ),
                 };
                 let pttl: Option<i64> = key.core.eval(script, keys, args).await?;

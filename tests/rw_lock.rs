@@ -219,13 +219,23 @@ async fn debug_shows_the_name() {
 }
 
 #[tokio::test]
-async fn the_readers_set_gets_an_expiry() {
+async fn the_lock_is_one_hash_with_a_mode() {
     let client = client().await;
     let name = unique("rw");
+    let key = format!("{{{name}}}");
     let lock = lock_of(&client, &name);
     let read = lock.read().await.unwrap();
-    let ttl = common::raw_command(&["PTTL", &format!("{{{name}}}:readers")]).await;
+    let mode = common::raw_command(&["HGET", &key, "mode"]).await;
+    assert!(mode.contains("read"), "{mode}");
+    let ttl = common::raw_command(&["PTTL", &key]).await;
     let ttl: i64 = ttl.trim().trim_start_matches(':').parse().unwrap();
     assert!(ttl > 0, "{ttl}");
     read.unlock().await.unwrap();
+    assert_eq!(common::raw_command(&["EXISTS", &key]).await.trim(), ":0");
+
+    let write = lock.write().await.unwrap();
+    let mode = common::raw_command(&["HGET", &key, "mode"]).await;
+    assert!(mode.contains("write"), "{mode}");
+    write.unlock().await.unwrap();
+    assert_eq!(common::raw_command(&["EXISTS", &key]).await.trim(), ":0");
 }

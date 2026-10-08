@@ -1,10 +1,8 @@
 use crate::error::{Error, Result};
-use crate::lock::{
-    acquire, channel, read_prefix, readers_key, LockGuard, LockOptions, Mode, RW_FORCE_UNLOCK,
-};
+use crate::lock::{acquire, channel, LockGuard, LockOptions, Mode, FORCE_UNLOCK};
 use crate::object::Key;
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
+use fred::interfaces::HashesInterface;
 use std::fmt;
 use std::time::Duration;
 
@@ -20,7 +18,7 @@ pub type RwLockWriteGuard = LockGuard;
 ///
 /// Readers are not blocked by waiting writers, so a steady stream of readers can keep a writer waiting.
 ///
-/// In Redis Cluster all the keys of one lock share the hash tag `{name}`.
+/// The lock is one Redis hash `{name}` with the field `mode` (`read` or `write`) and a hold count for each owner. Every read hold also has a key `{name}:<owner>:rwlock_timeout:<n>` with its own lease, so a crashed reader stops blocking writers when its lease ends. In Redis Cluster all these keys share the hash tag `{name}`.
 #[derive(Clone)]
 pub struct RwLock {
     key: Key,
@@ -77,8 +75,13 @@ impl RwLock {
 
     /// Returns whether any owner holds the write lock.
     pub async fn is_write_locked(&self) -> Result<bool> {
-        let found: i64 = self.key.core.redis().exists(self.key.redis_key()).await?;
-        Ok(found > 0)
+        let mode: Option<String> = self
+            .key
+            .core
+            .redis()
+            .hget(self.key.redis_key(), "mode")
+            .await?;
+        Ok(mode.as_deref() == Some("write"))
     }
 
     /// Releases every read and write hold regardless of owner; returns whether anything was held.
@@ -87,12 +90,9 @@ impl RwLock {
             .key
             .core
             .eval(
-                &RW_FORCE_UNLOCK,
-                vec![self.key.redis_key(), readers_key(&self.key)],
-                vec![
-                    Bytes::from(channel(self.key.name())),
-                    Bytes::from(read_prefix(&self.key)),
-                ],
+                &FORCE_UNLOCK,
+                vec![self.key.redis_key()],
+                vec![Bytes::from(channel(self.key.name()))],
             )
             .await?;
         Ok(released == 1)

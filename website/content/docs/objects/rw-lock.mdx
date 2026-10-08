@@ -41,4 +41,4 @@ Every reader has its own key with its own lease. If a program crashes, its read 
 
 ## Redis keys
 
-All keys share the hash tag `{name}`: the writer hash `{name}`, the set `{name}:readers` and one key `{name}:r:<owner>` for each reader.
+The lock is one hash `{name}`. The field `mode` is `read` or `write`, and the other fields count the holds of each owner. Every read hold also has a key `{name}:<owner>:rwlock_timeout:<n>` with its own lease. All keys share the hash tag `{name}`. This is the same scheme that Redisson uses.
