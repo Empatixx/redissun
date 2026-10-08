@@ -13,6 +13,9 @@ description: How Redisson names and behaviour map to redissun.
 | `RDeque`, `RQueue` | `VecDeque` |
 | `RSet` | `HashSet` |
 | `RLock` | `Lock` |
+| `RReadWriteLock` | `RwLock` |
+| `RMapCache` | `HashMapCache` |
+| `RTopic` | `Topic` |
 | `RAtomicLong` | `AtomicI64` |
 | `RSemaphore` | `Semaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
@@ -92,6 +95,46 @@ description: How Redisson names and behaviour map to redissun.
 | `readUnion(...)` | `union(&[&other])` |
 | `readIntersection(...)` | `intersection(&[&other])` |
 | `readDiff(...)` | `difference(&[&other])` |
+
+## Topic
+
+| Redisson | redissun |
+|---|---|
+| `publish(m)` | `publish(&m)` |
+| `addListener(...)` | `subscribe()` then `recv()` or `into_stream()` |
+| `countSubscribers()` | `subscriber_count()` |
+
+## RwLock
+
+| Redisson | redissun |
+|---|---|
+| `readLock().lock()` | `read()` |
+| `readLock().tryLock()` | `try_read()` |
+| `readLock().tryLock(time, unit)` | `read_for(wait)` |
+| `writeLock().lock()` | `write()` |
+| `writeLock().tryLock()` | `try_write()` |
+| `writeLock().tryLock(time, unit)` | `write_for(wait)` |
+| `unlock()` | `unlock()` on the guard |
+
+## HashMapCache
+
+| Redisson | redissun |
+|---|---|
+| `put(k, v)` | `insert(&k, &v)` |
+| `put(k, v, ttl, unit)` | `insert_with_ttl(&k, &v, ttl)` |
+| `putIfAbsent(k, v)` | `insert_nx(&k, &v)` |
+| `remainTimeToLive(k)` | `entry_ttl(&k)` |
+
+Redisson deletes expired entries with a background task. redissun deletes them when you touch them, or when you call `evict_expired`. There is no idle timeout (`maxIdleTime`) yet.
+
+## VecDeque blocking
+
+| Redisson | redissun |
+|---|---|
+| `poll(time, unit)` | `pop_front_for(timeout)` |
+| `take()` | `pop_front_wait()` |
+| `pollLast(time, unit)` | `pop_back_for(timeout)` |
+| `takeLast()` | `pop_back_wait()` |
 
 ## Lock
 

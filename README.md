@@ -59,6 +59,9 @@ async fn main() -> redissun::Result<()> {
 | `VecDeque` | `RDeque` | list |
 | `HashSet` | `RSet` | set |
 | `Lock` | `RLock` | hash and pub/sub |
+| `RwLock` | `RReadWriteLock` | hash, set, strings and pub/sub |
+| `HashMapCache` | `RMapCache` | hash and sorted set |
+| `Topic` | `RTopic` | pub/sub |
 | `AtomicI64` | `RAtomicLong` | string |
 | `Semaphore` | `RSemaphore` | string and pub/sub |
 | `CountDownLatch` | `RCountDownLatch` | string and pub/sub |
@@ -124,7 +127,10 @@ A queue or stack. Add and remove at both ends.
 let jobs = client.vec_deque::<String>("jobs");
 jobs.push_back("send-email").await?;
 let next = jobs.pop_front().await?;
+let waited = jobs.pop_front_for(Duration::from_secs(5)).await?;
 ```
+
+`pop_front_for`, `pop_back_for`, `pop_front_wait` and `pop_back_wait` block until a value arrives.
 
 ### HashSet
 
@@ -137,6 +143,38 @@ let found = tags.contains("rust").await?;
 ```
 
 Other methods: `remove`, `contains_many`, `pop`, `random`, `move_to`, `union`, `intersection`, `difference`, `iter`.
+
+### HashMapCache
+
+A `HashMap` where each entry can expire.
+
+```rust
+let sessions = client.hash_map_cache::<String, User>("sessions");
+sessions.insert_with_ttl("abc", &user, Duration::from_secs(60)).await?;
+```
+
+Expiry is lazy and uses the Redis server clock. Call `evict_expired` to free memory sooner.
+
+### Topic
+
+Send messages to every program that listens.
+
+```rust
+let news = client.topic::<String>("news");
+let mut subscriber = news.subscribe().await?;
+news.publish("hello").await?;
+let message = subscriber.recv().await?;
+```
+
+### RwLock
+
+Many readers or one writer.
+
+```rust
+let lock = client.rw_lock("config");
+let read = lock.read().await?;
+read.unlock().await?;
+```
 
 ### AtomicI64
 
@@ -243,7 +281,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
+The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, which is faster, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
 
 ## License
 

@@ -6,7 +6,10 @@ const objects = [
   { name: 'Vec', text: 'A shared list with index access, stored in a Redis list.', href: '/docs/objects/vec' },
   { name: 'VecDeque', text: 'A shared queue or stack with both ends, stored in a Redis list.', href: '/docs/objects/vec-deque' },
   { name: 'HashSet', text: 'A shared set with union, intersection and difference.', href: '/docs/objects/hash-set' },
+  { name: 'HashMapCache', text: 'A map where each entry can expire. Time comes from the Redis server.', href: '/docs/objects/hash-map-cache' },
+  { name: 'Topic', text: 'Send messages to many programs with Redis pub/sub.', href: '/docs/objects/topic' },
   { name: 'Lock', text: 'A reentrant lock with a watchdog and pub/sub wake-ups, as in Redisson.', href: '/docs/objects/lock' },
+  { name: 'RwLock', text: 'Many readers or one writer, with a lease for each reader.', href: '/docs/objects/rw-lock' },
 ]
 
 export default function Home() {

@@ -15,6 +15,9 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `VecDeque` | list | `RDeque` |
 | `HashSet` | set | `RSet` |
 | `Lock` | hash and pub/sub | `RLock` |
+| `RwLock` | hash, set, strings and pub/sub | `RReadWriteLock` |
+| `HashMapCache` | hash and sorted set | `RMapCache` |
+| `Topic` | pub/sub | `RTopic` |
 | `AtomicI64` | string | `RAtomicLong` |
 | `Semaphore` | string and pub/sub | `RSemaphore` |
 | `CountDownLatch` | string and pub/sub | `RCountDownLatch` |

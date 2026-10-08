@@ -1,0 +1,38 @@
+---
+title: HashMapCache
+description: A shared map where each entry can expire.
+---
+
+A `HashMapCache` works like a `HashMap`, and each entry can have its own time to live.
+
+```rust
+use std::time::Duration;
+
+let sessions = client.hash_map_cache::<String, User>("sessions");
+
+sessions.insert_with_ttl("abc", &user, Duration::from_secs(60)).await?;
+let found = sessions.get("abc").await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
+| `insert_with_ttl(&k, &v, ttl)` | the entry expires after `ttl` |
+| `insert_nx(&k, &v)` | inserts only when there is no live entry |
+| `get(&k)`, `remove(&k)`, `contains_key(&k)` | never show an expired entry |
+| `entry_ttl(&k)` | time left. `None` means no limit or no entry |
+| `len()`, `is_empty()`, `clear()` | `len` counts live entries only |
+| `iter()`, `keys()`, `values()` | streams of live entries. They are `async` because they delete expired entries first. |
+| `evict_expired()` | deletes expired entries now and returns how many |
+
+## How expiry works
+
+- Time comes from the Redis server, so programs with different clocks agree.
+- Expiry is lazy. Every call hides and deletes the expired entries it touches.
+- There is no background task. An entry that nobody touches stays in Redis until `evict_expired`, `len`, `iter` or `clear` runs. Call `evict_expired` from a timer if you need memory back sooner.
+
+## Object methods
+
+`del`, `expire` and `persist` apply to both Redis keys. `rename` is not supported and returns `Error::Unsupported`. The keys are `{name}` (a hash) and `{name}:expires` (a sorted set). The `{name}` hash tag keeps them in one slot in Redis Cluster.

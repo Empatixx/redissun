@@ -1,0 +1,44 @@
+---
+title: RwLock
+description: Many readers or one writer, across programs.
+---
+
+An `RwLock` lets many readers hold the lock at the same time, or one writer alone. It works like `Lock`: it can be taken again by its owner, a watchdog keeps it alive, and waiting programs wake up without polling.
+
+```rust
+let lock = client.rw_lock("config");
+
+let read = lock.read().await?;
+read.unlock().await?;
+
+let write = lock.write().await?;
+write.unlock().await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `read()`, `write()` | wait until the lock is free |
+| `try_read()`, `try_write()` | return `None` at once when the lock is busy |
+| `read_for(wait)`, `write_for(wait)` | wait at most `wait`, then return `None` |
+| `is_write_locked()` | |
+| `force_unlock()` | releases every read and write hold of every owner |
+
+Guards have `unlock()`, and they release the lock in the background when dropped.
+
+## Rules
+
+- The owner is the client together with the tokio task, as in `Lock`.
+- Holds can be taken again by their owner and need one `unlock` each.
+- A task that holds the write lock can also take the read lock.
+- A task that holds a read lock cannot take the write lock. The call waits until it times out.
+- Readers do not wait for a waiting writer. A steady stream of readers can keep a writer waiting.
+
+## Crashed readers
+
+Every reader has its own key with its own lease. If a program crashes, its read lock ends when its lease ends, even when other readers keep renewing theirs.
+
+## Redis keys
+
+All keys share the hash tag `{name}`: the writer hash `{name}`, the set `{name}:readers` and one key `{name}:r:<owner>` for each reader.

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0] - unreleased
+
+### Added
+
+- `Topic` with `Subscriber`: `publish`, `subscribe`, `subscriber_count`, `recv`, `into_stream`.
+- `VecDeque` blocking pops: `pop_front_for`, `pop_back_for`, `pop_front_wait`, `pop_back_wait`.
+- `RwLock`: `read`, `try_read`, `read_for`, `write`, `try_write`, `write_for`, `is_write_locked`, `force_unlock`.
+- `HashMapCache`: `insert`, `insert_with_ttl`, `insert_nx`, `get`, `remove`, `contains_key`, `entry_ttl`, `len`, `is_empty`, `clear`, `evict_expired`, and `iter`, `keys`, `values` as streams.
+- `Error::Lagged`.
+
+### Changed
+
+- The license is now Apache-2.0. It was MIT.
+- `Object::del`, `expire` and `persist` now cover every key of an object that owns more than one, and `rename` returns `Error::Unsupported` for such objects.
+
+### Fixed
+
+- `subscribe` now waits until Redis has registered the subscription. Before, a message published right after could be missed.
+
 ## [0.3.0] - unreleased
 
 ### Added
@@ -11,7 +30,6 @@
 
 ### Changed
 
-- The license is now Apache-2.0 (it was MIT).
 - Breaking: `Map` is now `HashMap` (`client.hash_map`) and `AtomicLong` is now `AtomicI64` (`client.atomic_i64`), so the names follow Rust.
 
 ## [0.2.0] - unreleased
