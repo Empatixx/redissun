@@ -1,0 +1,26 @@
+[package]
+name = "redgrid"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Distributed objects on Redis for Rust, inspired by Redisson: Map, Bucket, reentrant Lock with watchdog"
+readme = "README.md"
+keywords = ["redis", "distributed", "lock", "redisson", "async"]
+categories = ["asynchronous", "concurrency", "database"]
+
+[dependencies]
+bytes = "1"
+fred = { version = "10.1", default-features = false, features = ["i-std", "i-hashes", "i-keys", "i-scripts", "i-pubsub", "i-cluster", "sentinel-client", "subscriber-client", "sha-1"] }
+futures = "0.3"
+serde = "1"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["redis"] }
+tokio = { version = "1", features = ["full"] }
