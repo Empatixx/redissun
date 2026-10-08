@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::lock::release;
+use crate::lock::{release, Mode};
 use crate::object::Key;
 use std::fmt;
 use std::time::Duration;
@@ -10,6 +10,7 @@ struct Held {
     key: Key,
     owner: String,
     lease: Duration,
+    mode: Mode,
     cancel: CancellationToken,
     runtime: Option<Handle>,
 }
@@ -21,12 +22,19 @@ pub struct LockGuard {
 }
 
 impl LockGuard {
-    pub(crate) fn new(key: Key, owner: String, lease: Duration, cancel: CancellationToken) -> Self {
+    pub(crate) fn new(
+        key: Key,
+        owner: String,
+        lease: Duration,
+        mode: Mode,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             held: Some(Held {
                 key,
                 owner,
                 lease,
+                mode,
                 cancel,
                 runtime: Handle::try_current().ok(),
             }),
@@ -39,7 +47,7 @@ impl LockGuard {
             return Ok(());
         };
         held.cancel.cancel();
-        release(&held.key, &held.owner, held.lease).await
+        release(&held.key, &held.owner, held.lease, held.mode).await
     }
 }
 
@@ -51,7 +59,7 @@ impl Drop for LockGuard {
         held.cancel.cancel();
         if let Some(runtime) = held.runtime {
             runtime.spawn(async move {
-                let _ = release(&held.key, &held.owner, held.lease).await;
+                let _ = release(&held.key, &held.owner, held.lease, held.mode).await;
             });
         }
     }

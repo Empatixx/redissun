@@ -8,6 +8,7 @@ use crate::latch::CountDownLatch;
 use crate::lock::Lock;
 use crate::object::Key;
 use crate::rate_limiter::RateLimiter;
+use crate::rw_lock::RwLock;
 use crate::semaphore::Semaphore;
 use crate::topic::Topic;
 use std::fmt;
@@ -76,6 +77,12 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`RwLock`] named `name`.
+    pub fn rw_lock(&self, name: impl Into<Arc<str>>) -> RwLock {
+        let name: Arc<str> = name.into();
+        RwLock::new(Key::new(self.core.clone(), format!("{{{name}}}")))
     }
 
     /// Returns the [`Semaphore`] named `name`.
