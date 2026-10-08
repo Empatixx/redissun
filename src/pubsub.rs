@@ -1,4 +1,5 @@
 use crate::error::Result;
+use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
 use fred::types::Message;
@@ -9,8 +10,11 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, Mutex, Notify};
 
+const MESSAGE_BUFFER: usize = 256;
+
 struct Entry {
     notify: Notify,
+    messages: broadcast::Sender<Bytes>,
     holders: AtomicUsize,
 }
 
@@ -63,6 +67,13 @@ impl PubSub {
     }
 
     pub(crate) async fn subscribe(self: &Arc<Self>, channel: &str) -> Result<Subscription> {
+        Ok(self.subscribe_with_messages(channel).await?.0)
+    }
+
+    pub(crate) async fn subscribe_with_messages(
+        self: &Arc<Self>,
+        channel: &str,
+    ) -> Result<(Subscription, broadcast::Receiver<Bytes>)> {
         let mut channels = self.channels.lock().await;
         let entry = match channels.get(channel) {
             Some(entry) => {
@@ -71,19 +82,25 @@ impl PubSub {
             }
             None => {
                 self.client.subscribe(channel).await?;
+                self.client.ping::<()>(None).await?;
                 let entry = Arc::new(Entry {
                     notify: Notify::new(),
+                    messages: broadcast::channel(MESSAGE_BUFFER).0,
                     holders: AtomicUsize::new(1),
                 });
                 channels.insert(channel.to_string(), entry.clone());
                 entry
             }
         };
-        Ok(Subscription {
-            pubsub: self.clone(),
-            channel: channel.to_string(),
-            entry,
-        })
+        let receiver = entry.messages.subscribe();
+        Ok((
+            Subscription {
+                pubsub: self.clone(),
+                channel: channel.to_string(),
+                entry,
+            },
+            receiver,
+        ))
     }
 
     async fn release(&self, channel: String) {
@@ -109,6 +126,9 @@ async fn dispatch(pubsub: Weak<PubSub>, mut receiver: broadcast::Receiver<Messag
             Ok(message) => {
                 if let Some(entry) = channels.get(&*message.channel) {
                     entry.notify.notify_waiters();
+                    if let Ok(payload) = message.value.convert::<Bytes>() {
+                        let _ = entry.messages.send(payload);
+                    }
                 }
             }
             Err(RecvError::Lagged(_)) => channels

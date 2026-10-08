@@ -9,6 +9,7 @@ use crate::lock::Lock;
 use crate::object::Key;
 use crate::rate_limiter::RateLimiter;
 use crate::semaphore::Semaphore;
+use crate::topic::Topic;
 use std::fmt;
 use std::sync::Arc;
 
@@ -65,6 +66,11 @@ impl<C: Codec> Client<C> {
     /// Returns the [`HashSet`](crate::HashSet) stored under `name`.
     pub fn hash_set<V>(&self, name: impl Into<Arc<str>>) -> crate::hash_set::HashSet<V, C> {
         crate::hash_set::HashSet::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`Topic`] named `name`.
+    pub fn topic<M>(&self, name: impl Into<Arc<str>>) -> Topic<M, C> {
+        Topic::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Lock`] named `name`.

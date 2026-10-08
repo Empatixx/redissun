@@ -22,6 +22,9 @@ pub enum Error {
     /// The operation is not supported by this object.
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+    /// A topic subscriber fell behind and missed this many messages.
+    #[error("subscriber missed {0} messages")]
+    Lagged(usize),
     /// The index is past the end of the list.
     #[error("index out of range")]
     OutOfRange,
@@ -58,5 +61,6 @@ mod tests {
             "unsupported operation: rename"
         );
         assert_eq!(Error::OutOfRange.to_string(), "index out of range");
+        assert_eq!(Error::Lagged(3).to_string(), "subscriber missed 3 messages");
     }
 }
