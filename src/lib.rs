@@ -17,6 +17,7 @@
 
 #![deny(missing_docs)]
 
+mod atomic_long;
 mod bucket;
 mod client;
 mod codec;
@@ -28,6 +29,7 @@ mod map;
 mod object;
 mod pubsub;
 
+pub use atomic_long::AtomicLong;
 pub use bucket::Bucket;
 pub use client::Client;
 pub use codec::{Codec, JsonCodec};

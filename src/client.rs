@@ -1,3 +1,4 @@
+use crate::atomic_long::AtomicLong;
 use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
@@ -31,6 +32,11 @@ impl Client<JsonCodec> {
 impl<C: Codec> Client<C> {
     pub(crate) fn from_parts(core: Arc<Core>, codec: C) -> Self {
         Self { core, codec }
+    }
+
+    /// Returns the [`AtomicLong`] stored under `name`.
+    pub fn atomic_long(&self, name: impl Into<Arc<str>>) -> AtomicLong {
+        AtomicLong::new(Key::new(self.core.clone(), name))
     }
 
     /// Returns the [`Bucket`] stored under `name`.
