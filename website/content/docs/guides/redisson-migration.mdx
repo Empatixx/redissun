@@ -1,0 +1,65 @@
+---
+title: Migrating from Redisson
+description: How Redisson names and behaviour map to redgrid.
+---
+
+## Naming
+
+| Redisson | redgrid |
+|---|---|
+| `RBucket` | `Bucket` |
+| `RMap` | `Map` |
+| `RLock` | `Lock` |
+| `redisson.getMap("x")` | `client.map("x")` |
+| `redisson.getLock("x")` | `client.lock("x")` |
+
+## Bucket
+
+| Redisson | redgrid |
+|---|---|
+| `set(v)` | `set(&v)` |
+| `set(v, ttl)` | `set_ex(&v, ttl)` |
+| `get()` | `get()` |
+| `trySet(v)` | `set_nx(&v)` |
+| `getAndSet(v)` | `get_set(&v)` |
+| `getAndDelete()` | `get_del()` |
+| `compareAndSet(e, n)` | `compare_and_set(&e, &n)` |
+
+## Map
+
+| Redisson | redgrid |
+|---|---|
+| `put(k, v)` | `insert(k, v)` |
+| `get(k)` | `get(&k)` |
+| `remove(k)` | `remove(&k)` |
+| `containsKey(k)` | `contains_key(&k)` |
+| `size()` | `len()` |
+| `putAll(m)` | `extend(entries)` |
+| `getAll(keys)` | `get_many(&keys)` |
+| `putIfAbsent(k, v)` | `insert_nx(k, v)` |
+| `addAndGet(k, d)` | `incr_by(&k, d)` or `incr_by_float(&k, d)` |
+| `keySet()`, `values()`, `entrySet()` | `keys()`, `values()`, `iter()` as streams |
+
+`putIfAbsent` returns the existing value in Java. `insert_nx` returns whether the entry was inserted.
+
+## Lock
+
+| Redisson | redgrid |
+|---|---|
+| `lock()` | `lock().await` |
+| `tryLock()` | `try_lock().await` |
+| `tryLock(wait, unit)` | `lock_for(wait).await` |
+| `tryLock(wait, lease, unit)` | `lock_with(LockOptions::new().wait(w).lease(l)).await` |
+| `unlock()` | `guard.unlock().await` |
+| `isLocked()` | `is_locked().await` |
+| `isHeldByCurrentThread()` | `is_held_by_current().await` |
+| `getHoldCount()` | `hold_count().await` |
+| `forceUnlock()` | `force_unlock().await` |
+| `lockWatchdogTimeout` | `Client::builder().lock_lease(..)` |
+
+## Behavioural differences
+
+- The lock owner is a client and a tokio task, not a thread.
+- Unlocking goes through a guard value. Unlocking something you do not hold is `Error::LockNotHeld` instead of an `IllegalMonitorStateException`.
+- Values use a serde codec rather than Redisson's Java codecs, so data written by Redisson is not readable by redgrid and the other way round.
+- Only `Bucket`, `Map` and `Lock` exist in 0.1.

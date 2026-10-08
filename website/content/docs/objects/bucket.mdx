@@ -1,0 +1,43 @@
+---
+title: Bucket
+description: A single value stored under one key.
+---
+
+`Bucket` stores one value as a Redis string.
+
+```rust
+let bucket = client.bucket::<String>("greeting");
+
+bucket.set(&"hello".to_string()).await?;
+let value = bucket.get().await?;
+```
+
+## Methods
+
+| Method | Redis | Returns |
+|---|---|---|
+| `set(&v)` | `SET` | `()` |
+| `get()` | `GET` | `Option<V>` |
+| `set_ex(&v, ttl)` | `SET PX` | `()` |
+| `set_nx(&v)` | `SET NX` | `bool`, true when stored |
+| `get_set(&v)` | `SET GET` | previous `Option<V>` |
+| `get_del()` | `GETDEL` | removed `Option<V>` |
+| `compare_and_set(&expected, &new)` | Lua | `bool`, true when swapped |
+
+`get_set` and `get_del` need Redis 6.2 or newer.
+
+## Operations on the key
+
+`Bucket`, `Map` and `Lock` share the `Object` trait:
+
+| Method | Redis |
+|---|---|
+| `name()` | the key name |
+| `del()` | `DEL` |
+| `exists()` | `EXISTS` |
+| `rename(new_name)` | `RENAME` |
+| `expire(ttl)` | `PEXPIRE` |
+| `ttl()` | `PTTL`, `None` when there is no expiry |
+| `persist()` | `PERSIST` |
+
+Import `redgrid::Object` to call them.

@@ -1,0 +1,48 @@
+---
+title: Quick Start
+description: Connect, store a value, fill a map and take a lock.
+---
+
+```rust
+use redgrid::{Client, Object};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct User {
+    name: String,
+}
+
+#[tokio::main]
+async fn main() -> redgrid::Result<()> {
+    let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
+
+    let motd = client.bucket::<String>("motd");
+    motd.set(&"hello".to_string()).await?;
+
+    let users = client.map::<String, User>("users");
+    users.insert("jirka".into(), User { name: "Jirka".into() }).await?;
+    let found = users.get("jirka").await?;
+
+    let lock = client.lock("order:42");
+    let guard = lock.lock().await?;
+    guard.unlock().await?;
+
+    Ok(())
+}
+```
+
+## Cloning the client
+
+`Client` is cheap to clone and every clone shares the same connection pool. Create it once and pass clones to the tasks that need it.
+
+## Errors
+
+Every fallible call returns `redgrid::Result`. `Error` is non-exhaustive, so match with a wildcard arm.
+
+```rust
+match lock.try_lock().await {
+    Ok(Some(guard)) => guard.unlock().await?,
+    Ok(None) => println!("busy"),
+    Err(error) => return Err(error),
+}
+```

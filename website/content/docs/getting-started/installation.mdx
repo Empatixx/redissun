@@ -1,0 +1,30 @@
+---
+title: Installation
+description: Add redgrid to a Rust project.
+---
+
+```bash
+cargo add redgrid
+cargo add tokio --features full
+cargo add serde --features derive
+```
+
+redgrid needs a running Redis or Valkey server, version 6.2 or newer. To start one locally:
+
+```bash
+docker run --rm -p 6379:6379 redis:7.4
+```
+
+## Running the test suite
+
+The integration tests start Redis through testcontainers. Docker must be reachable; with Colima or another non-default socket, point `DOCKER_HOST` at it:
+
+```bash
+DOCKER_HOST=unix:///path/to/docker.sock cargo test
+```
+
+To run against a server you already have, set `REDGRID_TEST_REDIS_URL`:
+
+```bash
+REDGRID_TEST_REDIS_URL=redis://localhost:6379 cargo test
+```

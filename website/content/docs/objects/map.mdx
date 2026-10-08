@@ -1,0 +1,47 @@
+---
+title: Map
+description: A distributed map with HashMap-style methods.
+---
+
+`Map` stores entries in a Redis hash. Keys and values both go through the codec.
+
+```rust
+let users = client.map::<String, User>("users");
+
+users.insert("jirka".into(), user).await?;
+let found = users.get("jirka").await?;
+```
+
+Lookups take a borrowed key, like `HashMap::get`, so `users.get("jirka")` does not allocate a `String`.
+
+## Methods
+
+| Method | Redis | Notes |
+|---|---|---|
+| `insert(k, v)` | Lua | returns the previous value |
+| `get(&k)` | `HGET` | |
+| `remove(&k)` | Lua | returns the removed value |
+| `contains_key(&k)` | `HEXISTS` | |
+| `len()` / `is_empty()` | `HLEN` | |
+| `clear()` | `DEL` | |
+| `extend(entries)` | `HSET` | one round trip, empty input is a no-op |
+| `get_many(&[&k])` | `HMGET` | order matches the input |
+| `insert_nx(k, v)` | `HSETNX` | true when inserted |
+| `incr_by(&k, delta)` | `HINCRBY` | creates the field at zero |
+| `incr_by_float(&k, delta)` | `HINCRBYFLOAT` | |
+
+`incr_by` and `incr_by_float` need values that the codec writes as plain numbers, which is the case for integers and floats with the default JSON codec.
+
+## Iteration
+
+`iter`, `keys` and `values` return a `Stream` built on `HSCAN`. The hash is read in pages of 100 entries and never loaded at once.
+
+```rust
+use futures::TryStreamExt;
+
+let entries: Vec<(String, User)> = users.iter().try_collect().await?;
+```
+
+## Missing keys and null values
+
+`get` returns `None` for a missing key. When the value type is itself an `Option`, a stored `None` comes back as `Some(None)`, so the two cases stay distinguishable.

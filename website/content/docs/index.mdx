@@ -1,0 +1,30 @@
+---
+title: Introduction
+description: Distributed objects on Redis for Rust, closely inspired by Redisson.
+---
+
+redgrid brings the Redisson programming model to Rust: named objects that live in Redis and behave like their in-process counterparts, shared by every process that connects to the same server.
+
+## What you get
+
+| Object | Redis type | Redisson counterpart |
+|---|---|---|
+| `Bucket` | string | `RBucket` |
+| `Map` | hash | `RMap` |
+| `Lock` | hash and pub/sub | `RLock` |
+
+- Async on tokio, no blocking calls.
+- Values are encoded through a `Codec`; JSON through serde is the default.
+- Everything that must be atomic runs as a Lua script.
+- `Lock` is reentrant, renewed by a watchdog and woken through pub/sub instead of polling.
+- Method names follow `std` and `tokio` where an equivalent exists, and Redis command names otherwise.
+
+## Requirements
+
+Redis or Valkey 6.2 or newer. Connections go through the `fred` client, so standalone, cluster and sentinel deployments are supported by the underlying library.
+
+## Where to go next
+
+- [Installation](/docs/getting-started/installation)
+- [Quick start](/docs/getting-started/quick-start)
+- [Migrating from Redisson](/docs/guides/redisson-migration)

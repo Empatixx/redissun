@@ -1,0 +1,61 @@
+---
+title: Lock
+description: A reentrant distributed lock with a watchdog.
+---
+
+`Lock` is the equivalent of Redisson's `RLock`, shaped like `tokio::sync::Mutex`.
+
+```rust
+let lock = client.lock("order:42");
+
+let guard = lock.lock().await?;
+guard.unlock().await?;
+```
+
+## Acquiring
+
+| Method | Behaviour |
+|---|---|
+| `lock()` | waits until the lock is free |
+| `try_lock()` | returns `None` at once when the lock is taken |
+| `lock_for(wait)` | returns `None` when `wait` runs out |
+| `lock_with(options)` | full control through `LockOptions` |
+
+```rust
+use redgrid::LockOptions;
+use std::time::Duration;
+
+let options = LockOptions::new().wait(Duration::from_secs(2)).lease(Duration::from_secs(10));
+let guard = lock.lock_with(options).await?;
+```
+
+## Releasing
+
+Call `guard.unlock().await` to release deterministically and to see errors. Unlocking a lock whose lease already expired returns `Error::LockNotHeld`.
+
+Dropping the guard also releases the lock, in a background task on the runtime that created it. Prefer the explicit call.
+
+## Reentrancy
+
+The same owner can take the lock repeatedly; each acquisition needs its own unlock. `hold_count()` shows how many are outstanding.
+
+An owner is a client plus a tokio task, which replaces the thread id used in Java. Two tasks that share a `Client` are different owners and exclude each other.
+
+## Lease and watchdog
+
+Without an explicit lease the lock lives for the client's `lock_lease` (30 seconds by default, set through `Client::builder().lock_lease(..)`) and a watchdog renews it every third of that period while the guard is alive. A process that crashes stops renewing, and the lock frees itself when the lease runs out.
+
+With an explicit `lease` there is no watchdog and the lock expires when the lease does.
+
+## Waiting without polling
+
+Waiters subscribe to a pub/sub channel and wake as soon as the holder unlocks. If a notification is missed, the waiter wakes when the current lease would expire.
+
+## Inspection
+
+| Method | Meaning |
+|---|---|
+| `is_locked()` | any owner holds it |
+| `is_held_by_current()` | the calling task holds it |
+| `hold_count()` | reentrant count for the calling task |
+| `force_unlock()` | releases it regardless of the owner |
