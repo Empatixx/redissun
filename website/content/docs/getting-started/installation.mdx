@@ -1,29 +1,32 @@
 ---
 title: Installation
-description: Add redgrid to a Rust project.
+description: Add redgrid to your project.
 ---
 
-```bash
-cargo add redgrid
-cargo add tokio --features full
-cargo add serde --features derive
+redgrid is not on crates.io yet. Add it from Git:
+
+```toml
+[dependencies]
+redgrid = { git = "https://github.com/Empatixx/redgrid" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
 ```
 
-redgrid needs a running Redis or Valkey server, version 6.2 or newer. To start one locally:
+You also need a Redis server, version 6.2 or newer. To start one with Docker:
 
 ```bash
 docker run --rm -p 6379:6379 redis:7.4
 ```
 
-## Running the test suite
+## Run the tests
 
-The integration tests start Redis through testcontainers. Docker must be reachable; with Colima or another non-default socket, point `DOCKER_HOST` at it:
+The tests start Redis with Docker. Docker must be running. If you use Colima, point `DOCKER_HOST` to its socket:
 
 ```bash
 DOCKER_HOST=unix:///path/to/docker.sock cargo test
 ```
 
-To run against a server you already have, set `REDGRID_TEST_REDIS_URL`:
+To use a Redis server that already runs, set `REDGRID_TEST_REDIS_URL`:
 
 ```bash
 REDGRID_TEST_REDIS_URL=redis://localhost:6379 cargo test

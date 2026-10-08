@@ -1,9 +1,9 @@
 ---
 title: Lock
-description: A reentrant distributed lock with a watchdog.
+description: A shared lock that its owner can take again.
 ---
 
-`Lock` is the equivalent of Redisson's `RLock`, shaped like `tokio::sync::Mutex`.
+`Lock` is like Redisson's `RLock`. Its methods are like `tokio::sync::Mutex`.
 
 ```rust
 let lock = client.lock("order:42");
@@ -12,14 +12,14 @@ let guard = lock.lock().await?;
 guard.unlock().await?;
 ```
 
-## Acquiring
+## Taking the lock
 
-| Method | Behaviour |
+| Method | What it does |
 |---|---|
 | `lock()` | waits until the lock is free |
-| `try_lock()` | returns `None` at once when the lock is taken |
-| `lock_for(wait)` | returns `None` when `wait` runs out |
-| `lock_with(options)` | full control through `LockOptions` |
+| `try_lock()` | returns `None` at once if the lock is taken |
+| `lock_for(wait)` | returns `None` if `wait` runs out |
+| `lock_with(options)` | lets you set both wait time and lease |
 
 ```rust
 use redgrid::LockOptions;
@@ -29,39 +29,41 @@ let options = LockOptions::new().wait(Duration::from_secs(2)).lease(Duration::fr
 let guard = lock.lock_with(options).await?;
 ```
 
-## Releasing
+A lease must be longer than zero. Very small leases are rounded up to one millisecond.
 
-Call `guard.unlock().await` to release deterministically and to see errors. Unlocking a lock whose lease already expired returns `Error::LockNotHeld`.
+## Releasing the lock
 
-Dropping the guard also releases the lock, in a background task on the runtime that created it. Prefer the explicit call.
+Call `guard.unlock().await`. You get the result, and you see errors. If the lease already ended, you get `Error::LockNotHeld`.
 
-## Reentrancy
+If you drop the guard, the lock is also released in the background. The explicit call is better.
 
-The same owner can take the lock repeatedly; each acquisition needs its own unlock. `hold_count()` shows how many are outstanding.
+## Taking the lock again
 
-An owner is a client plus a tokio task, which replaces the thread id used in Java. Two tasks that share a `Client` are different owners and exclude each other.
+The owner can take the lock many times. Each `lock` needs its own `unlock`. `hold_count()` shows how many are open.
 
-An owner is only distinguished when code runs inside a spawned task. Code outside any task (the body of `#[tokio::main]`, `block_on`, `spawn_blocking`) shares one owner per client, and futures joined with `join!` inside one task share that task's owner, so neither case excludes the others. Give concurrent work its own `tokio::spawn`.
+The owner is the client plus the current tokio task. Two tasks that share one `Client` are two different owners, and they block each other.
 
-## Cancellation
+Code outside any spawned task (the body of `#[tokio::main]`, `block_on`, `spawn_blocking`) shares one owner per client. Futures joined with `join!` inside one task also share that task's owner. In these cases the lock does not block. If you need real blocking, give each piece of work its own `tokio::spawn`.
 
-Dropping a pending `lock()` future, for example through `tokio::time::timeout`, can leave the lock held until its lease expires if the server had already granted it. Use `lock_for(wait)` for bounded waiting.
+## Cancelling a wait
+
+If you drop a `lock()` future that is still waiting, for example with `tokio::time::timeout`, the lock can stay taken until its lease ends. This happens only if the server had already given you the lock. For a time limit, use `lock_for(wait)`.
 
 ## Lease and watchdog
 
-Without an explicit lease the lock lives for the client's `lock_lease` (30 seconds by default, set through `Client::builder().lock_lease(..)`) and a watchdog renews it every third of that period while the guard is alive. A process that crashes stops renewing, and the lock frees itself when the lease runs out.
+If you give no lease, the lock uses the client's `lock_lease` (30 seconds by default). While you hold the guard, a watchdog renews the lease every third of that time. If your program crashes, the renewing stops and the lock frees itself.
 
-With an explicit `lease` there is no watchdog and the lock expires when the lease does.
+If you give a lease, there is no watchdog. The lock ends when the lease ends.
 
 ## Waiting without polling
 
-Waiters subscribe to a pub/sub channel and wake as soon as the holder unlocks. If a notification is missed, the waiter wakes when the current lease would expire.
+Waiting programs listen on a Redis channel. They wake up as soon as the lock is released. If a message is lost, they wake up when the current lease would end.
 
-## Inspection
+## Questions about the lock
 
 | Method | Meaning |
 |---|---|
-| `is_locked()` | any owner holds it |
-| `is_held_by_current()` | the calling task holds it |
-| `hold_count()` | reentrant count for the calling task |
-| `force_unlock()` | releases it regardless of the owner |
+| `is_locked()` | someone holds the lock |
+| `is_held_by_current()` | the current task holds the lock |
+| `hold_count()` | how many times the current task took it |
+| `force_unlock()` | releases the lock, whoever owns it |

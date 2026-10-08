@@ -1,12 +1,22 @@
 # redgrid
 
-Distributed objects on Redis for Rust, closely inspired by [Redisson](https://github.com/redisson/redisson).
+Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.com/redisson/redisson).
 
-[![crates.io](https://img.shields.io/crates/v/redgrid.svg)](https://crates.io/crates/redgrid)
-[![docs.rs](https://img.shields.io/docsrs/redgrid)](https://docs.rs/redgrid)
+[![CI](https://github.com/Empatixx/redgrid/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redgrid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Named objects that live in Redis and behave like their in-process counterparts, shared by every process that connects to the same server. Async on tokio, values through serde, atomic operations through Lua.
+With redgrid you use a `Map`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
+
+## Install
+
+redgrid is not on crates.io yet. Use it from Git:
+
+```toml
+[dependencies]
+redgrid = { git = "https://github.com/Empatixx/redgrid" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+```
 
 ## Quick start
 
@@ -29,31 +39,96 @@ async fn main() -> redgrid::Result<()> {
 }
 ```
 
+`Client` is cheap to clone. All clones share the same connections.
+
 ## Objects
 
-| redgrid | Redisson | Redis type | Since |
-|---|---|---|---|
-| `Bucket` | `RBucket` | string | 0.1 |
-| `Map` | `RMap` | hash | 0.1 |
-| `Lock` | `RLock` | hash and pub/sub | 0.1 |
+| redgrid | Redisson | Stored in Redis as |
+|---|---|---|
+| `Bucket` | `RBucket` | string |
+| `Map` | `RMap` | hash |
+| `Lock` | `RLock` | hash and pub/sub |
 
-More objects (`List`, `Set`, `AtomicLong`, `Topic`, `Semaphore`, `RateLimiter`, `MapCache`) ship one per release.
+### Bucket
 
-## Design
+One value under one key.
 
-- Method names follow `std` and `tokio` where an equivalent exists (`insert`, `get`, `len`, `lock`, `try_lock`) and Redis command names otherwise (`set_nx`, `incr_by`, `expire`, `ttl`).
-- `Lock` is reentrant, kept alive by a watchdog, and wakes waiters through pub/sub instead of polling.
-- The Redis client is an implementation detail; no `fred` type appears in the public API.
+```rust
+let bucket = client.bucket::<String>("greeting");
+bucket.set(&"hello".to_string()).await?;
+let value = bucket.get().await?;
+```
+
+Other methods: `set_ex` (with a time limit), `set_nx` (only if empty), `get_set`, `get_del`, `compare_and_set`.
+
+### Map
+
+Works like a `HashMap`. The names are the same: `insert`, `get`, `remove`, `contains_key`, `len`, `is_empty`, `clear`.
+
+```rust
+let users = client.map::<String, User>("users");
+users.insert("jirka".into(), user).await?;
+let found = users.get("jirka").await?;
+```
+
+More methods: `extend`, `get_many`, `insert_nx`, `incr_by`, `incr_by_float`. To read all entries use `iter`, `keys` or `values`. They return a `Stream` and read the map in small pages.
+
+### Lock
+
+A lock that many programs can share. The same owner can take it again (it is reentrant). It is like `tokio::sync::Mutex`.
+
+```rust
+let guard = client.lock("order:42").lock().await?;
+guard.unlock().await?;
+```
+
+- `lock()` waits for the lock.
+- `try_lock()` gives up at once if the lock is taken.
+- `lock_for(wait)` gives up after `wait`.
+- `lock_with(options)` lets you choose both wait time and lease.
+
+A lock has a lease. A watchdog renews it while you hold the lock. If your program crashes, the lock frees itself when the lease ends. Waiting programs wake up as soon as the lock is released. They do not poll.
+
+### Common methods
+
+`Bucket`, `Map` and `Lock` all have the `Object` methods: `name`, `del`, `exists`, `rename`, `expire`, `ttl`, `persist`. Add `use redgrid::Object;` to call them.
+
+## Settings
+
+```rust
+let client = Client::builder()
+    .url("redis://127.0.0.1:6379")
+    .pool_size(8)
+    .lock_lease(Duration::from_secs(30))
+    .connect_timeout(Duration::from_secs(10))
+    .build()
+    .await?;
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `url` | none, required | Redis address |
+| `pool_size` | 4 | number of connections |
+| `lock_lease` | 30 s | lease for locks without their own lease |
+| `connect_timeout` | 10 s | how long `build` waits for the first connection |
+| `codec` | JSON | how values are turned into bytes |
+
+The client reconnects by itself after a lost connection. When the last clone of the client is dropped, its connections are closed.
+
+## Errors
+
+Every call returns `redgrid::Result`. The error is `redgrid::Error`. It can grow in future versions, so add a `_` case when you match it.
 
 ## Requirements
 
-Redis or Valkey 6.2 or newer.
+- Redis or Valkey 6.2 or newer.
+- Rust 2021 edition.
 
 ## Documentation
 
-- Guides and migration table from Redisson: the `website/` directory, published with GitHub Pages.
-- API reference: [docs.rs/redgrid](https://docs.rs/redgrid).
-- Examples: [`examples/`](examples).
+- Guides: the `website/` folder (run `cd website && npm install && npm run dev`).
+- Examples: the [`examples/`](examples) folder.
+- Coming from Redisson? See the migration page in the guides.
 
 ## Development
 
@@ -63,8 +138,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests start Redis through testcontainers, so Docker must be reachable (set `DOCKER_HOST` for Colima). To use a server you already run, set `REDGRID_TEST_REDIS_URL=redis://localhost:6379`.
+The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, set `REDGRID_TEST_REDIS_URL=redis://localhost:6379`.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

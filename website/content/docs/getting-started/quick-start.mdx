@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Connect, store a value, fill a map and take a lock.
+description: Connect, store a value, use a map and take a lock.
 ---
 
 ```rust
@@ -31,13 +31,15 @@ async fn main() -> redgrid::Result<()> {
 }
 ```
 
-## Cloning the client
+## One client for the whole program
 
-`Client` is cheap to clone and every clone shares the same connection pool. Create it once and pass clones to the tasks that need it.
+`Client` is cheap to clone. All clones share the same connections. Create it once and give clones to your tasks.
+
+The client reconnects by itself if the connection is lost. When the last clone is dropped, the connections are closed.
 
 ## Errors
 
-Every fallible call returns `redgrid::Result`. `Error` is non-exhaustive, so match with a wildcard arm.
+Every call returns `redgrid::Result`. `Error` can get new cases in future versions, so always add a `_` case when you match it.
 
 ```rust
 match lock.try_lock().await {
