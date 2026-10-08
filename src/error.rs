@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Errors returned by redgrid operations.
+/// Errors returned by redissun operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -21,7 +21,7 @@ pub enum Error {
     Timeout,
 }
 
-/// Result alias used by every fallible redgrid call.
+/// Result alias used by every fallible redissun call.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<fred::error::Error> for Error {

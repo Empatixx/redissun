@@ -4,7 +4,7 @@ const withMDX = createMDX()
 
 const config = {
   output: 'export',
-  basePath: '/redgrid',
+  basePath: '/redissun',
   images: { unoptimized: true },
 }
 

@@ -1,11 +1,11 @@
 ---
 title: Migrating from Redisson
-description: How Redisson names and behaviour map to redgrid.
+description: How Redisson names and behaviour map to redissun.
 ---
 
 ## Naming
 
-| Redisson | redgrid |
+| Redisson | redissun |
 |---|---|
 | `RBucket` | `Bucket` |
 | `RMap` | `Map` |
@@ -15,7 +15,7 @@ description: How Redisson names and behaviour map to redgrid.
 
 ## Bucket
 
-| Redisson | redgrid |
+| Redisson | redissun |
 |---|---|
 | `set(v)` | `set(&v)` |
 | `set(v, ttl)` | `set_ex(&v, ttl)` |
@@ -27,7 +27,7 @@ description: How Redisson names and behaviour map to redgrid.
 
 ## Map
 
-| Redisson | redgrid |
+| Redisson | redissun |
 |---|---|
 | `put(k, v)` | `insert(k, v)` |
 | `get(k)` | `get(&k)` |
@@ -44,7 +44,7 @@ description: How Redisson names and behaviour map to redgrid.
 
 ## Lock
 
-| Redisson | redgrid |
+| Redisson | redissun |
 |---|---|
 | `lock()` | `lock().await` |
 | `tryLock()` | `try_lock().await` |
@@ -61,5 +61,5 @@ description: How Redisson names and behaviour map to redgrid.
 
 - The lock owner is a client and a tokio task, not a thread.
 - Unlocking goes through a guard value. Unlocking something you do not hold is `Error::LockNotHeld` instead of an `IllegalMonitorStateException`.
-- Values use a serde codec rather than Redisson's Java codecs, so data written by Redisson is not readable by redgrid and the other way round.
+- Values use a serde codec rather than Redisson's Java codecs, so data written by Redisson is not readable by redissun and the other way round.
 - Only `Bucket`, `Map` and `Lock` exist in 0.1.

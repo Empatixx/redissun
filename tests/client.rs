@@ -1,7 +1,7 @@
 mod common;
 
 use common::redis_url;
-use redgrid::{Client, Error};
+use redissun::{Client, Error};
 use std::time::Duration;
 
 #[tokio::test]

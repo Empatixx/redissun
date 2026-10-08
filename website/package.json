@@ -1,5 +1,5 @@
 {
-  "name": "redgrid-website",
+  "name": "redissun-website",
   "private": true,
   "scripts": {
     "dev": "next dev",

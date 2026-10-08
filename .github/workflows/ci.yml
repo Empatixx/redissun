@@ -23,7 +23,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
-      REDGRID_TEST_REDIS_URL: redis://127.0.0.1:6379
+      REDISSUN_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

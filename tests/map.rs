@@ -2,7 +2,7 @@ mod common;
 
 use common::{client, unique};
 use futures::TryStreamExt;
-use redgrid::Object;
+use redissun::Object;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

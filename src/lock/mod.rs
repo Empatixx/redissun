@@ -69,7 +69,7 @@ static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
 });
 
 fn channel(name: &str) -> String {
-    format!("redgrid__unlock__{name}")
+    format!("redissun__unlock__{name}")
 }
 
 fn lease_arg(duration: Duration) -> Result<Bytes> {

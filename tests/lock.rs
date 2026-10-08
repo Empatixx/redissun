@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, connect_with, unique};
-use redgrid::{Client, Error, LockOptions};
+use redissun::{Client, Error, LockOptions};
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 

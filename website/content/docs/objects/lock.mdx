@@ -22,7 +22,7 @@ guard.unlock().await?;
 | `lock_with(options)` | lets you set both wait time and lease |
 
 ```rust
-use redgrid::LockOptions;
+use redissun::LockOptions;
 use std::time::Duration;
 
 let options = LockOptions::new().wait(Duration::from_secs(2)).lease(Duration::from_secs(10));

@@ -1,19 +1,19 @@
-# redgrid
+# redissun
 
 Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.com/redisson/redisson).
 
-[![CI](https://github.com/Empatixx/redgrid/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redgrid/actions/workflows/ci.yml)
+[![CI](https://github.com/Empatixx/redissun/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redissun/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-With redgrid you use a `Map`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
+With redissun you use a `Map`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
 
 ## Install
 
-redgrid is not on crates.io yet. Use it from Git:
+redissun is not on crates.io yet. Use it from Git:
 
 ```toml
 [dependencies]
-redgrid = { git = "https://github.com/Empatixx/redgrid" }
+redissun = { git = "https://github.com/Empatixx/redissun" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -21,10 +21,10 @@ serde = { version = "1", features = ["derive"] }
 ## Quick start
 
 ```rust
-use redgrid::Client;
+use redissun::Client;
 
 #[tokio::main]
-async fn main() -> redgrid::Result<()> {
+async fn main() -> redissun::Result<()> {
     let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
 
     let users = client.map::<String, String>("users");
@@ -43,7 +43,7 @@ async fn main() -> redgrid::Result<()> {
 
 ## Objects
 
-| redgrid | Redisson | Stored in Redis as |
+| redissun | Redisson | Stored in Redis as |
 |---|---|---|
 | `Bucket` | `RBucket` | string |
 | `Map` | `RMap` | hash |
@@ -91,7 +91,7 @@ A lock has a lease. A watchdog renews it while you hold the lock. If your progra
 
 ### Common methods
 
-`Bucket`, `Map` and `Lock` all have the `Object` methods: `name`, `del`, `exists`, `rename`, `expire`, `ttl`, `persist`. Add `use redgrid::Object;` to call them.
+`Bucket`, `Map` and `Lock` all have the `Object` methods: `name`, `del`, `exists`, `rename`, `expire`, `ttl`, `persist`. Add `use redissun::Object;` to call them.
 
 ## Settings
 
@@ -117,7 +117,7 @@ The client reconnects by itself after a lost connection. When the last clone of 
 
 ## Errors
 
-Every call returns `redgrid::Result`. The error is `redgrid::Error`. It can grow in future versions, so add a `_` case when you match it.
+Every call returns `redissun::Result`. The error is `redissun::Error`. It can grow in future versions, so add a `_` case when you match it.
 
 ## Requirements
 
@@ -138,7 +138,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, set `REDGRID_TEST_REDIS_URL=redis://localhost:6379`.
+The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
 
 ## License
 

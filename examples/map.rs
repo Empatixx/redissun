@@ -1,5 +1,5 @@
 use futures::TryStreamExt;
-use redgrid::Client;
+use redissun::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -9,7 +9,7 @@ struct User {
 }
 
 #[tokio::main]
-async fn main() -> redgrid::Result<()> {
+async fn main() -> redissun::Result<()> {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
     let client = Client::builder().url(url).build().await?;
 

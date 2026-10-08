@@ -8,8 +8,8 @@ const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
   title: {
-    template: '%s | redgrid',
-    default: 'redgrid — distributed objects on Redis for Rust',
+    template: '%s | redissun',
+    default: 'redissun — distributed objects on Redis for Rust',
   },
   description:
     'Redisson-inspired distributed Map, Bucket and reentrant Lock with watchdog for Rust, on tokio and serde.',
@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning className={inter.className}>
       <body className="overflow-x-hidden">
-        <RootProvider search={{ options: { type: 'static', api: '/redgrid/api/search' } }}>
+        <RootProvider search={{ options: { type: 'static', api: '/redissun/api/search' } }}>
           {children}
         </RootProvider>
       </body>

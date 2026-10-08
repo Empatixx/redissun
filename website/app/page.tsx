@@ -10,7 +10,7 @@ export default function Home() {
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-10 px-4 py-16">
       <header className="flex flex-col gap-4">
-        <h1 className="text-5xl font-bold tracking-tight">redgrid</h1>
+        <h1 className="text-5xl font-bold tracking-tight">redissun</h1>
         <p className="text-lg text-fd-muted-foreground">
           Distributed objects on Redis for Rust, closely inspired by Redisson. Async on tokio,
           serde codecs, atomic operations through Lua.

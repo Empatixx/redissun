@@ -1,9 +1,9 @@
 //! Distributed objects on Redis, inspired by Redisson.
 //!
 //! ```no_run
-//! use redgrid::Client;
+//! use redissun::Client;
 //!
-//! # async fn run() -> redgrid::Result<()> {
+//! # async fn run() -> redissun::Result<()> {
 //! let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
 //!
 //! let users = client.map::<String, String>("users");

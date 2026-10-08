@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use redgrid::{Client, ClientBuilder};
+use redissun::{Client, ClientBuilder};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ImageExt};
@@ -13,7 +13,7 @@ use uuid::Uuid;
 static CONTAINER: OnceCell<(ContainerAsync<Redis>, String)> = OnceCell::const_new();
 
 pub async fn redis_url() -> String {
-    if let Ok(url) = std::env::var("REDGRID_TEST_REDIS_URL") {
+    if let Ok(url) = std::env::var("REDISSUN_TEST_REDIS_URL") {
         return url;
     }
     CONTAINER

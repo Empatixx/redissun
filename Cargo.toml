@@ -1,12 +1,13 @@
 [package]
-name = "redgrid"
+name = "redissun"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Empatixx/redgrid"
+repository = "https://github.com/Empatixx/redissun"
 description = "Distributed objects on Redis for Rust, inspired by Redisson: Map, Bucket, reentrant Lock with watchdog"
 readme = "README.md"
-keywords = ["redis", "distributed", "lock", "redisson", "async"]
+exclude = ["website/", "docs/", ".github/"]
+keywords = ["redis", "distributed-lock", "redisson", "tokio", "async"]
 categories = ["asynchronous", "concurrency", "database"]
 
 [dependencies]

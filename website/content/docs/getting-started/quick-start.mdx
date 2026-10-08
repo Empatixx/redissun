@@ -4,7 +4,7 @@ description: Connect, store a value, use a map and take a lock.
 ---
 
 ```rust
-use redgrid::{Client, Object};
+use redissun::{Client, Object};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -13,7 +13,7 @@ struct User {
 }
 
 #[tokio::main]
-async fn main() -> redgrid::Result<()> {
+async fn main() -> redissun::Result<()> {
     let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
 
     let motd = client.bucket::<String>("motd");
@@ -39,7 +39,7 @@ The client reconnects by itself if the connection is lost. When the last clone i
 
 ## Errors
 
-Every call returns `redgrid::Result`. `Error` can get new cases in future versions, so always add a `_` case when you match it.
+Every call returns `redissun::Result`. `Error` can get new cases in future versions, so always add a `_` case when you match it.
 
 ```rust
 match lock.try_lock().await {

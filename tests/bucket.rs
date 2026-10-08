@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, unique};
-use redgrid::{Error, Object};
+use redissun::{Error, Object};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

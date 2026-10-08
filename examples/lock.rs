@@ -1,8 +1,8 @@
-use redgrid::Client;
+use redissun::Client;
 use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> redgrid::Result<()> {
+async fn main() -> redissun::Result<()> {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
     let client = Client::builder().url(url).build().await?;
 
