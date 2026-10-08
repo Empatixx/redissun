@@ -2,9 +2,10 @@ use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool};
-use fred::interfaces::ClientLike;
+use fred::interfaces::{ClientInterface, ClientLike};
 use fred::prelude::{Builder, Config, FromValue, ReconnectPolicy};
 use fred::types::scripts::Script;
+use fred::types::ClientUnblockFlag;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -55,6 +56,17 @@ impl Core {
         self.pool.next()
     }
 
+    pub(crate) async fn blocking_client(&self) -> Result<BlockingClient> {
+        let client = self.redis().clone_new();
+        client.init().await?;
+        let id: i64 = client.client_id().await?;
+        Ok(BlockingClient {
+            client,
+            admin: self.redis().clone(),
+            id,
+        })
+    }
+
     pub(crate) fn client_id(&self) -> &str {
         &self.id
     }
@@ -73,6 +85,36 @@ impl Core {
         args: Vec<Bytes>,
     ) -> Result<R> {
         Ok(script.evalsha_with_reload(self.redis(), keys, args).await?)
+    }
+}
+
+pub(crate) struct BlockingClient {
+    client: RedisClient,
+    admin: RedisClient,
+    id: i64,
+}
+
+impl std::ops::Deref for BlockingClient {
+    type Target = RedisClient;
+
+    fn deref(&self) -> &RedisClient {
+        &self.client
+    }
+}
+
+impl Drop for BlockingClient {
+    fn drop(&mut self) {
+        if let Ok(runtime) = Handle::try_current() {
+            let client = self.client.clone();
+            let admin = self.admin.clone();
+            let id = self.id;
+            runtime.spawn(async move {
+                let _ = admin
+                    .client_unblock::<i64, _>(id, Some(ClientUnblockFlag::Error))
+                    .await;
+                let _ = client.quit().await;
+            });
+        }
     }
 }
 

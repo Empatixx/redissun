@@ -1,5 +1,5 @@
 use crate::codec::Codec;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::list;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
@@ -10,6 +10,7 @@ use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
+use std::time::Duration;
 
 /// A distributed double-ended queue stored in a Redis list.
 pub struct VecDeque<V, C: Codec> {
@@ -107,6 +108,58 @@ where
             .lpop(self.key.redis_key(), None)
             .await?;
         self.decode(raw)
+    }
+
+    /// Removes and returns the front value, waiting up to `timeout` for one to arrive (`BLPOP`).
+    /// Use this instead of `tokio::time::timeout`: dropping a pending pop can lose an element that Redis has just handed over.
+    pub async fn pop_front_for(&self, timeout: Duration) -> Result<Option<V>> {
+        self.pop_blocking(true, Some(timeout)).await
+    }
+
+    /// Removes and returns the back value, waiting up to `timeout` for one to arrive (`BRPOP`).
+    pub async fn pop_back_for(&self, timeout: Duration) -> Result<Option<V>> {
+        self.pop_blocking(false, Some(timeout)).await
+    }
+
+    /// Removes and returns the front value, waiting for one to arrive without a time limit.
+    pub async fn pop_front_wait(&self) -> Result<V> {
+        self.pop_blocking(true, None).await?.ok_or(Error::Timeout)
+    }
+
+    /// Removes and returns the back value, waiting for one to arrive without a time limit.
+    pub async fn pop_back_wait(&self) -> Result<V> {
+        self.pop_blocking(false, None).await?.ok_or(Error::Timeout)
+    }
+
+    async fn pop_blocking(&self, front: bool, timeout: Option<Duration>) -> Result<Option<V>> {
+        let seconds = match timeout {
+            Some(timeout) if timeout.is_zero() => {
+                return Err(Error::Config("timeout must be positive".into()));
+            }
+            Some(timeout) => timeout.as_secs_f64(),
+            None => 0.0,
+        };
+        let immediate = if front {
+            self.pop_front().await?
+        } else {
+            self.pop_back().await?
+        };
+        if immediate.is_some() {
+            return Ok(immediate);
+        }
+        let connection = self.key.core.blocking_client().await?;
+        let reply: std::result::Result<Option<(String, Bytes)>, fred::error::Error> = if front {
+            connection.blpop(self.key.redis_key(), seconds).await
+        } else {
+            connection.brpop(self.key.redis_key(), seconds).await
+        };
+        match reply {
+            Ok(reply) => reply
+                .map(|(_, bytes)| self.codec.decode(&bytes))
+                .transpose(),
+            Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Returns the value at the front without removing it.
