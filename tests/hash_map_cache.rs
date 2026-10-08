@@ -237,3 +237,20 @@ async fn debug_shows_the_name() {
         .hash_map_cache::<String, String>(name.clone());
     assert!(format!("{cache:?}").contains(&name));
 }
+
+#[tokio::test]
+async fn insert_nx_does_not_inherit_a_stale_expiry() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    raw_command(&[
+        "ZADD",
+        &format!("{{{name}}}:expires"),
+        "99999999999999",
+        "\"k\"",
+    ])
+    .await;
+    assert!(cache.insert_nx("k", "v").await.unwrap());
+    assert_eq!(cache.entry_ttl("k").await.unwrap(), None);
+}

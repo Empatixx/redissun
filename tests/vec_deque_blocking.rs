@@ -129,3 +129,15 @@ async fn dropping_a_pending_pop_does_not_break_the_next_one() {
     sleep(Duration::from_millis(200)).await;
     assert_eq!(deque.pop_front().await.unwrap(), Some("x".to_string()));
 }
+
+#[tokio::test]
+async fn a_pop_dropped_right_after_it_starts_leaves_no_ghost_consumer() {
+    let deque = client().await.vec_deque::<String>(unique("deque"));
+    for micros in [0u64, 100, 300, 600, 1000, 2000, 4000, 8000, 15000] {
+        let _ = tokio::time::timeout(Duration::from_micros(micros), deque.pop_front_wait()).await;
+    }
+    sleep(Duration::from_millis(500)).await;
+    deque.push_back("x").await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(deque.pop_front().await.unwrap(), Some("x".to_string()));
+}

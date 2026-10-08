@@ -68,6 +68,8 @@ static INSERT_NX: LazyLock<Script> = LazyLock::new(|| {
         local ttl = tonumber(ARGV[3])
         if ttl > 0 then
             redis.call('ZADD', KEYS[2], now + ttl, ARGV[1])
+        else
+            redis.call('ZREM', KEYS[2], ARGV[1])
         end
         return 1",
     )
@@ -124,7 +126,7 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
 
 /// A distributed map where each entry can have its own time to live, as in Redisson's `RMapCache`.
 ///
-/// Time is taken from the Redis server. Expiry is lazy: every operation hides and deletes the expired entries it touches, but an entry nobody touches stays in Redis until [`HashMapCache::evict_expired`], [`HashMapCache::len`], [`HashMapCache::iter`] or [`HashMapCache::clear`] runs.
+/// Time is taken from the Redis server. Expiry is lazy: every operation hides and deletes the expired entries it touches, but an entry nobody touches stays in Redis until [`HashMapCache::evict_expired`], [`HashMapCache::iter`] or [`HashMapCache::clear`] runs. [`HashMapCache::len`] counts only live entries but does not delete the expired ones.
 ///
 /// The data lives in the hash `{name}` and the expiry times in the sorted set `{name}:expires`. The name gets a hash tag, so both keys are in one slot in Redis Cluster.
 pub struct HashMapCache<K, V, C: Codec> {

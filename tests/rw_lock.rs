@@ -217,3 +217,15 @@ async fn debug_shows_the_name() {
     let name = unique("rw");
     assert!(format!("{:?}", lock_of(&client, &name)).contains(&name));
 }
+
+#[tokio::test]
+async fn the_readers_set_gets_an_expiry() {
+    let client = client().await;
+    let name = unique("rw");
+    let lock = lock_of(&client, &name);
+    let read = lock.read().await.unwrap();
+    let ttl = common::raw_command(&["PTTL", &format!("{{{name}}}:readers")]).await;
+    let ttl: i64 = ttl.trim().trim_start_matches(':').parse().unwrap();
+    assert!(ttl > 0, "{ttl}");
+    read.unlock().await.unwrap();
+}

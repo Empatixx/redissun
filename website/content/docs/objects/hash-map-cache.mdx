@@ -23,7 +23,7 @@ let found = sessions.get("abc").await?;
 | `insert_nx(&k, &v)` | inserts only when there is no live entry |
 | `get(&k)`, `remove(&k)`, `contains_key(&k)` | never show an expired entry |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
-| `len()`, `is_empty()`, `clear()` | `len` counts live entries only |
+| `len()`, `is_empty()`, `clear()` | `len` counts live entries only and deletes nothing |
 | `iter()`, `keys()`, `values()` | streams of live entries. They are `async` because they delete expired entries first. |
 | `evict_expired()` | deletes expired entries now and returns how many |
 
@@ -31,7 +31,7 @@ let found = sessions.get("abc").await?;
 
 - Time comes from the Redis server, so programs with different clocks agree.
 - Expiry is lazy. Every call hides and deletes the expired entries it touches.
-- There is no background task. An entry that nobody touches stays in Redis until `evict_expired`, `len`, `iter` or `clear` runs. Call `evict_expired` from a timer if you need memory back sooner.
+- There is no background task. An entry that nobody touches stays in Redis until `evict_expired`, `iter` or `clear` runs. `len` counts only live entries but does not delete the expired ones. Call `evict_expired` from a timer if you need memory back sooner.
 
 ## Object methods
 

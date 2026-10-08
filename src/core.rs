@@ -4,8 +4,8 @@ use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool};
 use fred::interfaces::{ClientInterface, ClientLike};
 use fred::prelude::{Builder, Config, FromValue, ReconnectPolicy};
+use fred::types::client::ClientKillFilter;
 use fred::types::scripts::Script;
-use fred::types::ClientUnblockFlag;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -28,6 +28,9 @@ impl Core {
         let config = Config::from_url(url).map_err(|e| Error::Config(e.to_string()))?;
         let mut builder = Builder::from_config(config);
         builder.set_policy(ReconnectPolicy::new_exponential(0, 100, 30_000, 2));
+        builder.with_performance_config(|performance| {
+            performance.broadcast_channel_capacity = 4096;
+        });
         let pool = builder
             .build_pool(pool_size)
             .map_err(|e| Error::Config(e.to_string()))?;
@@ -59,7 +62,13 @@ impl Core {
     pub(crate) async fn blocking_client(&self) -> Result<BlockingClient> {
         let client = self.redis().clone_new();
         client.init().await?;
-        let id: i64 = client.client_id().await?;
+        let id: i64 = match client.client_id().await {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = client.quit().await;
+                return Err(error.into());
+            }
+        };
         Ok(BlockingClient {
             client,
             admin: self.redis().clone(),
@@ -110,7 +119,7 @@ impl Drop for BlockingClient {
             let id = self.id;
             runtime.spawn(async move {
                 let _ = admin
-                    .client_unblock::<i64, _>(id, Some(ClientUnblockFlag::Error))
+                    .client_kill::<i64>(vec![ClientKillFilter::ID(id.to_string())])
                     .await;
                 let _ = client.quit().await;
             });

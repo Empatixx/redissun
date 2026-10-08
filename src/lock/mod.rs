@@ -78,6 +78,9 @@ static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
         redis.call('INCR', KEYS[3])
         redis.call('PEXPIRE', KEYS[3], ARGV[1])
         redis.call('SADD', KEYS[2], ARGV[2])
+        if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[1]) then
+            redis.call('PEXPIRE', KEYS[2], ARGV[1])
+        end
         return nil",
     )
 });
