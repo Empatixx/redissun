@@ -1,11 +1,11 @@
 use crate::codec::Codec;
+use crate::core::Core;
 use crate::error::Result;
-use crate::hash_map::HashMap;
 use crate::object::{millis, HasKey, Key};
 use bytes::Bytes;
+use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
-use futures::Stream;
-use futures::StreamExt;
+use futures::{stream, Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -13,21 +13,59 @@ use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
+use tokio::runtime::Handle;
 
-const EVICT_BATCH: usize = 1000;
+const EVICT_BATCH: usize = 100;
+const MAX_EVICT_PAUSE: Duration = Duration::from_secs(2 * 60 * 60);
+const SCAN_PAGE: u32 = 100;
 
 const PRELUDE: &str = "local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
-local function live(field)
-    local score = redis.call('ZSCORE', KEYS[2], field)
-    if score and tonumber(score) <= now then
-        redis.call('HDEL', KEYS[1], field)
-        redis.call('ZREM', KEYS[2], field)
+local MAIN, TIMEOUT, IDLE = KEYS[1], KEYS[2], KEYS[3]
+local function drop(field)
+    redis.call('HDEL', MAIN, field)
+    redis.call('ZREM', TIMEOUT, field)
+    redis.call('ZREM', IDLE, field)
+end
+local function fetch(field)
+    local raw = redis.call('HGET', MAIN, field)
+    if raw == false then
         return false
     end
-    return true
+    local sep = string.find(raw, ':', 1, true)
+    local idle = tonumber(string.sub(raw, 1, sep - 1))
+    local value = string.sub(raw, sep + 1)
+    local expires = math.huge
+    local timeoutScore = redis.call('ZSCORE', TIMEOUT, field)
+    if timeoutScore then
+        expires = tonumber(timeoutScore)
+    end
+    if idle > 0 then
+        local idleScore = redis.call('ZSCORE', IDLE, field)
+        if idleScore then
+            expires = math.min(expires, tonumber(idleScore))
+        end
+    end
+    if expires <= now then
+        drop(field)
+        return false
+    end
+    return value, idle, expires
+end
+local function store(field, value, ttl, idle)
+    redis.call('HSET', MAIN, field, idle .. ':' .. value)
+    if tonumber(ttl) > 0 then
+        redis.call('ZADD', TIMEOUT, now + tonumber(ttl), field)
+    else
+        redis.call('ZREM', TIMEOUT, field)
+    end
+    if tonumber(idle) > 0 then
+        redis.call('ZADD', IDLE, now + tonumber(idle), field)
+    else
+        redis.call('ZREM', IDLE, field)
+    end
 end
 ";
 
@@ -37,108 +75,162 @@ fn script(body: &str) -> Script {
 
 static GET: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "if not live(ARGV[1]) then
+        "local value, idle = fetch(ARGV[1])
+        if not value then
             return false
         end
-        return redis.call('HGET', KEYS[1], ARGV[1])",
+        if idle > 0 then
+            redis.call('ZADD', IDLE, now + idle, ARGV[1])
+        end
+        return value",
     )
 });
 
 static INSERT: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "local previous = false
-        if live(ARGV[1]) then
-            previous = redis.call('HGET', KEYS[1], ARGV[1])
-        end
-        redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-        local ttl = tonumber(ARGV[3])
-        if ttl > 0 then
-            redis.call('ZADD', KEYS[2], now + ttl, ARGV[1])
-        else
-            redis.call('ZREM', KEYS[2], ARGV[1])
-        end
+        "local previous = fetch(ARGV[1])
+        store(ARGV[1], ARGV[2], ARGV[3], ARGV[4])
         return previous",
     )
 });
 
 static INSERT_NX: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "if live(ARGV[1]) and redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+        "if fetch(ARGV[1]) then
             return 0
         end
-        redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-        local ttl = tonumber(ARGV[3])
-        if ttl > 0 then
-            redis.call('ZADD', KEYS[2], now + ttl, ARGV[1])
-        else
-            redis.call('ZREM', KEYS[2], ARGV[1])
-        end
+        store(ARGV[1], ARGV[2], ARGV[3], ARGV[4])
         return 1",
     )
 });
 
 static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "local previous = false
-        if live(ARGV[1]) then
-            previous = redis.call('HGET', KEYS[1], ARGV[1])
-        end
-        redis.call('HDEL', KEYS[1], ARGV[1])
-        redis.call('ZREM', KEYS[2], ARGV[1])
+        "local previous = fetch(ARGV[1])
+        drop(ARGV[1])
         return previous",
     )
 });
 
 static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "if not live(ARGV[1]) then
-            return 0
+        "if fetch(ARGV[1]) then
+            return 1
         end
-        return redis.call('HEXISTS', KEYS[1], ARGV[1])",
+        return 0",
     )
 });
 
 static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "if not live(ARGV[1]) or redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+        "local value, idle, expires = fetch(ARGV[1])
+        if not value then
             return -2
         end
-        local score = redis.call('ZSCORE', KEYS[2], ARGV[1])
-        if not score then
+        if expires == math.huge then
             return -1
         end
-        return tonumber(score) - now",
+        return expires - now",
     )
 });
 
 static LEN: LazyLock<Script> = LazyLock::new(|| {
-    script("return redis.call('HLEN', KEYS[1]) - redis.call('ZCOUNT', KEYS[2], '-inf', now)")
+    script(
+        "local expired = {}
+        local count = 0
+        for _, set in ipairs({TIMEOUT, IDLE}) do
+            for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now)) do
+                if not expired[field] then
+                    expired[field] = true
+                    count = count + 1
+                end
+            end
+        end
+        return redis.call('HLEN', MAIN) - count",
+    )
 });
 
 static EVICT: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, ARGV[1])
-        for _, field in ipairs(expired) do
-            redis.call('HDEL', KEYS[1], field)
-            redis.call('ZREM', KEYS[2], field)
+        "local removed = 0
+        for _, set in ipairs({TIMEOUT, IDLE}) do
+            for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now, 'LIMIT', 0, ARGV[1])) do
+                removed = removed + redis.call('HDEL', MAIN, field)
+                redis.call('ZREM', TIMEOUT, field)
+                redis.call('ZREM', IDLE, field)
+            end
         end
-        return #expired",
+        return removed",
     )
 });
 
-/// A pending [`HashMapCache::insert`]. Await it, optionally after setting a time limit with [`Insert::ttl`].
+fn strip_idle(raw: &[u8]) -> &[u8] {
+    match raw.iter().position(|byte| *byte == b':') {
+        Some(separator) => &raw[separator + 1..],
+        None => raw,
+    }
+}
+
+async fn evict(core: &Core, keys: Vec<String>) -> Result<usize> {
+    core.eval(&EVICT, keys, vec![Bytes::from(EVICT_BATCH.to_string())])
+        .await
+}
+
+async fn evict_loop(core: Weak<Core>, keys: Vec<String>, minimum: Duration) {
+    let mut pause = minimum;
+    loop {
+        tokio::time::sleep(pause).await;
+        let Some(core) = core.upgrade() else {
+            return;
+        };
+        let evicted = evict(&core, keys.clone()).await.unwrap_or(0);
+        pause = if evicted >= EVICT_BATCH {
+            (pause / 4).max(minimum)
+        } else if evicted == 0 {
+            (pause * 2).min(MAX_EVICT_PAUSE)
+        } else {
+            pause
+        };
+    }
+}
+
+fn start_evictor(core: &Arc<Core>, keys: Vec<String>) {
+    let Ok(runtime) = Handle::try_current() else {
+        return;
+    };
+    let mut evictors = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
+    if evictors.contains_key(&keys[0]) {
+        return;
+    }
+    let name = keys[0].clone();
+    let handle = runtime.spawn(evict_loop(
+        Arc::downgrade(core),
+        keys,
+        core.eviction_interval,
+    ));
+    evictors.insert(name, handle);
+}
+
+/// A pending [`HashMapCache::insert`]. Await it, optionally after setting [`Insert::ttl`] or [`Insert::max_idle`].
 #[must_use = "an insert does nothing until it is awaited"]
 pub struct Insert<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
     cache: &'a HashMapCache<K, V, C>,
     k: &'a Q,
     v: &'a W,
     ttl: Option<Duration>,
+    max_idle: Option<Duration>,
 }
 
 impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> Insert<'a, K, V, C, Q, W> {
-    /// Makes the entry expire after `ttl`.
+    /// Makes the entry expire after `ttl`, whether it is read or not.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Makes the entry expire when nobody has read it for `max_idle`. Every read starts the time again.
+    pub fn max_idle(mut self, max_idle: Duration) -> Self {
+        self.max_idle = Some(max_idle);
         self
     }
 }
@@ -157,18 +249,13 @@ where
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let cache = self.cache;
-            let ttl_millis = self.ttl.map(millis).transpose()?.unwrap_or(0);
             let previous: Option<Bytes> = cache
                 .key
                 .core
                 .eval(
                     &INSERT,
                     cache.redis_keys(),
-                    vec![
-                        cache.codec.encode(self.k)?,
-                        cache.codec.encode(self.v)?,
-                        Bytes::from(ttl_millis.to_string()),
-                    ],
+                    cache.insert_arguments(self.k, self.v, self.ttl, self.max_idle)?,
                 )
                 .await?;
             cache.decode_value(previous)
@@ -176,19 +263,26 @@ where
     }
 }
 
-/// A pending [`HashMapCache::insert_nx`]. Await it, optionally after setting a time limit with [`InsertNx::ttl`].
+/// A pending [`HashMapCache::insert_nx`]. Await it, optionally after setting [`InsertNx::ttl`] or [`InsertNx::max_idle`].
 #[must_use = "an insert does nothing until it is awaited"]
 pub struct InsertNx<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
     cache: &'a HashMapCache<K, V, C>,
     k: &'a Q,
     v: &'a W,
     ttl: Option<Duration>,
+    max_idle: Option<Duration>,
 }
 
 impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> InsertNx<'a, K, V, C, Q, W> {
-    /// Makes the entry expire after `ttl`.
+    /// Makes the entry expire after `ttl`, whether it is read or not.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Makes the entry expire when nobody has read it for `max_idle`. Every read starts the time again.
+    pub fn max_idle(mut self, max_idle: Duration) -> Self {
+        self.max_idle = Some(max_idle);
         self
     }
 }
@@ -207,18 +301,13 @@ where
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let cache = self.cache;
-            let ttl_millis = self.ttl.map(millis).transpose()?.unwrap_or(0);
             let inserted: i64 = cache
                 .key
                 .core
                 .eval(
                     &INSERT_NX,
                     cache.redis_keys(),
-                    vec![
-                        cache.codec.encode(self.k)?,
-                        cache.codec.encode(self.v)?,
-                        Bytes::from(ttl_millis.to_string()),
-                    ],
+                    cache.insert_arguments(self.k, self.v, self.ttl, self.max_idle)?,
                 )
                 .await?;
             Ok(inserted == 1)
@@ -226,15 +315,14 @@ where
     }
 }
 
-/// A distributed map where each entry can have its own time to live, as in Redisson's `RMapCache`.
+/// A distributed map where each entry can expire, as in Redisson's `RMapCache`.
 ///
-/// Time is taken from the Redis server. Expiry is lazy: every operation hides and deletes the expired entries it touches, but an entry nobody touches stays in Redis until [`HashMapCache::evict_expired`], [`HashMapCache::iter`] or [`HashMapCache::clear`] runs. [`HashMapCache::len`] counts only live entries but does not delete the expired ones.
+/// An entry can have a time to live ([`Insert::ttl`]) and a maximum idle time ([`Insert::max_idle`]). Time is taken from the Redis server. Expired entries are hidden at once, and a background task deletes them: it wakes up every [`ClientBuilder::eviction_interval`](crate::ClientBuilder::eviction_interval) when there is work and less often when there is none. [`HashMapCache::evict_expired`] does the same immediately.
 ///
-/// The data lives in the hash `{name}` and the expiry times in the sorted set `{name}:expires`. The name gets a hash tag, so both keys are in one slot in Redis Cluster.
+/// The data lives in the hash `{name}`. The expiry times live in the sorted sets `redissun__timeout__set:{name}` and `redissun__idle__set:{name}`. The name gets a hash tag, so all keys are in one slot in Redis Cluster.
 pub struct HashMapCache<K, V, C: Codec> {
     key: Key,
     codec: C,
-    map: HashMap<K, V, C>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -243,7 +331,6 @@ impl<K, V, C: Codec> Clone for HashMapCache<K, V, C> {
         Self {
             key: self.key.clone(),
             codec: self.codec.clone(),
-            map: self.map.clone(),
             _marker: PhantomData,
         }
     }
@@ -261,26 +348,31 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
     }
 
     fn companions(&self) -> Vec<String> {
-        vec![self.expires_key()]
+        vec![self.timeout_key(), self.idle_key()]
     }
 }
 
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
-        Self {
-            map: HashMap::new(key.clone(), codec.clone()),
+        let cache = Self {
             key,
             codec,
             _marker: PhantomData,
-        }
+        };
+        start_evictor(&cache.key.core, cache.redis_keys());
+        cache
     }
 
-    fn expires_key(&self) -> String {
-        format!("{}:expires", self.key.redis_key())
+    fn timeout_key(&self) -> String {
+        format!("redissun__timeout__set:{}", self.key.redis_key())
+    }
+
+    fn idle_key(&self) -> String {
+        format!("redissun__idle__set:{}", self.key.redis_key())
     }
 
     fn redis_keys(&self) -> Vec<String> {
-        vec![self.key.redis_key(), self.expires_key()]
+        vec![self.key.redis_key(), self.timeout_key(), self.idle_key()]
     }
 }
 
@@ -294,11 +386,33 @@ where
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
-    /// Inserts an entry and returns the live value it replaced. Without [`Insert::ttl`] the entry never expires, and a time limit the old entry had is removed.
+    fn insert_arguments<Q, W>(
+        &self,
+        k: &Q,
+        v: &W,
+        ttl: Option<Duration>,
+        max_idle: Option<Duration>,
+    ) -> Result<Vec<Bytes>>
+    where
+        Q: Serialize + ?Sized,
+        W: Serialize + ?Sized,
+    {
+        let ttl = ttl.map(millis).transpose()?.unwrap_or(0);
+        let max_idle = max_idle.map(millis).transpose()?.unwrap_or(0);
+        Ok(vec![
+            self.codec.encode(k)?,
+            self.codec.encode(v)?,
+            Bytes::from(ttl.to_string()),
+            Bytes::from(max_idle.to_string()),
+        ])
+    }
+
+    /// Inserts an entry and returns the live value it replaced. Without [`Insert::ttl`] and [`Insert::max_idle`] the entry never expires, and a limit that the old entry had is removed.
     ///
     /// ```ignore
     /// cache.insert("a", &value).await?;
     /// cache.insert("b", &value).ttl(Duration::from_secs(60)).await?;
+    /// cache.insert("c", &value).max_idle(Duration::from_secs(30)).await?;
     /// ```
     pub fn insert<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Insert<'a, K, V, C, Q, W>
     where
@@ -312,10 +426,11 @@ where
             k,
             v,
             ttl: None,
+            max_idle: None,
         }
     }
 
-    /// Inserts the entry only when there is no live entry for the key. Resolves to whether it was inserted. Add [`InsertNx::ttl`] for a time limit.
+    /// Inserts the entry only when there is no live entry for the key. Resolves to whether it was inserted. It takes `.ttl(..)` and `.max_idle(..)` too.
     pub fn insert_nx<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> InsertNx<'a, K, V, C, Q, W>
     where
         K: Borrow<Q>,
@@ -328,10 +443,11 @@ where
             k,
             v,
             ttl: None,
+            max_idle: None,
         }
     }
 
-    /// Returns the value for the key, or `None` when it is missing or expired.
+    /// Returns the value for the key, or `None` when it is missing or expired. A read starts the idle time of the entry again.
     pub async fn get<Q>(&self, k: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
@@ -359,7 +475,7 @@ where
         self.decode_value(raw)
     }
 
-    /// Returns whether a live entry exists for the key.
+    /// Returns whether a live entry exists for the key. It does not start the idle time again.
     pub async fn contains_key<Q>(&self, k: &Q) -> Result<bool>
     where
         K: Borrow<Q>,
@@ -373,7 +489,7 @@ where
         Ok(found == 1)
     }
 
-    /// Time left of one entry. `None` means the entry has no time limit or does not exist.
+    /// Time left until the entry expires, by its time to live or its idle time, whichever comes first. `None` means the entry has no limit or does not exist.
     pub async fn entry_ttl<Q>(&self, k: &Q) -> Result<Option<Duration>>
     where
         K: Borrow<Q>,
@@ -387,7 +503,7 @@ where
         Ok((millis >= 0).then(|| Duration::from_millis(millis as u64)))
     }
 
-    /// Number of live entries.
+    /// Number of live entries. Expired entries that are still waiting for the clean-up are not counted.
     pub async fn len(&self) -> Result<usize> {
         let len: i64 = self
             .key
@@ -404,7 +520,9 @@ where
 
     /// Deletes every entry.
     pub async fn clear(&self) -> Result<()> {
-        self.key.del_all(vec![self.expires_key()]).await?;
+        self.key
+            .del_all(vec![self.timeout_key(), self.idle_key()])
+            .await?;
         Ok(())
     }
 
@@ -412,15 +530,7 @@ where
     pub async fn evict_expired(&self) -> Result<usize> {
         let mut total = 0;
         loop {
-            let evicted: usize = self
-                .key
-                .core
-                .eval(
-                    &EVICT,
-                    self.redis_keys(),
-                    vec![Bytes::from(EVICT_BATCH.to_string())],
-                )
-                .await?;
+            let evicted = evict(&self.key.core, self.redis_keys()).await?;
             total += evicted;
             if evicted < EVICT_BATCH {
                 return Ok(total);
@@ -431,7 +541,35 @@ where
     /// Streams all live entries, 100 at a time. It first deletes the expired entries.
     pub async fn iter(&self) -> Result<impl Stream<Item = Result<(K, V)>> + '_> {
         self.evict_expired().await?;
-        Ok(self.map.iter())
+        let pages = Box::pin(self.key.core.redis().hscan(
+            self.key.redis_key(),
+            "*",
+            Some(SCAN_PAGE),
+        ));
+        Ok(pages.flat_map(move |page| {
+            let items: Vec<Result<(K, V)>> = match page {
+                Ok(mut page) => {
+                    let results = page.take_results();
+                    page.next();
+                    results
+                        .map(|map| {
+                            map.inner()
+                                .iter()
+                                .map(|(field, value)| {
+                                    let value: Bytes = value.clone().convert()?;
+                                    Ok((
+                                        self.codec.decode(field.as_bytes())?,
+                                        self.codec.decode(strip_idle(&value))?,
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+                Err(error) => vec![Err(error.into())],
+            };
+            stream::iter(items)
+        }))
     }
 
     /// Streams all live keys.

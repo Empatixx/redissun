@@ -15,7 +15,10 @@ pub(crate) struct Core {
     pool: Pool,
     id: String,
     pub(crate) lock_lease: Duration,
+    pub(crate) eviction_interval: Duration,
     pub(crate) pubsub: Arc<PubSub>,
+    pub(crate) evictors:
+        std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl Core {
@@ -24,6 +27,7 @@ impl Core {
         pool_size: usize,
         lock_lease: Duration,
         connect_timeout: Duration,
+        eviction_interval: Duration,
     ) -> Result<Arc<Self>> {
         let config = Config::from_url(url).map_err(|e| Error::Config(e.to_string()))?;
         let mut builder = Builder::from_config(config);
@@ -51,7 +55,9 @@ impl Core {
             pool,
             id: Uuid::new_v4().to_string(),
             lock_lease,
+            eviction_interval,
             pubsub,
+            evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -129,6 +135,8 @@ impl Drop for BlockingClient {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        let evictors = self.evictors.get_mut().unwrap_or_else(|e| e.into_inner());
+        evictors.values().for_each(|handle| handle.abort());
         let Ok(runtime) = Handle::try_current() else {
             return;
         };

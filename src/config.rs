@@ -11,6 +11,7 @@ pub struct ClientBuilder<C: Codec = JsonCodec> {
     pool_size: usize,
     lock_lease: Duration,
     connect_timeout: Duration,
+    eviction_interval: Duration,
     codec: C,
 }
 
@@ -21,6 +22,7 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             .field("pool_size", &self.pool_size)
             .field("lock_lease", &self.lock_lease)
             .field("connect_timeout", &self.connect_timeout)
+            .field("eviction_interval", &self.eviction_interval)
             .finish()
     }
 }
@@ -32,6 +34,7 @@ impl ClientBuilder<JsonCodec> {
             pool_size: 4,
             lock_lease: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
+            eviction_interval: Duration::from_secs(5),
             codec: JsonCodec,
         }
     }
@@ -62,6 +65,12 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
+    /// The shortest pause between two background clean-ups of expired `HashMapCache` entries. The pause grows up to two hours while there is nothing to clean. Defaults to 5 seconds.
+    pub fn eviction_interval(mut self, eviction_interval: Duration) -> Self {
+        self.eviction_interval = eviction_interval;
+        self
+    }
+
     /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
@@ -69,6 +78,7 @@ impl<C: Codec> ClientBuilder<C> {
             pool_size: self.pool_size,
             lock_lease: self.lock_lease,
             connect_timeout: self.connect_timeout,
+            eviction_interval: self.eviction_interval,
             codec,
         }
     }
@@ -87,8 +97,17 @@ impl<C: Codec> ClientBuilder<C> {
         if self.connect_timeout.is_zero() {
             return Err(Error::Config("connect_timeout must be positive".into()));
         }
-        let core =
-            Core::connect(&url, self.pool_size, self.lock_lease, self.connect_timeout).await?;
+        if self.eviction_interval.is_zero() {
+            return Err(Error::Config("eviction_interval must be positive".into()));
+        }
+        let core = Core::connect(
+            &url,
+            self.pool_size,
+            self.lock_lease,
+            self.connect_timeout,
+            self.eviction_interval,
+        )
+        .await?;
         Ok(Client::from_parts(core, self.codec))
     }
 }

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{client, raw_command, unique};
+use common::{client, connect_with, raw_command, unique};
 use futures::TryStreamExt;
 use redissun::{Error, Object};
 use std::collections::HashMap;
@@ -199,7 +199,7 @@ async fn clear_removes_both_keys() {
         .unwrap();
     cache.clear().await.unwrap();
     assert!(!cache.exists().await.unwrap());
-    let expires = raw_command(&["EXISTS", &format!("{{{name}}}:expires")]).await;
+    let expires = raw_command(&["EXISTS", &format!("redissun__timeout__set:{{{name}}}")]).await;
     assert_eq!(expires.trim(), ":0");
 }
 
@@ -216,7 +216,7 @@ async fn object_methods_cover_both_keys() {
     assert!(cache.exists().await.unwrap());
     assert!(cache.expire(Duration::from_secs(100)).await.unwrap());
     assert!(cache.ttl().await.unwrap().is_some());
-    let expires_ttl = raw_command(&["TTL", &format!("{{{name}}}:expires")]).await;
+    let expires_ttl = raw_command(&["TTL", &format!("redissun__timeout__set:{{{name}}}")]).await;
     assert!(
         expires_ttl
             .trim()
@@ -226,7 +226,7 @@ async fn object_methods_cover_both_keys() {
             > 0
     );
     assert!(cache.persist().await.unwrap());
-    let expires_ttl = raw_command(&["TTL", &format!("{{{name}}}:expires")]).await;
+    let expires_ttl = raw_command(&["TTL", &format!("redissun__timeout__set:{{{name}}}")]).await;
     assert_eq!(expires_ttl.trim(), ":-1");
     assert!(matches!(
         cache.rename("other").await,
@@ -234,7 +234,7 @@ async fn object_methods_cover_both_keys() {
     ));
     assert!(cache.del().await.unwrap());
     assert!(!cache.exists().await.unwrap());
-    let expires = raw_command(&["EXISTS", &format!("{{{name}}}:expires")]).await;
+    let expires = raw_command(&["EXISTS", &format!("redissun__timeout__set:{{{name}}}")]).await;
     assert_eq!(expires.trim(), ":0");
 }
 
@@ -255,7 +255,7 @@ async fn insert_nx_does_not_inherit_a_stale_expiry() {
         .hash_map_cache::<String, String>(name.clone());
     raw_command(&[
         "ZADD",
-        &format!("{{{name}}}:expires"),
+        &format!("redissun__timeout__set:{{{name}}}"),
         "99999999999999",
         "\"k\"",
     ])
@@ -282,4 +282,90 @@ async fn insert_nx_takes_a_time_limit() {
     assert!(cache.entry_ttl("a").await.unwrap().is_some());
     sleep(Duration::from_millis(400)).await;
     assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_idle_entry_expires_and_a_read_keeps_it_alive() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    cache
+        .insert("a", "x")
+        .max_idle(Duration::from_millis(500))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        sleep(Duration::from_millis(250)).await;
+        assert_eq!(cache.get("a").await.unwrap(), Some("x".to_string()));
+    }
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    assert!(!cache.contains_key("a").await.unwrap());
+}
+
+#[tokio::test]
+async fn contains_key_does_not_keep_an_idle_entry_alive() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    cache
+        .insert("a", "x")
+        .max_idle(Duration::from_millis(500))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        sleep(Duration::from_millis(200)).await;
+        let _ = cache.contains_key("a").await.unwrap();
+    }
+    assert!(!cache.contains_key("a").await.unwrap());
+}
+
+#[tokio::test]
+async fn ttl_and_max_idle_work_together_and_the_earlier_one_wins() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    cache
+        .insert("a", "x")
+        .ttl(Duration::from_millis(600))
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        sleep(Duration::from_millis(200)).await;
+        assert!(cache.get("a").await.unwrap().is_some());
+    }
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_background_task_deletes_expired_entries_nobody_touches() {
+    let client =
+        connect_with(|builder| builder.eviction_interval(Duration::from_millis(100))).await;
+    let name = unique("cache");
+    let cache = client.hash_map_cache::<String, String>(name.clone());
+    for i in 0..5 {
+        cache
+            .insert(&format!("k{i}"), "x")
+            .ttl(Duration::from_millis(200))
+            .await
+            .unwrap();
+    }
+    cache.insert("keep", "y").await.unwrap();
+    sleep(Duration::from_millis(900)).await;
+    let key = format!("{{{name}}}");
+    assert_eq!(raw_command(&["HLEN", &key]).await.trim(), ":1");
+    let timeouts = raw_command(&["ZCARD", &format!("redissun__timeout__set:{key}")]).await;
+    assert_eq!(timeouts.trim(), ":0");
+}
+
+#[tokio::test]
+async fn a_zero_eviction_interval_is_rejected() {
+    let result = redissun::Client::builder()
+        .url("redis://127.0.0.1:1")
+        .eviction_interval(Duration::ZERO)
+        .build()
+        .await;
+    assert!(matches!(result, Err(Error::Config(_))));
 }
