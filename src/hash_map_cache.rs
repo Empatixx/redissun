@@ -10,7 +10,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -124,6 +126,106 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
+/// A pending [`HashMapCache::insert`]. Await it, optionally after setting a time limit with [`Insert::ttl`].
+#[must_use = "an insert does nothing until it is awaited"]
+pub struct Insert<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
+    cache: &'a HashMapCache<K, V, C>,
+    k: &'a Q,
+    v: &'a W,
+    ttl: Option<Duration>,
+}
+
+impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> Insert<'a, K, V, C, Q, W> {
+    /// Makes the entry expire after `ttl`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, K, V, C, Q, W> IntoFuture for Insert<'a, K, V, C, Q, W>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + Borrow<W> + 'a,
+    C: Codec,
+    Q: Serialize + ?Sized + Sync + 'a,
+    W: Serialize + ?Sized + Sync + 'a,
+{
+    type Output = Result<Option<V>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let cache = self.cache;
+            let ttl_millis = self.ttl.map(millis).transpose()?.unwrap_or(0);
+            let previous: Option<Bytes> = cache
+                .key
+                .core
+                .eval(
+                    &INSERT,
+                    cache.redis_keys(),
+                    vec![
+                        cache.codec.encode(self.k)?,
+                        cache.codec.encode(self.v)?,
+                        Bytes::from(ttl_millis.to_string()),
+                    ],
+                )
+                .await?;
+            cache.decode_value(previous)
+        })
+    }
+}
+
+/// A pending [`HashMapCache::insert_nx`]. Await it, optionally after setting a time limit with [`InsertNx::ttl`].
+#[must_use = "an insert does nothing until it is awaited"]
+pub struct InsertNx<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
+    cache: &'a HashMapCache<K, V, C>,
+    k: &'a Q,
+    v: &'a W,
+    ttl: Option<Duration>,
+}
+
+impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> InsertNx<'a, K, V, C, Q, W> {
+    /// Makes the entry expire after `ttl`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, K, V, C, Q, W> IntoFuture for InsertNx<'a, K, V, C, Q, W>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + Borrow<W> + 'a,
+    C: Codec,
+    Q: Serialize + ?Sized + Sync + 'a,
+    W: Serialize + ?Sized + Sync + 'a,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let cache = self.cache;
+            let ttl_millis = self.ttl.map(millis).transpose()?.unwrap_or(0);
+            let inserted: i64 = cache
+                .key
+                .core
+                .eval(
+                    &INSERT_NX,
+                    cache.redis_keys(),
+                    vec![
+                        cache.codec.encode(self.k)?,
+                        cache.codec.encode(self.v)?,
+                        Bytes::from(ttl_millis.to_string()),
+                    ],
+                )
+                .await?;
+            Ok(inserted == 1)
+        })
+    }
+}
+
 /// A distributed map where each entry can have its own time to live, as in Redisson's `RMapCache`.
 ///
 /// Time is taken from the Redis server. Expiry is lazy: every operation hides and deletes the expired entries it touches, but an entry nobody touches stays in Redis until [`HashMapCache::evict_expired`], [`HashMapCache::iter`] or [`HashMapCache::clear`] runs. [`HashMapCache::len`] counts only live entries but does not delete the expired ones.
@@ -192,73 +294,41 @@ where
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
-    async fn insert_for<Q, W>(&self, k: &Q, v: &W, ttl_millis: i64) -> Result<Option<V>>
+    /// Inserts an entry and returns the live value it replaced. Without [`Insert::ttl`] the entry never expires, and a time limit the old entry had is removed.
+    ///
+    /// ```ignore
+    /// cache.insert("a", &value).await?;
+    /// cache.insert("b", &value).ttl(Duration::from_secs(60)).await?;
+    /// ```
+    pub fn insert<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Insert<'a, K, V, C, Q, W>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        let previous: Option<Bytes> = self
-            .key
-            .core
-            .eval(
-                &INSERT,
-                self.redis_keys(),
-                vec![
-                    self.codec.encode(k)?,
-                    self.codec.encode(v)?,
-                    Bytes::from(ttl_millis.to_string()),
-                ],
-            )
-            .await?;
-        self.decode_value(previous)
+        Insert {
+            cache: self,
+            k,
+            v,
+            ttl: None,
+        }
     }
 
-    /// Inserts an entry without a time limit and returns the live value it replaced. A time limit the old entry had is removed.
-    pub async fn insert<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    /// Inserts the entry only when there is no live entry for the key. Resolves to whether it was inserted. Add [`InsertNx::ttl`] for a time limit.
+    pub fn insert_nx<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> InsertNx<'a, K, V, C, Q, W>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        self.insert_for(k, v, 0).await
-    }
-
-    /// Inserts an entry that expires after `ttl` and returns the live value it replaced.
-    pub async fn insert_with_ttl<Q, W>(&self, k: &Q, v: &W, ttl: Duration) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        self.insert_for(k, v, millis(ttl)?).await
-    }
-
-    /// Inserts the entry only when there is no live entry for the key; returns whether it was inserted.
-    pub async fn insert_nx<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        let inserted: i64 = self
-            .key
-            .core
-            .eval(
-                &INSERT_NX,
-                self.redis_keys(),
-                vec![
-                    self.codec.encode(k)?,
-                    self.codec.encode(v)?,
-                    Bytes::from("0"),
-                ],
-            )
-            .await?;
-        Ok(inserted == 1)
+        InsertNx {
+            cache: self,
+            k,
+            v,
+            ttl: None,
+        }
     }
 
     /// Returns the value for the key, or `None` when it is missing or expired.

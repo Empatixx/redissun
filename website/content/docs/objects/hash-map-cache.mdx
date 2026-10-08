@@ -10,7 +10,7 @@ use std::time::Duration;
 
 let sessions = client.hash_map_cache::<String, User>("sessions");
 
-sessions.insert_with_ttl("abc", &user, Duration::from_secs(60)).await?;
+sessions.insert("abc", &user).ttl(Duration::from_secs(60)).await?;
 let found = sessions.get("abc").await?;
 ```
 
@@ -19,8 +19,8 @@ let found = sessions.get("abc").await?;
 | Method | Notes |
 |---|---|
 | `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
-| `insert_with_ttl(&k, &v, ttl)` | the entry expires after `ttl` |
-| `insert_nx(&k, &v)` | inserts only when there is no live entry |
+| `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl` |
+| `insert_nx(&k, &v)` | inserts only when there is no live entry. It also takes `.ttl(ttl)`. |
 | `get(&k)`, `remove(&k)`, `contains_key(&k)` | never show an expired entry |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
 | `len()`, `is_empty()`, `clear()` | `len` counts live entries only and deletes nothing |

@@ -28,7 +28,8 @@ async fn an_entry_disappears_when_its_time_is_up() {
         .await
         .hash_map_cache::<String, String>(unique("cache"));
     cache
-        .insert_with_ttl("short", "x", Duration::from_millis(300))
+        .insert("short", "x")
+        .ttl(Duration::from_millis(300))
         .await
         .unwrap();
     cache.insert("forever", "y").await.unwrap();
@@ -45,7 +46,8 @@ async fn entry_ttl_reports_the_time_left() {
         .await
         .hash_map_cache::<String, String>(unique("cache"));
     cache
-        .insert_with_ttl("a", "x", Duration::from_secs(10))
+        .insert("a", "x")
+        .ttl(Duration::from_secs(10))
         .await
         .unwrap();
     cache.insert("b", "y").await.unwrap();
@@ -61,7 +63,8 @@ async fn a_plain_insert_removes_an_old_time_limit() {
         .await
         .hash_map_cache::<String, String>(unique("cache"));
     cache
-        .insert_with_ttl("a", "x", Duration::from_millis(400))
+        .insert("a", "x")
+        .ttl(Duration::from_millis(400))
         .await
         .unwrap();
     cache.insert("a", "y").await.unwrap();
@@ -76,7 +79,8 @@ async fn insert_does_not_return_an_expired_previous_value() {
         .await
         .hash_map_cache::<String, String>(unique("cache"));
     cache
-        .insert_with_ttl("a", "old", Duration::from_millis(200))
+        .insert("a", "old")
+        .ttl(Duration::from_millis(200))
         .await
         .unwrap();
     sleep(Duration::from_millis(400)).await;
@@ -93,7 +97,8 @@ async fn insert_nx_only_inserts_over_a_missing_or_expired_entry() {
     assert!(!cache.insert_nx("a", "2").await.unwrap());
     assert_eq!(cache.get("a").await.unwrap(), Some("1".to_string()));
     cache
-        .insert_with_ttl("b", "x", Duration::from_millis(200))
+        .insert("b", "x")
+        .ttl(Duration::from_millis(200))
         .await
         .unwrap();
     sleep(Duration::from_millis(400)).await;
@@ -128,7 +133,8 @@ async fn len_and_iteration_skip_expired_entries() {
         .hash_map_cache::<String, i64>(unique("cache"));
     cache.insert("keep", &1i64).await.unwrap();
     cache
-        .insert_with_ttl("gone", &2i64, Duration::from_millis(200))
+        .insert("gone", &2i64)
+        .ttl(Duration::from_millis(200))
         .await
         .unwrap();
     assert_eq!(cache.len().await.unwrap(), 2);
@@ -161,7 +167,8 @@ async fn evict_expired_deletes_the_entries_from_redis() {
         .hash_map_cache::<String, String>(name.clone());
     for i in 0..5 {
         cache
-            .insert_with_ttl(&format!("k{i}"), "x", Duration::from_millis(200))
+            .insert(&format!("k{i}"), "x")
+            .ttl(Duration::from_millis(200))
             .await
             .unwrap();
     }
@@ -186,7 +193,8 @@ async fn clear_removes_both_keys() {
         .await
         .hash_map_cache::<String, String>(name.clone());
     cache
-        .insert_with_ttl("a", "x", Duration::from_secs(60))
+        .insert("a", "x")
+        .ttl(Duration::from_secs(60))
         .await
         .unwrap();
     cache.clear().await.unwrap();
@@ -201,7 +209,8 @@ async fn object_methods_cover_both_keys() {
     let name = unique("cache");
     let cache = client.hash_map_cache::<String, String>(name.clone());
     cache
-        .insert_with_ttl("a", "x", Duration::from_secs(60))
+        .insert("a", "x")
+        .ttl(Duration::from_secs(60))
         .await
         .unwrap();
     assert!(cache.exists().await.unwrap());
@@ -253,4 +262,24 @@ async fn insert_nx_does_not_inherit_a_stale_expiry() {
     .await;
     assert!(cache.insert_nx("k", "v").await.unwrap());
     assert_eq!(cache.entry_ttl("k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn insert_nx_takes_a_time_limit() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    assert!(cache
+        .insert_nx("a", "x")
+        .ttl(Duration::from_millis(200))
+        .await
+        .unwrap());
+    assert!(!cache
+        .insert_nx("a", "y")
+        .ttl(Duration::from_millis(200))
+        .await
+        .unwrap());
+    assert!(cache.entry_ttl("a").await.unwrap().is_some());
+    sleep(Duration::from_millis(400)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
 }

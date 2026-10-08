@@ -7,7 +7,7 @@
 - `Topic` with `Subscriber`: `publish`, `subscribe`, `subscriber_count`, `recv`, `into_stream`.
 - `VecDeque` blocking pops: `pop_front_for`, `pop_back_for`, `pop_front_wait`, `pop_back_wait`.
 - `RwLock`: `read`, `try_read`, `read_for`, `write`, `try_write`, `write_for`, `is_write_locked`, `force_unlock`.
-- `HashMapCache`: `insert`, `insert_with_ttl`, `insert_nx`, `get`, `remove`, `contains_key`, `entry_ttl`, `len`, `is_empty`, `clear`, `evict_expired`, and `iter`, `keys`, `values` as streams.
+- `HashMapCache`: `insert` and `insert_nx` (both with an optional `.ttl(duration)`), `get`, `remove`, `contains_key`, `entry_ttl`, `len`, `is_empty`, `clear`, `evict_expired`, and `iter`, `keys`, `values` as streams.
 - `Error::Lagged`.
 
 ### Changed

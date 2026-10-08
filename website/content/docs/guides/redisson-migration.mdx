@@ -121,7 +121,7 @@ description: How Redisson names and behaviour map to redissun.
 | Redisson | redissun |
 |---|---|
 | `put(k, v)` | `insert(&k, &v)` |
-| `put(k, v, ttl, unit)` | `insert_with_ttl(&k, &v, ttl)` |
+| `put(k, v, ttl, unit)` | `insert(&k, &v).ttl(ttl)` |
 | `putIfAbsent(k, v)` | `insert_nx(&k, &v)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
 

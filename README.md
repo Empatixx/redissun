@@ -150,7 +150,7 @@ A `HashMap` where each entry can expire.
 
 ```rust
 let sessions = client.hash_map_cache::<String, User>("sessions");
-sessions.insert_with_ttl("abc", &user, Duration::from_secs(60)).await?;
+sessions.insert("abc", &user).ttl(Duration::from_secs(60)).await?;
 ```
 
 Expiry is lazy and uses the Redis server clock. Call `evict_expired` to free memory sooner.
