@@ -1,20 +1,27 @@
 use thiserror::Error;
 
+/// Errors returned by redgrid operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// The Redis server or the connection reported an error.
     #[error("redis error: {0}")]
     Redis(String),
+    /// A value could not be encoded or decoded by the codec.
     #[error("codec error: {0}")]
     Codec(String),
+    /// The client configuration is invalid.
     #[error("configuration error: {0}")]
     Config(String),
+    /// The lock is not held by the caller, for example because its lease expired.
     #[error("lock is not held by the current owner")]
     LockNotHeld,
+    /// The operation did not complete in time.
     #[error("operation timed out")]
     Timeout,
 }
 
+/// Result alias used by every fallible redgrid call.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<fred::error::Error> for Error {

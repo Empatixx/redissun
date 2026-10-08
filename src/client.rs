@@ -7,6 +7,7 @@ use crate::map::Map;
 use crate::object::Key;
 use std::sync::Arc;
 
+/// Entry point that hands out distributed objects. Cheap to clone; clones share the connection pool.
 #[derive(Clone)]
 pub struct Client<C: Codec = JsonCodec> {
     core: Arc<Core>,
@@ -14,6 +15,7 @@ pub struct Client<C: Codec = JsonCodec> {
 }
 
 impl Client<JsonCodec> {
+    /// Starts building a client with the JSON codec.
     pub fn builder() -> ClientBuilder<JsonCodec> {
         ClientBuilder::new()
     }
@@ -24,14 +26,17 @@ impl<C: Codec> Client<C> {
         Self { core, codec }
     }
 
+    /// Returns the [`Bucket`] stored under `name`.
     pub fn bucket<V>(&self, name: impl Into<Arc<str>>) -> Bucket<V, C> {
         Bucket::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns the [`Map`] stored under `name`.
     pub fn map<K, V>(&self, name: impl Into<Arc<str>>) -> Map<K, V, C> {
         Map::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))
     }

@@ -21,6 +21,7 @@ static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
+/// A single value stored in a Redis string.
 pub struct Bucket<V, C: Codec> {
     key: Key,
     codec: C,
@@ -58,6 +59,7 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
+    /// Stores the value, replacing any existing one.
     pub async fn set(&self, value: &V) -> Result<()> {
         let bytes = self.codec.encode(value)?;
         self.key
@@ -68,11 +70,13 @@ where
         Ok(())
     }
 
+    /// Returns the value, or `None` when the key is missing.
     pub async fn get(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self.key.core.redis().get(self.key.redis_key()).await?;
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
+    /// Stores the value with a time to live.
     pub async fn set_ex(&self, value: &V, ttl: Duration) -> Result<()> {
         let bytes = self.codec.encode(value)?;
         self.key
@@ -89,6 +93,7 @@ where
         Ok(())
     }
 
+    /// Stores the value only when the key is missing; returns whether it was stored.
     pub async fn set_nx(&self, value: &V) -> Result<bool> {
         let bytes = self.codec.encode(value)?;
         let stored: Option<String> = self
@@ -106,6 +111,7 @@ where
         Ok(stored.is_some())
     }
 
+    /// Stores the value and returns the previous one. Needs Redis 6.2 or newer.
     pub async fn get_set(&self, value: &V) -> Result<Option<V>> {
         let bytes = self.codec.encode(value)?;
         let previous: Option<Bytes> = self
@@ -117,11 +123,13 @@ where
         previous.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
+    /// Returns the value and deletes the key. Needs Redis 6.2 or newer.
     pub async fn get_del(&self) -> Result<Option<V>> {
         let previous: Option<Bytes> = self.key.core.redis().getdel(self.key.redis_key()).await?;
         previous.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
+    /// Replaces the value with `new` only when it currently equals `expected`; returns whether it did.
     pub async fn compare_and_set(&self, expected: &V, new: &V) -> Result<bool> {
         let swapped: i64 = self
             .key

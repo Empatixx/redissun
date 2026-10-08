@@ -104,29 +104,36 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration) -> Result<boo
     Ok(renewed == 1)
 }
 
+/// Options for [`Lock::lock_with`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct LockOptions {
+    /// Time after which the lock frees itself. When unset the lock is renewed by a watchdog instead.
     pub lease: Option<Duration>,
+    /// How long to wait for the lock. When unset the call waits indefinitely.
     pub wait: Option<Duration>,
 }
 
 impl LockOptions {
+    /// Options that wait indefinitely and use the watchdog.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets an explicit lease, which disables the watchdog.
     pub fn lease(mut self, lease: Duration) -> Self {
         self.lease = Some(lease);
         self
     }
 
+    /// Sets the maximum time to wait for the lock.
     pub fn wait(mut self, wait: Duration) -> Self {
         self.wait = Some(wait);
         self
     }
 }
 
+/// A reentrant distributed lock. The owner is the client together with the current tokio task.
 #[derive(Clone)]
 pub struct Lock {
     key: Key,
@@ -143,21 +150,25 @@ impl Lock {
         Self { key }
     }
 
+    /// Waits until the lock is acquired.
     pub async fn lock(&self) -> Result<LockGuard> {
         self.lock_with(LockOptions::new())
             .await?
             .ok_or(Error::Timeout)
     }
 
+    /// Acquires the lock when it is free; returns `None` immediately otherwise.
     pub async fn try_lock(&self) -> Result<Option<LockGuard>> {
         self.lock_with(LockOptions::new().wait(Duration::ZERO))
             .await
     }
 
+    /// Waits up to `wait` for the lock; returns `None` when the time runs out.
     pub async fn lock_for(&self, wait: Duration) -> Result<Option<LockGuard>> {
         self.lock_with(LockOptions::new().wait(wait)).await
     }
 
+    /// Acquires the lock according to `options`; returns `None` when the wait runs out.
     pub async fn lock_with(&self, options: LockOptions) -> Result<Option<LockGuard>> {
         let core = &self.key.core;
         let owner = core.owner();
@@ -210,11 +221,13 @@ impl Lock {
         }
     }
 
+    /// Returns whether any owner holds the lock.
     pub async fn is_locked(&self) -> Result<bool> {
         let found: i64 = self.key.core.redis().exists(self.key.redis_key()).await?;
         Ok(found > 0)
     }
 
+    /// Returns whether the calling task holds the lock.
     pub async fn is_held_by_current(&self) -> Result<bool> {
         let held: bool = self
             .key
@@ -225,6 +238,7 @@ impl Lock {
         Ok(held)
     }
 
+    /// Number of reentrant holds by the calling task.
     pub async fn hold_count(&self) -> Result<u64> {
         let count: Option<u64> = self
             .key
@@ -235,6 +249,7 @@ impl Lock {
         Ok(count.unwrap_or(0))
     }
 
+    /// Releases the lock regardless of its owner; returns whether it was held.
     pub async fn force_unlock(&self) -> Result<bool> {
         let removed: i64 = self
             .key

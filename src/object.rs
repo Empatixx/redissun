@@ -5,13 +5,21 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Operations on the Redis key behind a distributed object.
 pub trait Object {
+    /// The Redis key name of the object.
     fn name(&self) -> &str;
+    /// Deletes the key; returns whether it existed.
     fn del(&self) -> impl Future<Output = Result<bool>> + Send;
+    /// Returns whether the key exists.
     fn exists(&self) -> impl Future<Output = Result<bool>> + Send;
+    /// Renames the key.
     fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Sets a time to live; returns whether it was applied.
     fn expire(&self, ttl: Duration) -> impl Future<Output = Result<bool>> + Send;
+    /// Remaining time to live, or `None` when the key has no expiry or does not exist.
     fn ttl(&self) -> impl Future<Output = Result<Option<Duration>>> + Send;
+    /// Removes the expiry; returns whether one was removed.
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send;
 }
 

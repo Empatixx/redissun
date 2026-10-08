@@ -1,3 +1,22 @@
+//! Distributed objects on Redis, inspired by Redisson.
+//!
+//! ```no_run
+//! use redgrid::Client;
+//!
+//! # async fn run() -> redgrid::Result<()> {
+//! let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
+//!
+//! let users = client.map::<String, String>("users");
+//! users.insert("jirka".into(), "Jirka".into()).await?;
+//!
+//! let guard = client.lock("order:42").lock().await?;
+//! guard.unlock().await?;
+//! # Ok(())
+//! # }
+//! ```
+
+#![deny(missing_docs)]
+
 mod bucket;
 mod client;
 mod codec;

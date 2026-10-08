@@ -4,6 +4,7 @@ use crate::core::Core;
 use crate::error::{Error, Result};
 use std::time::Duration;
 
+/// Builder for [`Client`].
 pub struct ClientBuilder<C: Codec = JsonCodec> {
     url: Option<String>,
     pool_size: usize,
@@ -23,21 +24,25 @@ impl ClientBuilder<JsonCodec> {
 }
 
 impl<C: Codec> ClientBuilder<C> {
+    /// Redis connection URL, for example `redis://127.0.0.1:6379`. Required.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
     }
 
+    /// Number of pooled connections. Defaults to 4 and must be at least 1.
     pub fn pool_size(mut self, pool_size: usize) -> Self {
         self.pool_size = pool_size;
         self
     }
 
+    /// Lease of locks acquired without an explicit lease; the watchdog renews it. Defaults to 30 seconds.
     pub fn lock_lease(mut self, lock_lease: Duration) -> Self {
         self.lock_lease = lock_lease;
         self
     }
 
+    /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
             url: self.url,
@@ -47,6 +52,7 @@ impl<C: Codec> ClientBuilder<C> {
         }
     }
 
+    /// Connects and returns the client.
     pub async fn build(self) -> Result<Client<C>> {
         let url = self
             .url

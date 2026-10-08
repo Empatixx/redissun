@@ -4,6 +4,7 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+/// Codec that stores values as JSON through serde.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JsonCodec;
 

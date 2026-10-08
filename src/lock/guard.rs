@@ -13,6 +13,7 @@ struct Held {
     runtime: Option<Handle>,
 }
 
+/// Proof that a lock is held. Dropping it releases the lock in the background.
 #[must_use = "dropping the guard releases the lock in the background; call unlock().await to release it deterministically"]
 pub struct LockGuard {
     held: Option<Held>,
@@ -31,6 +32,7 @@ impl LockGuard {
         }
     }
 
+    /// Releases one hold and stops the watchdog. Fails with `Error::LockNotHeld` when the lease already expired.
     pub async fn unlock(mut self) -> Result<()> {
         let Some(held) = self.held.take() else {
             return Ok(());
