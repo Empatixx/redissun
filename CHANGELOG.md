@@ -13,6 +13,7 @@
 
 ### Changed
 
+- `Map::insert`, `Map::insert_nx` and `Map::extend` take borrowed keys and values (`users.insert("jirka", &user)`), like the lookups already did.
 - `Bucket` methods take the value as a borrowed form, so a `Bucket<String>` accepts `&str` (`bucket.set("hello")`) as well as `&String`.
 
 ### Fixed

@@ -14,15 +14,11 @@ async fn main() -> redissun::Result<()> {
     let client = Client::builder().url(url).build().await?;
 
     let users = client.map::<String, User>("example:users");
-    users
-        .insert(
-            "jirka".into(),
-            User {
-                name: "Jirka".into(),
-                age: 30,
-            },
-        )
-        .await?;
+    let jirka = User {
+        name: "Jirka".into(),
+        age: 30,
+    };
+    users.insert("jirka", &jirka).await?;
 
     println!("jirka = {:?}", users.get("jirka").await?);
     println!("len = {}", users.len().await?);

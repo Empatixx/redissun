@@ -8,11 +8,13 @@ A `Map` keeps its entries in a Redis hash. Keys and values both go through the c
 ```rust
 let users = client.map::<String, User>("users");
 
-users.insert("jirka".into(), user).await?;
+users.insert("jirka", &user).await?;
 let found = users.get("jirka").await?;
 ```
 
-Lookups take a borrowed key, like `HashMap::get`. So `users.get("jirka")` does not need a new `String`.
+Everything you send to Redis is borrowed: `users.insert("jirka", &user)` takes a `&str` key and a reference to the value, so you keep `user` and do not need `.into()` or `.clone()`. The values you get back are owned.
+
+This differs from `HashMap::insert`, which takes ownership. redissun only encodes the data and sends it, so it never needs to own it.
 
 ## Methods
 
@@ -24,7 +26,7 @@ Lookups take a borrowed key, like `HashMap::get`. So `users.get("jirka")` does n
 | `contains_key(&k)` | `HEXISTS` | |
 | `len()` and `is_empty()` | `HLEN` | |
 | `clear()` | `DEL` | |
-| `extend(entries)` | `HSET` | one request. An empty list does nothing. |
+| `extend(entries)` | `HSET` | entries are `(&key, &value)` pairs, for example `map.extend(other.iter())`. One request. An empty list does nothing. |
 | `get_many(&[&k])` | `HMGET` | same order as the keys |
 | `insert_nx(k, v)` | `HSETNX` | `true` if the entry was added |
 | `incr_by(&k, delta)` | `HINCRBY` | a missing entry starts at zero |

@@ -20,7 +20,8 @@ async fn main() -> redissun::Result<()> {
     motd.set("hello").await?;
 
     let users = client.map::<String, User>("users");
-    users.insert("jirka".into(), User { name: "Jirka".into() }).await?;
+    let jirka = User { name: "Jirka".into() };
+    users.insert("jirka", &jirka).await?;
     let found = users.get("jirka").await?;
 
     let lock = client.lock("order:42");

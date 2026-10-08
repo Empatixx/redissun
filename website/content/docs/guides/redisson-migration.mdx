@@ -33,14 +33,14 @@ description: How Redisson names and behaviour map to redissun.
 
 | Redisson | redissun |
 |---|---|
-| `put(k, v)` | `insert(k, v)` |
+| `put(k, v)` | `insert(&k, &v)` |
 | `get(k)` | `get(&k)` |
 | `remove(k)` | `remove(&k)` |
 | `containsKey(k)` | `contains_key(&k)` |
 | `size()` | `len()` |
 | `putAll(m)` | `extend(entries)` |
 | `getAll(keys)` | `get_many(&keys)` |
-| `putIfAbsent(k, v)` | `insert_nx(k, v)` |
+| `putIfAbsent(k, v)` | `insert_nx(&k, &v)` |
 | `addAndGet(k, d)` | `incr_by(&k, d)` or `incr_by_float(&k, d)` |
 | `keySet()`, `values()`, `entrySet()` | `keys()`, `values()`, `iter()` as streams |
 

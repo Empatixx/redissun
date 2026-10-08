@@ -80,15 +80,21 @@ where
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
-    /// Inserts an entry and returns the value it replaced.
-    pub async fn insert(&self, k: K, v: V) -> Result<Option<V>> {
+    /// Inserts an entry and returns the value it replaced. The key and value are borrowed: `map.insert("a", &value)`.
+    pub async fn insert<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
         let previous: Option<Bytes> = self
             .key
             .core
             .eval(
                 &INSERT,
                 vec![self.key.redis_key()],
-                vec![self.codec.encode(&k)?, self.codec.encode(&v)?],
+                vec![self.codec.encode(k)?, self.codec.encode(v)?],
             )
             .await?;
         self.decode_value(previous)
@@ -163,11 +169,20 @@ where
         Ok(())
     }
 
-    /// Inserts all entries in one round trip.
-    pub async fn extend(&self, entries: impl IntoIterator<Item = (K, V)>) -> Result<()> {
+    /// Inserts all entries in one round trip. Entries are `(&key, &value)` pairs, for example `map.extend(other.iter())`.
+    pub async fn extend<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> Result<()>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
         let encoded = entries
             .into_iter()
-            .map(|(k, v)| Ok((self.codec.encode(&k)?, self.codec.encode(&v)?)))
+            .map(|(k, v)| Ok((self.codec.encode(k)?, self.codec.encode(v)?)))
             .collect::<Result<Vec<(Bytes, Bytes)>>>()?;
         if encoded.is_empty() {
             return Ok(());
@@ -203,15 +218,21 @@ where
     }
 
     /// Inserts the entry only when the key is missing; returns whether it was inserted.
-    pub async fn insert_nx(&self, k: K, v: V) -> Result<bool> {
+    pub async fn insert_nx<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
         let inserted: bool = self
             .key
             .core
             .redis()
             .hsetnx(
                 self.key.redis_key(),
-                self.codec.encode(&k)?,
-                self.codec.encode(&v)?,
+                self.codec.encode(k)?,
+                self.codec.encode(v)?,
             )
             .await?;
         Ok(inserted)

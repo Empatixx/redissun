@@ -36,7 +36,7 @@ async fn main() -> redissun::Result<()> {
     let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
 
     let users = client.map::<String, String>("users");
-    users.insert("jirka".into(), "Jirka".into()).await?;
+    users.insert("jirka", "Jirka").await?;
     println!("{:?}", users.get("jirka").await?);
 
     let lock = client.lock("order:42");
@@ -79,7 +79,7 @@ Works like a `HashMap`. The names are the same: `insert`, `get`, `remove`, `cont
 
 ```rust
 let users = client.map::<String, User>("users");
-users.insert("jirka".into(), user).await?;
+users.insert("jirka", &user).await?;
 let found = users.get("jirka").await?;
 ```
 
