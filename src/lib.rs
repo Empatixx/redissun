@@ -29,6 +29,7 @@ mod lock;
 mod map;
 mod object;
 mod pubsub;
+mod rate_limiter;
 mod semaphore;
 
 pub use atomic_long::AtomicLong;
@@ -41,4 +42,5 @@ pub use latch::CountDownLatch;
 pub use lock::{Lock, LockGuard, LockOptions};
 pub use map::Map;
 pub use object::Object;
+pub use rate_limiter::{RateLimiter, RateType};
 pub use semaphore::{Permits, Semaphore};

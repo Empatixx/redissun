@@ -19,6 +19,9 @@ pub enum Error {
     /// The operation did not complete in time.
     #[error("operation timed out")]
     Timeout,
+    /// The operation is not supported by this object.
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
 }
 
 /// Result alias used by every fallible redissun call.
@@ -47,5 +50,9 @@ mod tests {
             "lock is not held by the current owner"
         );
         assert_eq!(Error::Timeout.to_string(), "operation timed out");
+        assert_eq!(
+            Error::Unsupported("rename".into()).to_string(),
+            "unsupported operation: rename"
+        );
     }
 }

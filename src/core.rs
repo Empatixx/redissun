@@ -55,6 +55,10 @@ impl Core {
         self.pool.next()
     }
 
+    pub(crate) fn client_id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn owner(&self) -> String {
         match tokio::task::try_id() {
             Some(task) => format!("{}:{}", self.id, task),

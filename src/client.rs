@@ -7,6 +7,7 @@ use crate::latch::CountDownLatch;
 use crate::lock::Lock;
 use crate::map::Map;
 use crate::object::Key;
+use crate::rate_limiter::RateLimiter;
 use crate::semaphore::Semaphore;
 use std::fmt;
 use std::sync::Arc;
@@ -64,5 +65,10 @@ impl<C: Codec> Client<C> {
     /// Returns the [`CountDownLatch`] named `name`.
     pub fn count_down_latch(&self, name: impl Into<Arc<str>>) -> CountDownLatch {
         CountDownLatch::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`RateLimiter`] named `name`.
+    pub fn rate_limiter(&self, name: impl Into<Arc<str>>) -> RateLimiter {
+        RateLimiter::new(Key::new(self.core.clone(), name))
     }
 }
