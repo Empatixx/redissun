@@ -34,6 +34,7 @@ mod rate_limiter;
 mod semaphore;
 mod shield;
 mod vec;
+mod vec_deque;
 mod wait;
 
 pub use atomic_i64::AtomicI64;
@@ -49,3 +50,4 @@ pub use object::Object;
 pub use rate_limiter::{RateLimiter, RateType};
 pub use semaphore::{Permits, Semaphore};
 pub use vec::Vec;
+pub use vec_deque::VecDeque;

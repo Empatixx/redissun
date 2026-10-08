@@ -57,6 +57,11 @@ impl<C: Codec> Client<C> {
         crate::vec::Vec::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns the [`VecDeque`](crate::VecDeque) stored under `name`.
+    pub fn vec_deque<V>(&self, name: impl Into<Arc<str>>) -> crate::vec_deque::VecDeque<V, C> {
+        crate::vec_deque::VecDeque::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
     /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))
