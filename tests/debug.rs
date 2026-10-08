@@ -17,7 +17,7 @@ async fn public_handles_print_their_name() {
     let name = unique("debug");
     assert!(format!("{client:?}").contains("Client"));
     assert!(format!("{:?}", client.bucket::<String>(name.clone())).contains(&name));
-    assert!(format!("{:?}", client.map::<String, String>(name.clone())).contains(&name));
+    assert!(format!("{:?}", client.hash_map::<String, String>(name.clone())).contains(&name));
     let lock = client.lock(name.clone());
     assert!(format!("{lock:?}").contains(&name));
     let guard = lock.lock().await.unwrap();

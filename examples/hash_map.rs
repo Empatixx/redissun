@@ -13,7 +13,7 @@ async fn main() -> redissun::Result<()> {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
     let client = Client::builder().url(url).build().await?;
 
-    let users = client.map::<String, User>("example:users");
+    let users = client.hash_map::<String, User>("example:users");
     let jirka = User {
         name: "Jirka".into(),
         age: 30,

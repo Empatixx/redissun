@@ -19,23 +19,23 @@ static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
 
 /// A shared 64-bit counter stored as a plain integer in a Redis string. A missing key reads as 0.
 #[derive(Clone)]
-pub struct AtomicLong {
+pub struct AtomicI64 {
     key: Key,
 }
 
-impl fmt::Debug for AtomicLong {
+impl fmt::Debug for AtomicI64 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.key.describe(f, "AtomicLong")
+        self.key.describe(f, "AtomicI64")
     }
 }
 
-impl HasKey for AtomicLong {
+impl HasKey for AtomicI64 {
     fn key(&self) -> &Key {
         &self.key
     }
 }
 
-impl AtomicLong {
+impl AtomicI64 {
     pub(crate) fn new(key: Key) -> Self {
         Self { key }
     }

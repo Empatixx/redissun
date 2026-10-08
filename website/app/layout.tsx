@@ -12,7 +12,7 @@ export const metadata: Metadata = {
     default: 'redissun — distributed objects on Redis for Rust',
   },
   description:
-    'Redisson-inspired distributed Map, Bucket and reentrant Lock with watchdog for Rust, on tokio and serde.',
+    'Redisson-inspired distributed HashMap, Bucket and reentrant Lock with watchdog for Rust, on tokio and serde.',
 }
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -1,11 +1,11 @@
-use crate::atomic_long::AtomicLong;
+use crate::atomic_i64::AtomicI64;
 use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
+use crate::hash_map::HashMap;
 use crate::latch::CountDownLatch;
 use crate::lock::Lock;
-use crate::map::Map;
 use crate::object::Key;
 use crate::rate_limiter::RateLimiter;
 use crate::semaphore::Semaphore;
@@ -37,9 +37,9 @@ impl<C: Codec> Client<C> {
         Self { core, codec }
     }
 
-    /// Returns the [`AtomicLong`] stored under `name`.
-    pub fn atomic_long(&self, name: impl Into<Arc<str>>) -> AtomicLong {
-        AtomicLong::new(Key::new(self.core.clone(), name))
+    /// Returns the [`AtomicI64`] stored under `name`.
+    pub fn atomic_i64(&self, name: impl Into<Arc<str>>) -> AtomicI64 {
+        AtomicI64::new(Key::new(self.core.clone(), name))
     }
 
     /// Returns the [`Bucket`] stored under `name`.
@@ -47,9 +47,9 @@ impl<C: Codec> Client<C> {
         Bucket::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
-    /// Returns the [`Map`] stored under `name`.
-    pub fn map<K, V>(&self, name: impl Into<Arc<str>>) -> Map<K, V, C> {
-        Map::new(Key::new(self.core.clone(), name), self.codec.clone())
+    /// Returns the [`HashMap`] stored under `name`.
+    pub fn hash_map<K, V>(&self, name: impl Into<Arc<str>>) -> HashMap<K, V, C> {
+        HashMap::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Lock`] named `name`.

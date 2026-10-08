@@ -2,7 +2,7 @@ import Link from 'next/link'
 
 const objects = [
   { name: 'Bucket', text: 'A single value with TTL, set-if-absent and compare-and-set.', href: '/docs/objects/bucket' },
-  { name: 'Map', text: 'A distributed map with HashMap-style methods and streaming iteration.', href: '/docs/objects/map' },
+  { name: 'HashMap', text: 'A distributed map with HashMap-style methods and streaming iteration.', href: '/docs/objects/hash-map' },
   { name: 'Lock', text: 'A reentrant lock with a watchdog and pub/sub wake-ups, as in Redisson.', href: '/docs/objects/lock' },
 ]
 

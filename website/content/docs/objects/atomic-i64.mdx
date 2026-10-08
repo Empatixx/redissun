@@ -1,12 +1,12 @@
 ---
-title: AtomicLong
+title: AtomicI64
 description: A shared counter.
 ---
 
-An `AtomicLong` is a number in a Redis string. A missing counter reads as 0.
+An `AtomicI64` is a number in a Redis string. A missing counter reads as 0.
 
 ```rust
-let visits = client.atomic_long("visits");
+let visits = client.atomic_i64("visits");
 
 let total = visits.incr().await?;
 visits.add_and_get(10).await?;

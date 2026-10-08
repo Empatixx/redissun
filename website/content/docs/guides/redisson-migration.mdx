@@ -8,13 +8,13 @@ description: How Redisson names and behaviour map to redissun.
 | Redisson | redissun |
 |---|---|
 | `RBucket` | `Bucket` |
-| `RMap` | `Map` |
+| `RMap` | `HashMap` |
 | `RLock` | `Lock` |
-| `RAtomicLong` | `AtomicLong` |
+| `RAtomicLong` | `AtomicI64` |
 | `RSemaphore` | `Semaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
-| `redisson.getMap("x")` | `client.map("x")` |
+| `redisson.getMap("x")` | `client.hash_map("x")` |
 | `redisson.getLock("x")` | `client.lock("x")` |
 
 ## Bucket
@@ -29,7 +29,7 @@ description: How Redisson names and behaviour map to redissun.
 | `getAndDelete()` | `get_del()` |
 | `compareAndSet(e, n)` | `compare_and_set(&e, &n)` |
 
-## Map
+## HashMap
 
 | Redisson | redissun |
 |---|---|
@@ -61,7 +61,7 @@ description: How Redisson names and behaviour map to redissun.
 | `forceUnlock()` | `force_unlock().await` |
 | `lockWatchdogTimeout` | `Client::builder().lock_lease(..)` |
 
-## AtomicLong
+## AtomicI64
 
 | Redisson | redissun |
 |---|---|

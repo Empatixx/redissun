@@ -32,13 +32,13 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
 const SCAN_PAGE: u32 = 100;
 
 /// A distributed map stored in a Redis hash.
-pub struct Map<K, V, C: Codec> {
+pub struct HashMap<K, V, C: Codec> {
     key: Key,
     codec: C,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
-impl<K, V, C: Codec> Clone for Map<K, V, C> {
+impl<K, V, C: Codec> Clone for HashMap<K, V, C> {
     fn clone(&self) -> Self {
         Self {
             key: self.key.clone(),
@@ -48,19 +48,19 @@ impl<K, V, C: Codec> Clone for Map<K, V, C> {
     }
 }
 
-impl<K, V, C: Codec> fmt::Debug for Map<K, V, C> {
+impl<K, V, C: Codec> fmt::Debug for HashMap<K, V, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.key.describe(f, "Map")
+        self.key.describe(f, "HashMap")
     }
 }
 
-impl<K, V, C: Codec> HasKey for Map<K, V, C> {
+impl<K, V, C: Codec> HasKey for HashMap<K, V, C> {
     fn key(&self) -> &Key {
         &self.key
     }
 }
 
-impl<K, V, C: Codec> Map<K, V, C> {
+impl<K, V, C: Codec> HashMap<K, V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
         Self {
             key,
@@ -70,7 +70,7 @@ impl<K, V, C: Codec> Map<K, V, C> {
     }
 }
 
-impl<K, V, C> Map<K, V, C>
+impl<K, V, C> HashMap<K, V, C>
 where
     K: Serialize + DeserializeOwned + Send + Sync,
     V: Serialize + DeserializeOwned + Send + Sync,

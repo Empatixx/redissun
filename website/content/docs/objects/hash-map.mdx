@@ -1,12 +1,12 @@
 ---
-title: Map
+title: HashMap
 description: A shared map that works like HashMap.
 ---
 
-A `Map` keeps its entries in a Redis hash. Keys and values both go through the codec.
+A `HashMap` keeps its entries in a Redis hash. Keys and values both go through the codec.
 
 ```rust
-let users = client.map::<String, User>("users");
+let users = client.hash_map::<String, User>("users");
 
 users.insert("jirka", &user).await?;
 let found = users.get("jirka").await?;

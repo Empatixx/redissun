@@ -9,6 +9,6 @@ description: Things to know about this version.
 - **Dropping a guard without a runtime.** The lock cannot be released at once. It frees itself when the lease ends.
 - **Redis Cluster.** `rename` can fail when the old and new names are in different hash slots. Redis itself does this.
 - **RateLimiter.** `rename` is not supported. There is no `keepAliveTime` yet. With `RateType::PerClient`, every client instance leaves two small keys behind. Call `expire` on the limiter to let them go away.
-- **Numbers.** `Map::incr_by` needs values that the codec writes as plain numbers.
+- **Numbers.** `HashMap::incr_by` needs values that the codec writes as plain numbers.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error.
 - **Before 1.0**, the API can change between minor versions.

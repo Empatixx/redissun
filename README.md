@@ -7,7 +7,7 @@ Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.co
 [![docs.rs](https://img.shields.io/docsrs/redissun)](https://docs.rs/redissun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-With redissun you use a `Map`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
+With redissun you use a `HashMap`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
 
 ## Install
 
@@ -35,7 +35,7 @@ use redissun::Client;
 async fn main() -> redissun::Result<()> {
     let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
 
-    let users = client.map::<String, String>("users");
+    let users = client.hash_map::<String, String>("users");
     users.insert("jirka", "Jirka").await?;
     println!("{:?}", users.get("jirka").await?);
 
@@ -54,9 +54,9 @@ async fn main() -> redissun::Result<()> {
 | redissun | Redisson | Stored in Redis as |
 |---|---|---|
 | `Bucket` | `RBucket` | string |
-| `Map` | `RMap` | hash |
+| `HashMap` | `RMap` | hash |
 | `Lock` | `RLock` | hash and pub/sub |
-| `AtomicLong` | `RAtomicLong` | string |
+| `AtomicI64` | `RAtomicLong` | string |
 | `Semaphore` | `RSemaphore` | string and pub/sub |
 | `CountDownLatch` | `RCountDownLatch` | string and pub/sub |
 | `RateLimiter` | `RRateLimiter` | hash, string and sorted set |
@@ -73,12 +73,12 @@ let value = bucket.get().await?;
 
 Other methods: `set_ex` (with a time limit), `set_nx` (only if empty), `get_set`, `get_del`, `compare_and_set`.
 
-### Map
+### HashMap
 
 Works like a `HashMap`. The names are the same: `insert`, `get`, `remove`, `contains_key`, `len`, `is_empty`, `clear`.
 
 ```rust
-let users = client.map::<String, User>("users");
+let users = client.hash_map::<String, User>("users");
 users.insert("jirka", &user).await?;
 let found = users.get("jirka").await?;
 ```
@@ -101,12 +101,12 @@ guard.unlock().await?;
 
 A lock has a lease. A watchdog renews it while you hold the lock. If your program crashes, the lock frees itself when the lease ends. Waiting programs wake up as soon as the lock is released. They do not poll.
 
-### AtomicLong
+### AtomicI64
 
 A shared counter. A missing counter reads as 0.
 
 ```rust
-let visits = client.atomic_long("visits");
+let visits = client.atomic_i64("visits");
 let total = visits.incr().await?;
 ```
 

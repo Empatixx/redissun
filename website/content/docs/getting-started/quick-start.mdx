@@ -19,7 +19,7 @@ async fn main() -> redissun::Result<()> {
     let motd = client.bucket::<String>("motd");
     motd.set("hello").await?;
 
-    let users = client.map::<String, User>("users");
+    let users = client.hash_map::<String, User>("users");
     let jirka = User { name: "Jirka".into() };
     users.insert("jirka", &jirka).await?;
     let found = users.get("jirka").await?;

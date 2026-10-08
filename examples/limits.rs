@@ -23,7 +23,7 @@ async fn main() -> redissun::Result<()> {
     first.release().await?;
     second.release().await?;
 
-    let counter = client.atomic_long("example:visits");
+    let counter = client.atomic_i64("example:visits");
     println!("visits: {}", counter.incr().await?);
 
     let latch = client.count_down_latch("example:ready");

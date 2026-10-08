@@ -10,9 +10,9 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | Object | Stored in Redis as | Redisson name |
 |---|---|---|
 | `Bucket` | string | `RBucket` |
-| `Map` | hash | `RMap` |
+| `HashMap` | hash | `RMap` |
 | `Lock` | hash and pub/sub | `RLock` |
-| `AtomicLong` | string | `RAtomicLong` |
+| `AtomicI64` | string | `RAtomicLong` |
 | `Semaphore` | string and pub/sub | `RSemaphore` |
 | `CountDownLatch` | string and pub/sub | `RCountDownLatch` |
 | `RateLimiter` | hash, string and sorted set | `RRateLimiter` |
