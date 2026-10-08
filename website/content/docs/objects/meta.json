@@ -1,1 +1,1 @@
-{"title": "Objects", "pages": ["bucket", "hash-map", "atomic-i64", "lock", "semaphore", "count-down-latch", "rate-limiter"]}
+{"title": "Objects", "pages": ["bucket", "hash-map", "vec", "vec-deque", "hash-set", "atomic-i64", "lock", "semaphore", "count-down-latch", "rate-limiter"]}

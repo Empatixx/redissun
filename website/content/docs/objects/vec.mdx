@@ -1,0 +1,56 @@
+---
+title: Vec
+description: A shared list that works like Vec.
+---
+
+A `Vec` keeps its values in a Redis list. Values go through the codec.
+
+```rust
+let names = client.vec::<String>("names");
+
+names.push("jirka").await?;
+let first = names.get(0).await?;
+```
+
+Everything you send to Redis is borrowed: `names.push("jirka")` takes a `&str`. The values you get back are owned.
+
+## Methods
+
+| Method | Redis command | Notes |
+|---|---|---|
+| `push(&v)` | `RPUSH` | |
+| `extend(values)` | `RPUSH` | one request. An empty list does nothing. |
+| `pop()` | `RPOP` | returns `None` when empty |
+| `get(i)` | `LINDEX` | `None` when `i` is past the end |
+| `set(i, &v)` | `LSET` | `Error::OutOfRange` when `i` is past the end |
+| `insert(i, &v)` | Lua script | atomic, O(n). `Error::OutOfRange` when `i` is past the length. |
+| `remove(i)` | Lua script | atomic, O(n). Returns the removed value. |
+| `range(a..b)` | `LRANGE` | the end is not included, like a slice |
+| `trim(a..b)` | `LTRIM` | keeps only that range |
+| `position(&v)` and `contains(&v)` | `LPOS` | first equal value |
+| `remove_value(&v)` | `LREM` | removes the first equal value |
+| `remove_all(&v)` | `LREM` | removes every equal value and returns how many |
+| `len()` and `is_empty()` | `LLEN` | |
+| `clear()` | `DEL` | |
+
+`insert` and `remove` by index have to walk the list, so they are slow on very long lists.
+
+## Read all values
+
+`iter` returns a `Stream`. It reads 100 values at a time with `LRANGE`.
+
+```rust
+use futures::TryStreamExt;
+
+let all: Vec<String> = names.iter().try_collect().await?;
+```
+
+If other programs change the list while you read, you can miss a value or get one twice.
+
+## Same list as VecDeque
+
+`Vec` and `VecDeque` use the same kind of Redis list. If you open both with the same name, they see the same data.
+
+## Naming
+
+The type is called `Vec`, like the one in `std`. Write `redissun::Vec` in your code, and do not import it with `use redissun::*`.

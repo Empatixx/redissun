@@ -9,12 +9,18 @@ description: How Redisson names and behaviour map to redissun.
 |---|---|
 | `RBucket` | `Bucket` |
 | `RMap` | `HashMap` |
+| `RList` | `Vec` |
+| `RDeque`, `RQueue` | `VecDeque` |
+| `RSet` | `HashSet` |
 | `RLock` | `Lock` |
 | `RAtomicLong` | `AtomicI64` |
 | `RSemaphore` | `Semaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
 | `redisson.getMap("x")` | `client.hash_map("x")` |
+| `redisson.getList("x")` | `client.vec("x")` |
+| `redisson.getDeque("x")` | `client.vec_deque("x")` |
+| `redisson.getSet("x")` | `client.hash_set("x")` |
 | `redisson.getLock("x")` | `client.lock("x")` |
 
 ## Bucket
@@ -45,6 +51,47 @@ description: How Redisson names and behaviour map to redissun.
 | `keySet()`, `values()`, `entrySet()` | `keys()`, `values()`, `iter()` as streams |
 
 `putIfAbsent` returns the existing value in Java. `insert_nx` returns whether the entry was inserted.
+
+## Vec
+
+| Redisson | redissun |
+|---|---|
+| `add(v)` | `push(&v)` |
+| `get(i)` | `get(i)` |
+| `set(i, v)` | `set(i, &v)` |
+| `add(i, v)` | `insert(i, &v)` |
+| `remove(i)` | `remove(i)` |
+| `remove(v)` | `remove_value(&v)` |
+| `indexOf(v)` | `position(&v)` |
+| `size()` | `len()` |
+| `range(a, b)` | `range(a..b)` (the end is not included) |
+| `trim(a, b)` | `trim(a..b)` |
+
+## VecDeque
+
+| Redisson | redissun |
+|---|---|
+| `addLast(v)`, `offer(v)` | `push_back(&v)` |
+| `addFirst(v)` | `push_front(&v)` |
+| `pollFirst()`, `poll()` | `pop_front()` |
+| `pollLast()` | `pop_back()` |
+| `peekFirst()`, `peek()` | `front()` |
+| `peekLast()` | `back()` |
+
+## HashSet
+
+| Redisson | redissun |
+|---|---|
+| `add(v)` | `insert(&v)` |
+| `remove(v)` | `remove(&v)` |
+| `contains(v)` | `contains(&v)` |
+| `size()` | `len()` |
+| `removeRandom()` | `pop()` |
+| `random()` | `random()` |
+| `move(dest, v)` | `move_to(&dest, &v)` |
+| `readUnion(...)` | `union(&[&other])` |
+| `readIntersection(...)` | `intersection(&[&other])` |
+| `readDiff(...)` | `difference(&[&other])` |
 
 ## Lock
 

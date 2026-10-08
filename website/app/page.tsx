@@ -3,6 +3,9 @@ import Link from 'next/link'
 const objects = [
   { name: 'Bucket', text: 'A single value with TTL, set-if-absent and compare-and-set.', href: '/docs/objects/bucket' },
   { name: 'HashMap', text: 'A distributed map with HashMap-style methods and streaming iteration.', href: '/docs/objects/hash-map' },
+  { name: 'Vec', text: 'A shared list with index access, stored in a Redis list.', href: '/docs/objects/vec' },
+  { name: 'VecDeque', text: 'A shared queue or stack with both ends, stored in a Redis list.', href: '/docs/objects/vec-deque' },
+  { name: 'HashSet', text: 'A shared set with union, intersection and difference.', href: '/docs/objects/hash-set' },
   { name: 'Lock', text: 'A reentrant lock with a watchdog and pub/sub wake-ups, as in Redisson.', href: '/docs/objects/lock' },
 ]
 

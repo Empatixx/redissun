@@ -1,0 +1,34 @@
+---
+title: VecDeque
+description: A shared queue that works like VecDeque.
+---
+
+A `VecDeque` keeps its values in a Redis list. You can add and remove at both ends, so it works as a queue (first in, first out) or as a stack (last in, first out).
+
+```rust
+let jobs = client.vec_deque::<String>("jobs");
+
+jobs.push_back("send-email").await?;
+let next = jobs.pop_front().await?;
+```
+
+Every pop is one atomic Redis command. If many programs pop from the same deque, each value goes to exactly one of them.
+
+## Methods
+
+| Method | Redis command | Notes |
+|---|---|---|
+| `push_back(&v)` | `RPUSH` | |
+| `push_front(&v)` | `LPUSH` | |
+| `pop_back()` | `RPOP` | returns `None` when empty |
+| `pop_front()` | `LPOP` | returns `None` when empty |
+| `front()` and `back()` | `LINDEX` | read without removing |
+| `len()` and `is_empty()` | `LLEN` | |
+| `clear()` | `DEL` | |
+| `iter()` | `LRANGE` | a stream, 100 values at a time |
+
+There is no blocking pop in this version. If the deque is empty, `pop_front` returns `None` at once.
+
+## Same list as Vec
+
+`VecDeque` and `Vec` use the same kind of Redis list. If you open both with the same name, they see the same data.

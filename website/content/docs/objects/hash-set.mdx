@@ -1,0 +1,49 @@
+---
+title: HashSet
+description: A shared set that works like HashSet.
+---
+
+A `HashSet` keeps its values in a Redis set. Each value is stored once.
+
+```rust
+let tags = client.hash_set::<String>("tags");
+
+tags.insert("rust").await?;
+let found = tags.contains("rust").await?;
+```
+
+Two values are equal when the codec turns them into the same bytes. See [Limitations](/docs/guides/limitations).
+
+## Methods
+
+| Method | Redis command | Notes |
+|---|---|---|
+| `insert(&v)` | `SADD` | `true` if the value was new |
+| `extend(values)` | `SADD` | one request. An empty list does nothing. |
+| `remove(&v)` | `SREM` | `true` if the value was there |
+| `contains(&v)` | `SISMEMBER` | |
+| `contains_many(&[&v])` | `SMISMEMBER` | same order as the values |
+| `len()` and `is_empty()` | `SCARD` | |
+| `clear()` | `DEL` | |
+| `pop()` | `SPOP` | removes and returns a random value |
+| `random()` | `SRANDMEMBER` | returns a random value, keeps it |
+| `move_to(&other, &v)` | `SMOVE` | `true` if the value was there |
+| `union(&[&other])` | `SUNION` | returns a `Vec` |
+| `intersection(&[&other])` | `SINTER` | returns a `Vec` |
+| `difference(&[&other])` | `SDIFF` | returns a `Vec` |
+
+A set that does not exist counts as an empty set.
+
+## Read all values
+
+`iter` returns a `Stream`. It uses `SSCAN` and reads 100 values at a time. A value that was in the set the whole time is returned at least once. It can be returned twice.
+
+```rust
+use futures::TryStreamExt;
+
+let all: Vec<String> = tags.iter().try_collect().await?;
+```
+
+## Redis Cluster
+
+`union`, `intersection`, `difference` and `move_to` use more than one key. In Redis Cluster all the sets must be in the same hash slot. Give them the same hash tag, for example `{team}:a` and `{team}:b`. Otherwise Redis returns an error.

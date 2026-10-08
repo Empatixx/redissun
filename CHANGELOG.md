@@ -2,6 +2,13 @@
 
 ## [0.3.0] - unreleased
 
+### Added
+
+- `Vec`: `push`, `extend`, `pop`, `get`, `set`, `insert`, `remove`, `range`, `trim`, `position`, `contains`, `remove_value`, `remove_all`, `len`, `is_empty`, `clear`, `iter`.
+- `VecDeque`: `push_back`, `push_front`, `pop_back`, `pop_front`, `front`, `back`, `len`, `is_empty`, `clear`, `iter`.
+- `HashSet`: `insert`, `extend`, `remove`, `contains`, `contains_many`, `len`, `is_empty`, `clear`, `pop`, `random`, `move_to`, `union`, `intersection`, `difference`, `iter`.
+- `Error::OutOfRange`.
+
 ### Changed
 
 - Breaking: `Map` is now `HashMap` (`client.hash_map`) and `AtomicLong` is now `AtomicI64` (`client.atomic_i64`), so the names follow Rust.

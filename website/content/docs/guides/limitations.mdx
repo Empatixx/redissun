@@ -10,5 +10,7 @@ description: Things to know about this version.
 - **Redis Cluster.** `rename` can fail when the old and new names are in different hash slots. Redis itself does this.
 - **RateLimiter.** `rename` is not supported. There is no `keepAliveTime` yet. With `RateType::PerClient`, every client instance leaves two small keys behind. Call `expire` on the limiter to let them go away.
 - **Numbers.** `HashMap::incr_by` needs values that the codec writes as plain numbers.
+- **Equal values.** `Vec`, `VecDeque` and `HashSet` compare values by their encoded bytes. The codec must give the same bytes for equal values. The JSON codec does this for structs and numbers, but not for a `HashMap` inside a value, because its key order is random.
+- **Collections.** `Vec::insert` and `Vec::remove` by index are O(n). Iteration reads pages, so changes made while you read can make you miss a value or see it twice. `VecDeque` has no blocking pop yet. `HashSet` has no `union_into` and similar yet.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error.
 - **Before 1.0**, the API can change between minor versions.

@@ -55,6 +55,9 @@ async fn main() -> redissun::Result<()> {
 |---|---|---|
 | `Bucket` | `RBucket` | string |
 | `HashMap` | `RMap` | hash |
+| `Vec` | `RList` | list |
+| `VecDeque` | `RDeque` | list |
+| `HashSet` | `RSet` | set |
 | `Lock` | `RLock` | hash and pub/sub |
 | `AtomicI64` | `RAtomicLong` | string |
 | `Semaphore` | `RSemaphore` | string and pub/sub |
@@ -100,6 +103,40 @@ guard.unlock().await?;
 - `lock_with(options)` lets you choose both wait time and lease.
 
 A lock has a lease. A watchdog renews it while you hold the lock. If your program crashes, the lock frees itself when the lease ends. Waiting programs wake up as soon as the lock is released. They do not poll.
+
+### Vec
+
+A list with index access. It works like a `Vec`. Use it as `redissun::Vec`, not with a glob import.
+
+```rust
+let names = client.vec::<String>("names");
+names.push("jirka").await?;
+let first = names.get(0).await?;
+```
+
+Other methods: `pop`, `set`, `insert`, `remove`, `range`, `trim`, `position`, `contains`, `remove_value`, `remove_all`, `extend`, `iter`.
+
+### VecDeque
+
+A queue or stack. Add and remove at both ends.
+
+```rust
+let jobs = client.vec_deque::<String>("jobs");
+jobs.push_back("send-email").await?;
+let next = jobs.pop_front().await?;
+```
+
+### HashSet
+
+A set of unique values.
+
+```rust
+let tags = client.hash_set::<String>("tags");
+tags.insert("rust").await?;
+let found = tags.contains("rust").await?;
+```
+
+Other methods: `remove`, `contains_many`, `pop`, `random`, `move_to`, `union`, `intersection`, `difference`, `iter`.
 
 ### AtomicI64
 
