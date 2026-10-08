@@ -48,7 +48,7 @@ use redissun::EvictionMode;
 cache.set_max_size(1000, EvictionMode::Lru).await?;
 ```
 
-When the cache is full, an insert drops one entry: with `Lru` the one that was used longest ago, with `Lfu` the one that was used least often. Reads (`get`) and inserts count as use. The limit is stored in Redis, so every client of the cache follows it. Entries that were added before the limit was set are not tracked until they are used.
+When the cache is full, an insert drops one entry: with `Lru` the one that was used longest ago, with `Lfu` the one that was used least often. Reads (`get`) and inserts count as use. The limit is stored in Redis, so every client of the cache follows it. Entries that were added before the limit was set are taken into account the first time the cache is over the limit. Expired entries do not count against the limit. Changing the mode starts the counting again.
 
 ## Listening to changes
 
@@ -69,7 +69,7 @@ while let Ok(event) = events.recv().await {
 
 - You get the changes made by every client, not only yours.
 - `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries whose time ended.
-- Nothing is published to Redis until the first listener appears.
+- Nothing is published to Redis while nobody listens. The scripts check `PUBSUB NUMSUB` on the events channel, so listeners keep working after `del` and publishing stops after the last listener is gone.
 - A listener has a buffer of 256 events. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
 - `into_stream()` turns the listener into a `Stream`.
 
@@ -83,7 +83,7 @@ This is the scheme of Redisson's `RMapCache`:
 | `redissun__timeout__set:{name}` | sorted set | entry and the time when its time to live ends |
 | `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends |
 | `redissun__map_cache_last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
-| `redissun__map_cache_options:{name}` | hash | `max-size`, `mode` and `has-listeners` |
+| `redissun__map_cache_options:{name}` | hash | `max-size` and `mode` |
 
 Events are published on the channel `redissun__map_cache_events:{name}`.
 

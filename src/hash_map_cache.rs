@@ -4,7 +4,6 @@ use crate::error::{Error, Result};
 use crate::object::{millis, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
-use fred::interfaces::HashesInterface;
 use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
 use futures::{stream, Stream, StreamExt};
@@ -30,7 +29,7 @@ local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local MAIN, TIMEOUT, IDLE, ACCESS, OPTIONS, CHANNEL = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local maxSize = tonumber(redis.call('HGET', OPTIONS, 'max-size')) or 0
 local lfu = redis.call('HGET', OPTIONS, 'mode') == 'LFU'
-local listening = redis.call('HGET', OPTIONS, 'has-listeners') ~= false
+local listening = redis.call('PUBSUB', 'NUMSUB', CHANNEL)[2] > 0
 local function emit(kind, field, value, previous)
     if listening then
         previous = previous or ''
@@ -96,22 +95,54 @@ local function touch(field)
         end
     end
 end
+local function purge(limit)
+    local removed = 0
+    for _, set in ipairs({TIMEOUT, IDLE}) do
+        for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now, 'LIMIT', 0, limit)) do
+            local raw = redis.call('HGET', MAIN, field)
+            if raw then
+                emit('E', field, (unwrap(raw)))
+            end
+            local dropped = redis.call('HDEL', MAIN, field)
+            dropped = dropped + redis.call('ZREM', TIMEOUT, field)
+            dropped = dropped + redis.call('ZREM', IDLE, field)
+            dropped = dropped + redis.call('ZREM', ACCESS, field)
+            if dropped > 0 then
+                removed = removed + 1
+            end
+        end
+    end
+    return removed
+end
 local function enforce(field)
-    if maxSize > 0 then
-        local excess = redis.call('HLEN', MAIN) - maxSize
-        if excess > 0 then
-            for _, victim in ipairs(redis.call('ZRANGE', ACCESS, 0, excess)) do
-                if excess <= 0 then
-                    break
-                end
-                if victim ~= field then
-                    local raw = redis.call('HGET', MAIN, victim)
-                    if raw then
-                        emit('R', victim, (unwrap(raw)))
-                    end
-                    drop(victim)
+    if maxSize <= 0 then
+        return
+    end
+    if redis.call('HLEN', MAIN) <= maxSize then
+        return
+    end
+    purge(100)
+    local tracked = redis.call('ZCARD', ACCESS)
+    if tracked < redis.call('HLEN', MAIN) then
+        for _, known in ipairs(redis.call('HKEYS', MAIN)) do
+            if not redis.call('ZSCORE', ACCESS, known) then
+                redis.call('ZADD', ACCESS, lfu and 0 or now, known)
+            end
+        end
+    end
+    local excess = redis.call('HLEN', MAIN) - maxSize
+    if excess > 0 then
+        for _, victim in ipairs(redis.call('ZRANGE', ACCESS, 0, excess)) do
+            if excess <= 0 then
+                break
+            end
+            if victim ~= field then
+                local raw = redis.call('HGET', MAIN, victim)
+                if raw then
+                    emit('R', victim, (unwrap(raw)))
                     excess = excess - 1
                 end
+                drop(victim)
             end
         end
     end
@@ -215,25 +246,23 @@ static LEN: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static EVICT: LazyLock<Script> = LazyLock::new(|| {
-    script(
-        "local removed = 0
-        for _, set in ipairs({TIMEOUT, IDLE}) do
-            for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now, 'LIMIT', 0, ARGV[1])) do
-                local raw = redis.call('HGET', MAIN, field)
-                if raw then
-                    emit('E', field, (unwrap(raw)))
-                end
-                local dropped = redis.call('HDEL', MAIN, field)
-                dropped = dropped + redis.call('ZREM', TIMEOUT, field)
-                dropped = dropped + redis.call('ZREM', IDLE, field)
-                dropped = dropped + redis.call('ZREM', ACCESS, field)
-                if dropped > 0 then
-                    removed = removed + 1
-                end
-            end
+static EVICT: LazyLock<Script> = LazyLock::new(|| script("return purge(ARGV[1])"));
+
+static SET_MAX_SIZE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local previous = redis.call('HGET', KEYS[1], 'mode')
+        redis.call('HSET', KEYS[1], 'max-size', ARGV[1], 'mode', ARGV[2])
+        if previous and previous ~= ARGV[2] then
+            redis.call('DEL', KEYS[2])
         end
-        return removed",
+        return 1",
+    )
+});
+
+static TRY_SET_MAX_SIZE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "redis.call('HSETNX', KEYS[1], 'max-size', ARGV[1])
+        return redis.call('HSETNX', KEYS[1], 'mode', ARGV[2])",
     )
 });
 
@@ -387,8 +416,9 @@ fn split_payload(payload: &[u8]) -> Option<RawEvent<'_>> {
     let value_length: usize = std::str::from_utf8(&rest[..second]).ok()?.parse().ok()?;
     let rest = &rest[second + 1..];
     let key = rest.get(..key_length)?;
-    let value = rest.get(key_length..key_length + value_length)?;
-    let previous = rest.get(key_length + value_length..)?;
+    let end = key_length.checked_add(value_length)?;
+    let value = rest.get(key_length..end)?;
+    let previous = rest.get(end..)?;
     Some(RawEvent {
         kind,
         key,
@@ -711,17 +741,15 @@ where
         }
     }
 
-    /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client.
+    /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client. Changing the mode starts the counting again.
     pub async fn set_max_size(&self, max: usize, mode: EvictionMode) -> Result<()> {
-        self.key
+        let _: i64 = self
+            .key
             .core
-            .redis()
-            .hset::<(), _, _>(
-                self.options_key(),
-                vec![
-                    ("max-size", max.to_string()),
-                    ("mode", mode.as_str().to_string()),
-                ],
+            .eval(
+                &SET_MAX_SIZE,
+                vec![self.options_key(), self.access_key()],
+                vec![Bytes::from(max.to_string()), Bytes::from(mode.as_str())],
             )
             .await?;
         Ok(())
@@ -729,23 +757,20 @@ where
 
     /// Sets the size limit only when none was set before; returns whether it did.
     pub async fn try_set_max_size(&self, max: usize, mode: EvictionMode) -> Result<bool> {
-        let redis = self.key.core.redis();
-        redis
-            .hsetnx::<bool, _, _, _>(self.options_key(), "max-size", max.to_string())
+        let set: i64 = self
+            .key
+            .core
+            .eval(
+                &TRY_SET_MAX_SIZE,
+                vec![self.options_key()],
+                vec![Bytes::from(max.to_string()), Bytes::from(mode.as_str())],
+            )
             .await?;
-        let set: bool = redis
-            .hsetnx(self.options_key(), "mode", mode.as_str())
-            .await?;
-        Ok(set)
+        Ok(set == 1)
     }
 
-    /// Starts listening to the changes of the cache, made by any client. Nothing is published to Redis until somebody listens.
+    /// Starts listening to the changes of the cache, made by any client. Nothing is published to Redis while nobody listens.
     pub async fn events(&self) -> Result<Events<K, V, C>> {
-        self.key
-            .core
-            .redis()
-            .hset::<(), _, _>(self.options_key(), ("has-listeners", "1"))
-            .await?;
         let (subscription, receiver) = self
             .key
             .core

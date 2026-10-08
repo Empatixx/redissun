@@ -590,27 +590,85 @@ async fn every_listener_gets_every_event_and_stopping_one_does_not_affect_the_ot
 }
 
 #[tokio::test]
-async fn nothing_is_published_until_somebody_listens() {
-    let name = unique("cache");
+async fn listeners_keep_working_after_the_cache_is_deleted() {
     let cache = client()
         .await
-        .hash_map_cache::<String, String>(name.clone());
+        .hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache.events().await.unwrap();
     cache.insert("a", "1").await.unwrap();
-    let options = raw_command(&[
-        "HGET",
-        &format!("redissun__map_cache_options:{{{name}}}"),
-        "has-listeners",
-    ])
-    .await;
-    assert!(options.starts_with("$-1"), "{options}");
-    let _events = cache.events().await.unwrap();
-    let options = raw_command(&[
-        "HGET",
-        &format!("redissun__map_cache_options:{{{name}}}"),
-        "has-listeners",
-    ])
-    .await;
-    assert!(options.contains('1'), "{options}");
+    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    cache.del().await.unwrap();
+    cache.insert("b", "2").await.unwrap();
+    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+}
+
+#[tokio::test]
+async fn entries_added_before_the_limit_are_evicted_too() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    for i in 0..10u32 {
+        cache.insert(&format!("k{i}"), &i).await.unwrap();
+    }
+    cache.set_max_size(5, EvictionMode::Lru).await.unwrap();
+    pause().await;
+    cache.insert("new", &99u32).await.unwrap();
+    assert_eq!(cache.len().await.unwrap(), 5);
+    assert!(cache.contains_key("new").await.unwrap());
+}
+
+#[tokio::test]
+async fn expired_entries_do_not_count_against_the_limit() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.set_max_size(2, EvictionMode::Lru).await.unwrap();
+    cache
+        .insert("old", &1u32)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    pause().await;
+    cache.insert("keep", &2u32).await.unwrap();
+    sleep(Duration::from_millis(250)).await;
+    cache.insert("new", &3u32).await.unwrap();
+    assert!(cache.contains_key("keep").await.unwrap());
+    assert!(cache.contains_key("new").await.unwrap());
+}
+
+#[tokio::test]
+async fn changing_the_mode_forgets_the_old_scores() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.set_max_size(2, EvictionMode::Lru).await.unwrap();
+    cache.insert("a", &1u32).await.unwrap();
+    cache.insert("b", &2u32).await.unwrap();
+    cache.set_max_size(2, EvictionMode::Lfu).await.unwrap();
+    cache.get("b").await.unwrap();
+    cache.get("b").await.unwrap();
+    cache.insert("c", &3u32).await.unwrap();
+    assert_eq!(cache.len().await.unwrap(), 2);
+    assert!(cache.contains_key("b").await.unwrap());
+}
+
+#[tokio::test]
+async fn racing_try_set_max_size_calls_agree_on_one_winner() {
+    let client = client().await;
+    let name = unique("cache");
+    let tasks: Vec<_> = (1..=10usize)
+        .map(|n| {
+            let cache = client.hash_map_cache::<String, u32>(name.clone());
+            tokio::spawn(async move { cache.try_set_max_size(n, EvictionMode::Lru).await.unwrap() })
+        })
+        .collect();
+    let mut winners = 0;
+    for task in tasks {
+        if task.await.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(winners, 1);
 }
 
 #[tokio::test]
