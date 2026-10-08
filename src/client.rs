@@ -1,6 +1,8 @@
+use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
+use crate::object::Key;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -18,5 +20,9 @@ impl Client<JsonCodec> {
 impl<C: Codec> Client<C> {
     pub(crate) fn from_parts(core: Arc<Core>, codec: C) -> Self {
         Self { core, codec }
+    }
+
+    pub fn bucket<V>(&self, name: impl Into<Arc<str>>) -> Bucket<V, C> {
+        Bucket::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 }

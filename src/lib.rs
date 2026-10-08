@@ -1,3 +1,4 @@
+mod bucket;
 mod client;
 mod codec;
 mod config;
@@ -6,6 +7,7 @@ mod error;
 mod object;
 mod pubsub;
 
+pub use bucket::Bucket;
 pub use client::Client;
 pub use codec::{Codec, JsonCodec};
 pub use config::ClientBuilder;
