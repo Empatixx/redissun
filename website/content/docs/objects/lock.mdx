@@ -41,6 +41,12 @@ The same owner can take the lock repeatedly; each acquisition needs its own unlo
 
 An owner is a client plus a tokio task, which replaces the thread id used in Java. Two tasks that share a `Client` are different owners and exclude each other.
 
+An owner is only distinguished when code runs inside a spawned task. Code outside any task (the body of `#[tokio::main]`, `block_on`, `spawn_blocking`) shares one owner per client, and futures joined with `join!` inside one task share that task's owner, so neither case excludes the others. Give concurrent work its own `tokio::spawn`.
+
+## Cancellation
+
+Dropping a pending `lock()` future, for example through `tokio::time::timeout`, can leave the lock held until its lease expires if the server had already granted it. Use `lock_for(wait)` for bounded waiting.
+
 ## Lease and watchdog
 
 Without an explicit lease the lock lives for the client's `lock_lease` (30 seconds by default, set through `Client::builder().lock_lease(..)`) and a watchdog renews it every third of that period while the guard is alive. A process that crashes stops renewing, and the lock frees itself when the lease runs out.

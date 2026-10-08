@@ -1,6 +1,6 @@
 use crate::codec::Codec;
 use crate::error::Result;
-use crate::object::{HasKey, Key};
+use crate::object::{millis, HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
@@ -85,7 +85,7 @@ where
             .set::<(), _, _>(
                 self.key.redis_key(),
                 bytes,
-                Some(Expiration::PX(ttl.as_millis() as i64)),
+                Some(Expiration::PX(millis(ttl)?)),
                 None,
                 false,
             )

@@ -1,5 +1,5 @@
 use crate::core::Core;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use fred::interfaces::KeysInterface;
 use std::future::Future;
 use std::sync::Arc;
@@ -21,6 +21,13 @@ pub trait Object {
     fn ttl(&self) -> impl Future<Output = Result<Option<Duration>>> + Send;
     /// Removes the expiry; returns whether one was removed.
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send;
+}
+
+pub(crate) fn millis(duration: Duration) -> Result<i64> {
+    if duration.is_zero() {
+        return Err(Error::Config("duration must be positive".into()));
+    }
+    Ok(duration.as_nanos().div_ceil(1_000_000) as i64)
 }
 
 #[derive(Clone)]
@@ -67,7 +74,7 @@ impl Key {
         let applied: bool = self
             .core
             .redis()
-            .pexpire(self.redis_key(), ttl.as_millis() as i64, None)
+            .pexpire(self.redis_key(), millis(ttl)?, None)
             .await?;
         Ok(applied)
     }

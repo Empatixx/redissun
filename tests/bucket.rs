@@ -128,3 +128,25 @@ async fn unicode_and_empty_values_round_trip() {
         assert_eq!(bucket.get().await.unwrap().as_deref(), Some(value));
     }
 }
+
+#[tokio::test]
+async fn set_ex_rejects_a_zero_ttl_and_accepts_a_sub_millisecond_ttl() {
+    let bucket = client().await.bucket::<String>(unique("bucket"));
+    let zero = bucket.set_ex(&"v".to_string(), Duration::ZERO).await;
+    assert!(matches!(zero, Err(Error::Config(_))));
+    bucket
+        .set_ex(&"v".to_string(), Duration::from_micros(500))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn expire_rejects_a_zero_ttl_and_rounds_a_sub_millisecond_ttl_up() {
+    let bucket = client().await.bucket::<String>(unique("bucket"));
+    bucket.set(&"v".to_string()).await.unwrap();
+    assert!(matches!(
+        bucket.expire(Duration::ZERO).await,
+        Err(Error::Config(_))
+    ));
+    assert!(bucket.expire(Duration::from_micros(500)).await.unwrap());
+}

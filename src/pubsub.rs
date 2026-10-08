@@ -25,6 +25,10 @@ impl PubSub {
         Ok(pubsub)
     }
 
+    pub(crate) async fn quit(&self) {
+        let _ = self.client.quit().await;
+    }
+
     pub(crate) async fn subscribe(&self, channel: &str) -> Result<Arc<Notify>> {
         let mut channels = self.channels.lock().await;
         if let Some(notify) = channels.get(channel) {

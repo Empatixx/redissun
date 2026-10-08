@@ -5,6 +5,7 @@ description: Known constraints of the current release.
 
 - **Redis 6.2 or newer** is required for `Bucket::get_set` and `Bucket::get_del`.
 - **Pub/sub subscriptions are kept.** A lock name that has been waited on stays subscribed for the life of the client, so a process that waits on an unbounded set of distinct lock names grows its subscription table.
+- **Short TTLs:** durations are rounded up to whole milliseconds and a zero duration is `Error::Config`.
 - **Missed notifications** after a lost connection are recovered by the lease expiry, not immediately.
 - **Dropping a guard without a runtime** cannot release the lock; it frees itself when the lease expires.
 - **Cluster:** `Bucket::rename` and `Object::rename` can fail across hash slots, as `RENAME` does in Redis Cluster itself.

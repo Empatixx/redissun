@@ -188,3 +188,14 @@ async fn contended_lock_gives_mutual_exclusion() {
     }
     assert_eq!(*counter.lock().await, 20);
 }
+
+#[tokio::test]
+async fn zero_lease_is_rejected_and_a_sub_millisecond_lease_is_accepted() {
+    let lock = client().await.lock(unique("lock"));
+    let zero = lock
+        .lock_with(LockOptions::new().lease(Duration::ZERO))
+        .await;
+    assert!(matches!(zero, Err(Error::Config(_))));
+    let tiny = LockOptions::new().lease(Duration::from_micros(500));
+    assert!(lock.lock_with(tiny).await.unwrap().is_some());
+}

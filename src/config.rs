@@ -9,6 +9,7 @@ pub struct ClientBuilder<C: Codec = JsonCodec> {
     url: Option<String>,
     pool_size: usize,
     lock_lease: Duration,
+    connect_timeout: Duration,
     codec: C,
 }
 
@@ -18,6 +19,7 @@ impl ClientBuilder<JsonCodec> {
             url: None,
             pool_size: 4,
             lock_lease: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(10),
             codec: JsonCodec,
         }
     }
@@ -42,12 +44,19 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
+    /// How long `build` waits for the first connection before failing with `Error::Timeout`. Defaults to 10 seconds.
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
     /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
             url: self.url,
             pool_size: self.pool_size,
             lock_lease: self.lock_lease,
+            connect_timeout: self.connect_timeout,
             codec,
         }
     }
@@ -63,7 +72,11 @@ impl<C: Codec> ClientBuilder<C> {
         if self.lock_lease.is_zero() {
             return Err(Error::Config("lock_lease must be positive".into()));
         }
-        let core = Core::connect(&url, self.pool_size, self.lock_lease).await?;
+        if self.connect_timeout.is_zero() {
+            return Err(Error::Config("connect_timeout must be positive".into()));
+        }
+        let core =
+            Core::connect(&url, self.pool_size, self.lock_lease, self.connect_timeout).await?;
         Ok(Client::from_parts(core, self.codec))
     }
 }

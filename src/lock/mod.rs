@@ -4,7 +4,7 @@ mod watchdog;
 pub use guard::LockGuard;
 
 use crate::error::{Error, Result};
-use crate::object::{HasKey, Key};
+use crate::object::{millis as to_millis, HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::scripts::Script;
@@ -72,8 +72,8 @@ fn channel(name: &str) -> String {
     format!("redgrid__unlock__{name}")
 }
 
-fn millis(duration: Duration) -> Bytes {
-    Bytes::from((duration.as_millis() as i64).to_string())
+fn lease_arg(duration: Duration) -> Result<Bytes> {
+    Ok(Bytes::from(to_millis(duration)?.to_string()))
 }
 
 pub(crate) async fn release(key: &Key, owner: &str, lease: Duration) -> Result<()> {
@@ -83,7 +83,7 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration) -> Result<(
             &RELEASE,
             vec![key.redis_key()],
             vec![
-                millis(lease),
+                lease_arg(lease)?,
                 Bytes::from(owner.to_string()),
                 Bytes::from(channel(key.name())),
             ],
@@ -98,7 +98,7 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration) -> Result<boo
         .eval(
             &RENEW,
             vec![key.redis_key()],
-            vec![millis(lease), Bytes::from(owner.to_string())],
+            vec![lease_arg(lease)?, Bytes::from(owner.to_string())],
         )
         .await?;
     Ok(renewed == 1)
@@ -134,6 +134,10 @@ impl LockOptions {
 }
 
 /// A reentrant distributed lock. The owner is the client together with the current tokio task.
+///
+/// Code that runs outside any spawned task (the body of `#[tokio::main]`, `block_on`, `spawn_blocking`) shares one owner per client, and futures joined inside a single task share that task's owner; neither case excludes the others.
+///
+/// Dropping an acquire future while it is in flight can leave the lock held until its lease expires, so prefer `lock_for` to wrapping `lock` in a timeout.
 #[derive(Clone)]
 pub struct Lock {
     key: Key,
@@ -189,7 +193,7 @@ impl Lock {
                 .eval(
                     &ACQUIRE,
                     vec![self.key.redis_key()],
-                    vec![millis(lease), Bytes::from(owner.clone())],
+                    vec![lease_arg(lease)?, Bytes::from(owner.clone())],
                 )
                 .await?;
 

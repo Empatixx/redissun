@@ -45,3 +45,13 @@ async fn unreachable_server_fails_instead_of_hanging() {
     .await;
     assert!(matches!(attempt, Ok(Err(_))));
 }
+
+#[tokio::test]
+async fn zero_connect_timeout_is_a_config_error() {
+    let result = Client::builder()
+        .url(redis_url().await)
+        .connect_timeout(Duration::ZERO)
+        .build()
+        .await;
+    assert!(matches!(result, Err(Error::Config(_))));
+}
