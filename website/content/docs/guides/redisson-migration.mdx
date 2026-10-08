@@ -125,7 +125,7 @@ description: How Redisson names and behaviour map to redissun.
 | `putIfAbsent(k, v)` | `insert_nx(&k, &v)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
 
-Redisson deletes expired entries with a background task. redissun deletes them when you touch them, or when you call `evict_expired`. There is no idle timeout (`maxIdleTime`) yet.
+Both delete expired entries with a background task. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. There is no maximum size (LRU or LFU) and there are no entry listeners yet.
 
 ## VecDeque blocking
 

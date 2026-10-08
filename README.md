@@ -153,7 +153,7 @@ let sessions = client.hash_map_cache::<String, User>("sessions");
 sessions.insert("abc", &user).ttl(Duration::from_secs(60)).await?;
 ```
 
-Expiry is lazy and uses the Redis server clock. Call `evict_expired` to free memory sooner.
+Entries can also expire when nobody reads them (`.max_idle(duration)`). Time comes from the Redis server, and a background task deletes expired entries.
 
 ### Topic
 

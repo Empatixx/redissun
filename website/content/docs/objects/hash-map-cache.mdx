@@ -20,19 +20,33 @@ let found = sessions.get("abc").await?;
 |---|---|
 | `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
 | `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl` |
-| `insert_nx(&k, &v)` | inserts only when there is no live entry. It also takes `.ttl(ttl)`. |
-| `get(&k)`, `remove(&k)`, `contains_key(&k)` | never show an expired entry |
+| `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` starts the time again. |
+| `insert_nx(&k, &v)` | inserts only when there is no live entry. It takes `.ttl(..)` and `.max_idle(..)` too. |
+| `get(&k)`, `remove(&k)`, `contains_key(&k)` | never show an expired entry. Only `get` starts the idle time again. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
 | `len()`, `is_empty()`, `clear()` | `len` counts live entries only and deletes nothing |
-| `iter()`, `keys()`, `values()` | streams of live entries. They are `async` because they delete expired entries first. |
+| `iter()`, `keys()`, `values()` | streams of live entries. They are `async`, because they delete expired entries first. |
 | `evict_expired()` | deletes expired entries now and returns how many |
+
+`ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
 
 ## How expiry works
 
 - Time comes from the Redis server, so programs with different clocks agree.
-- Expiry is lazy. Every call hides and deletes the expired entries it touches.
-- There is no background task. An entry that nobody touches stays in Redis until `evict_expired`, `iter` or `clear` runs. `len` counts only live entries but does not delete the expired ones. Call `evict_expired` from a timer if you need memory back sooner.
+- An expired entry is hidden at once. Every call also deletes the expired entries it touches.
+- A background task deletes the rest, like the eviction task in Redisson. It starts when you get the cache from the client, and runs once per cache name and client. It wakes up every `eviction_interval` (5 seconds by default) while there is work, and waits longer and longer (up to two hours) while there is none. It cleans up to 100 entries from each set per run. You can set the interval with `Client::builder().eviction_interval(..)`.
+- The task stops when the client is dropped.
+
+## How it is stored
+
+This is the scheme of Redisson's `RMapCache`:
+
+| Key | Type | Content |
+|---|---|---|
+| `{name}` | hash | the values, each with its idle time in front |
+| `redissun__timeout__set:{name}` | sorted set | entry and the time when its time to live ends |
+| `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends |
 
 ## Object methods
 
-`del`, `expire` and `persist` apply to both Redis keys. `rename` is not supported and returns `Error::Unsupported`. The keys are `{name}` (a hash) and `{name}:expires` (a sorted set). The `{name}` hash tag keeps them in one slot in Redis Cluster.
+`del`, `expire` and `persist` apply to all three Redis keys. `rename` is not supported and returns `Error::Unsupported`. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.

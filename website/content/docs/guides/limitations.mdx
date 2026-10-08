@@ -15,6 +15,6 @@ description: Things to know about this version.
 - **Blocking pops** use their own short-lived connection. A pop that is dropped while an element is on its way can lose that element. Use `.timeout(wait)` for time limits.
 - **Topic** does not store messages. A slow subscriber that falls more than 256 messages behind gets `Error::Lagged`.
 - **RwLock** does not prefer writers, and a reader cannot be upgraded to a writer.
-- **HashMapCache** has no background eviction and no idle timeout. Expired entries use memory until they are touched or `evict_expired` runs.
+- **HashMapCache** has no maximum size (LRU or LFU) and no entry listeners. The background clean-up runs on the runtime that first created the cache.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error.
 - **Before 1.0**, the API can change between minor versions.

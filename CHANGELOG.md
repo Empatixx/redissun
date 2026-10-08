@@ -2,8 +2,14 @@
 
 ## [0.5.0] - unreleased
 
+### Added
+
+- `HashMapCache` entries take `.max_idle(duration)` and a background task now deletes expired entries. `ClientBuilder::eviction_interval` sets how often it wakes up.
+- `Pending` and `PendingTimeout`: the values that waiting calls return.
+
 ### Changed
 
+- `HashMapCache` stores its data like Redisson's `RMapCache`: a hash plus a timeout set and an idle set.
 - Breaking: every waiting call is now one method that you can `await` directly or limit with `.timeout(duration)`. This replaces `Lock::lock_for`, `Lock::lock_with`, `LockOptions`, `RwLock::read_for`, `RwLock::write_for`, `Semaphore::acquire_for`, `RateLimiter::try_acquire_for`, `CountDownLatch::wait_for`, `VecDeque::pop_front_for` and `VecDeque::pop_back_for`. A call with `.timeout` resolves to `Option`. `Lock::lock` also takes `.lease(duration)`.
 
 ## [0.4.0] - unreleased
