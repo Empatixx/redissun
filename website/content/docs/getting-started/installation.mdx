@@ -3,11 +3,19 @@ title: Installation
 description: Add redissun to your project.
 ---
 
-redissun is not on crates.io yet. Add it from Git:
+Add redissun to your project:
+
+```bash
+cargo add redissun
+cargo add tokio --features full
+cargo add serde --features derive
+```
+
+Or write it in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = { git = "https://github.com/Empatixx/redissun" }
+redissun = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```

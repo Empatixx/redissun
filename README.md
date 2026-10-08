@@ -3,17 +3,25 @@
 Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.com/redisson/redisson).
 
 [![CI](https://github.com/Empatixx/redissun/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redissun/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/redissun.svg)](https://crates.io/crates/redissun)
+[![docs.rs](https://img.shields.io/docsrs/redissun)](https://docs.rs/redissun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 With redissun you use a `Map`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
 
 ## Install
 
-redissun is not on crates.io yet. Use it from Git:
+```bash
+cargo add redissun
+cargo add tokio --features full
+cargo add serde --features derive
+```
+
+Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = { git = "https://github.com/Empatixx/redissun" }
+redissun = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -126,7 +134,8 @@ Every call returns `redissun::Result`. The error is `redissun::Error`. It can gr
 
 ## Documentation
 
-- Guides: the `website/` folder (run `cd website && npm install && npm run dev`).
+- Guides: https://empatixx.github.io/redissun/
+- API reference: https://docs.rs/redissun
 - Examples: the [`examples/`](examples) folder.
 - Coming from Redisson? See the migration page in the guides.
 
