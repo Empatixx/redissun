@@ -182,3 +182,61 @@ async fn concurrent_pushes_are_not_lost() {
     read.sort();
     assert_eq!(read, (0..100).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn huge_indexes_do_not_count_from_the_end() {
+    let vec = vec_of(&["a", "b", "c"]).await;
+    assert_eq!(vec.get(usize::MAX).await.unwrap(), None);
+    assert!(matches!(
+        vec.set(usize::MAX, "x").await,
+        Err(Error::OutOfRange)
+    ));
+    assert!(matches!(
+        vec.insert(usize::MAX, "x").await,
+        Err(Error::OutOfRange)
+    ));
+    assert_eq!(vec.remove(usize::MAX).await.unwrap(), None);
+    assert_eq!(vec.range(0..usize::MAX).await.unwrap(), ["a", "b", "c"]);
+    vec.trim(0..usize::MAX).await.unwrap();
+    assert_eq!(contents(&vec).await, ["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn remove_at_the_length_and_on_a_missing_list_returns_none() {
+    let vec = vec_of(&["a"]).await;
+    assert_eq!(vec.remove(1).await.unwrap(), None);
+    let missing = client().await.vec::<String>(unique("vec"));
+    assert_eq!(missing.remove(0).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn trim_past_the_end_empties_the_list() {
+    let vec = vec_of(&["a", "b"]).await;
+    vec.trim(5..9).await.unwrap();
+    assert!(!vec.exists().await.unwrap());
+}
+
+#[tokio::test]
+async fn iter_handles_exact_page_boundaries() {
+    for count in [100u32, 200] {
+        let vec = client().await.vec::<u32>(unique("vec"));
+        let numbers: Vec<u32> = (0..count).collect();
+        vec.extend(numbers.iter()).await.unwrap();
+        let read: Vec<u32> = vec.iter().try_collect().await.unwrap();
+        assert_eq!(read, numbers);
+    }
+}
+
+#[tokio::test]
+async fn a_key_of_another_type_is_a_redis_error() {
+    let client = client().await;
+    let name = unique("wrong");
+    client
+        .bucket::<String>(name.clone())
+        .set("x")
+        .await
+        .unwrap();
+    let vec = client.vec::<String>(name);
+    assert!(matches!(vec.insert(0, "a").await, Err(Error::Redis(_))));
+    assert!(matches!(vec.set(0, "a").await, Err(Error::Redis(_))));
+}

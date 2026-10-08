@@ -36,7 +36,10 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
 
 static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local removed = redis.call('LINDEX', KEYS[1], ARGV[1])
+        "if tonumber(ARGV[1]) >= redis.call('LLEN', KEYS[1]) then
+            return false
+        end
+        local removed = redis.call('LINDEX', KEYS[1], ARGV[1])
         if not removed then
             return false
         end
@@ -45,6 +48,14 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
         return removed",
     )
 });
+
+fn redis_index(index: usize) -> Option<i64> {
+    i64::try_from(index).ok()
+}
+
+fn redis_end(end: usize) -> i64 {
+    i64::try_from(end).unwrap_or(i64::MAX) - 1
+}
 
 fn out_of_range(error: Error) -> Error {
     match error {
@@ -153,11 +164,14 @@ where
 
     /// Returns the value at the index, or `None` when the index is past the end.
     pub async fn get(&self, index: usize) -> Result<Option<V>> {
+        let Some(index) = redis_index(index) else {
+            return Ok(None);
+        };
         let raw: Option<Bytes> = self
             .key
             .core
             .redis()
-            .lindex(self.key.redis_key(), index as i64)
+            .lindex(self.key.redis_key(), index)
             .await?;
         self.decode(raw)
     }
@@ -168,10 +182,11 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let index = redis_index(index).ok_or(Error::OutOfRange)?;
         self.key
             .core
             .redis()
-            .lset::<(), _, _>(self.key.redis_key(), index as i64, self.codec.encode(v)?)
+            .lset::<(), _, _>(self.key.redis_key(), index, self.codec.encode(v)?)
             .await
             .map_err(|error| out_of_range(error.into()))
     }
@@ -227,8 +242,8 @@ where
             .redis()
             .lrange(
                 self.key.redis_key(),
-                range.start as i64,
-                range.end as i64 - 1,
+                redis_index(range.start).unwrap_or(i64::MAX),
+                redis_end(range.end),
             )
             .await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
@@ -244,8 +259,8 @@ where
             .redis()
             .ltrim::<(), _>(
                 self.key.redis_key(),
-                range.start as i64,
-                range.end as i64 - 1,
+                redis_index(range.start).unwrap_or(i64::MAX),
+                redis_end(range.end),
             )
             .await?;
         Ok(())
