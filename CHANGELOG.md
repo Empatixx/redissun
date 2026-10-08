@@ -9,6 +9,8 @@
 
 ### Changed
 
+- A zero `.timeout` on a `VecDeque` pop now pops once without waiting, like the other waiting calls. It used to be an error.
+- A duration that is too long for Redis is now `Error::Config` and no longer wraps around.
 - `HashMapCache` stores its data like Redisson's `RMapCache`: a hash plus a timeout set and an idle set.
 - Breaking: every waiting call is now one method that you can `await` directly or limit with `.timeout(duration)`. This replaces `Lock::lock_for`, `Lock::lock_with`, `LockOptions`, `RwLock::read_for`, `RwLock::write_for`, `Semaphore::acquire_for`, `RateLimiter::try_acquire_for`, `CountDownLatch::wait_for`, `VecDeque::pop_front_for` and `VecDeque::pop_back_for`. A call with `.timeout` resolves to `Option`. `Lock::lock` also takes `.lease(duration)`.
 

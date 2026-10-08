@@ -1,5 +1,5 @@
 use crate::codec::Codec;
-use crate::core::Core;
+use crate::core::{Core, Evictor};
 use crate::error::Result;
 use crate::object::{millis, HasKey, Key};
 use bytes::Bytes;
@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::sync::Notify;
 
 const EVICT_BATCH: usize = 100;
 const MAX_EVICT_PAUSE: Duration = Duration::from_secs(2 * 60 * 60);
@@ -35,8 +36,12 @@ local function fetch(field)
         return false
     end
     local sep = string.find(raw, ':', 1, true)
-    local idle = tonumber(string.sub(raw, 1, sep - 1))
-    local value = string.sub(raw, sep + 1)
+    local idle = 0
+    local value = raw
+    if sep then
+        idle = tonumber(string.sub(raw, 1, sep - 1)) or 0
+        value = string.sub(raw, sep + 1)
+    end
     local expires = math.huge
     local timeoutScore = redis.call('ZSCORE', TIMEOUT, field)
     if timeoutScore then
@@ -142,7 +147,9 @@ static LEN: LazyLock<Script> = LazyLock::new(|| {
             for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now)) do
                 if not expired[field] then
                     expired[field] = true
-                    count = count + 1
+                    if redis.call('HEXISTS', MAIN, field) == 1 then
+                        count = count + 1
+                    end
                 end
             end
         end
@@ -155,9 +162,12 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
         "local removed = 0
         for _, set in ipairs({TIMEOUT, IDLE}) do
             for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now, 'LIMIT', 0, ARGV[1])) do
-                removed = removed + redis.call('HDEL', MAIN, field)
-                redis.call('ZREM', TIMEOUT, field)
-                redis.call('ZREM', IDLE, field)
+                local dropped = redis.call('HDEL', MAIN, field)
+                dropped = dropped + redis.call('ZREM', TIMEOUT, field)
+                dropped = dropped + redis.call('ZREM', IDLE, field)
+                if dropped > 0 then
+                    removed = removed + 1
+                end
             end
         end
         return removed",
@@ -176,10 +186,16 @@ async fn evict(core: &Core, keys: Vec<String>) -> Result<usize> {
         .await
 }
 
-async fn evict_loop(core: Weak<Core>, keys: Vec<String>, minimum: Duration) {
+async fn evict_loop(core: Weak<Core>, keys: Vec<String>, minimum: Duration, wake: Arc<Notify>) {
     let mut pause = minimum;
     loop {
-        tokio::time::sleep(pause).await;
+        tokio::select! {
+            _ = tokio::time::sleep(pause) => {}
+            _ = wake.notified() => {
+                pause = minimum;
+                continue;
+            }
+        }
         let Some(core) = core.upgrade() else {
             return;
         };
@@ -199,16 +215,28 @@ fn start_evictor(core: &Arc<Core>, keys: Vec<String>) {
         return;
     };
     let mut evictors = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
-    if evictors.contains_key(&keys[0]) {
+    if evictors
+        .get(&keys[0])
+        .is_some_and(|evictor| !evictor.handle.is_finished())
+    {
         return;
     }
     let name = keys[0].clone();
+    let wake = Arc::new(Notify::new());
     let handle = runtime.spawn(evict_loop(
         Arc::downgrade(core),
         keys,
         core.eviction_interval,
+        wake.clone(),
     ));
-    evictors.insert(name, handle);
+    evictors.insert(name, Evictor { handle, wake });
+}
+
+fn wake_evictor(core: &Core, name: &str) {
+    let evictors = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(evictor) = evictors.get(name) {
+        evictor.wake.notify_one();
+    }
 }
 
 /// A pending [`HashMapCache::insert`]. Await it, optionally after setting [`Insert::ttl`] or [`Insert::max_idle`].
@@ -258,6 +286,9 @@ where
                     cache.insert_arguments(self.k, self.v, self.ttl, self.max_idle)?,
                 )
                 .await?;
+            if self.ttl.is_some() || self.max_idle.is_some() {
+                wake_evictor(&cache.key.core, &cache.redis_key());
+            }
             cache.decode_value(previous)
         })
     }
@@ -310,6 +341,9 @@ where
                     cache.insert_arguments(self.k, self.v, self.ttl, self.max_idle)?,
                 )
                 .await?;
+            if inserted == 1 && (self.ttl.is_some() || self.max_idle.is_some()) {
+                wake_evictor(&cache.key.core, &cache.redis_key());
+            }
             Ok(inserted == 1)
         })
     }
@@ -369,6 +403,10 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
 
     fn idle_key(&self) -> String {
         format!("redissun__idle__set:{}", self.key.redis_key())
+    }
+
+    fn redis_key(&self) -> String {
+        self.key.redis_key()
     }
 
     fn redis_keys(&self) -> Vec<String> {

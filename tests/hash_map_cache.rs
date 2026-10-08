@@ -369,3 +369,51 @@ async fn a_zero_eviction_interval_is_rejected() {
         .await;
     assert!(matches!(result, Err(Error::Config(_))));
 }
+
+#[tokio::test]
+async fn a_value_without_the_idle_prefix_is_read_as_having_no_idle_time() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    raw_command(&["HSET", &format!("{{{name}}}"), "\"k\"", "\"v\""]).await;
+    assert_eq!(cache.get("k").await.unwrap(), Some("v".to_string()));
+    assert_eq!(cache.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_huge_ttl_is_a_config_error() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let result = cache.insert("a", "x").ttl(Duration::MAX).await;
+    assert!(matches!(result, Err(Error::Config(_))));
+}
+
+#[tokio::test]
+async fn a_new_expiring_entry_wakes_up_a_backed_off_evictor() {
+    let client = connect_with(|builder| builder.eviction_interval(Duration::from_millis(50))).await;
+    let name = unique("cache");
+    let cache = client.hash_map_cache::<String, String>(name.clone());
+    sleep(Duration::from_millis(2000)).await;
+    cache
+        .insert("a", "x")
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(700)).await;
+    let key = format!("{{{name}}}");
+    assert_eq!(raw_command(&["HLEN", &key]).await.trim(), ":0");
+}
+
+#[tokio::test]
+async fn evict_expired_also_removes_orphans_from_the_sets() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let timeouts = format!("redissun__timeout__set:{{{name}}}");
+    raw_command(&["ZADD", &timeouts, "1", "\"ghost\""]).await;
+    assert_eq!(cache.evict_expired().await.unwrap(), 1);
+    assert_eq!(raw_command(&["ZCARD", &timeouts]).await.trim(), ":0");
+}

@@ -1,5 +1,5 @@
 use crate::codec::Codec;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::list;
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;
@@ -124,21 +124,15 @@ where
     }
 
     async fn pop_blocking(&self, front: bool, timeout: Option<Duration>) -> Result<Option<V>> {
-        let seconds = match timeout {
-            Some(timeout) if timeout.is_zero() => {
-                return Err(Error::Config("timeout must be positive".into()));
-            }
-            Some(timeout) => timeout.as_secs_f64(),
-            None => 0.0,
-        };
         let immediate = if front {
             self.pop_front().await?
         } else {
             self.pop_back().await?
         };
-        if immediate.is_some() {
+        if immediate.is_some() || timeout.is_some_and(|timeout| timeout.is_zero()) {
             return Ok(immediate);
         }
+        let seconds = timeout.map_or(0.0, |timeout| timeout.as_secs_f64());
         let connection = self.key.core.blocking_client().await?;
         let reply: std::result::Result<Option<(String, Bytes)>, fred::error::Error> = if front {
             connection.blpop(self.key.redis_key(), seconds).await

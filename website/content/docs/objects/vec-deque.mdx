@@ -46,7 +46,7 @@ loop {
 
 A blocking pop first tries a normal pop. Only when the deque is empty does it open its own short-lived connection and block on that. So a waiting worker never slows down your other calls. Each element goes to exactly one worker.
 
-Use `.timeout(wait)` for a time limit. Do not wrap a pop in `tokio::time::timeout`: if the future is dropped at the wrong moment, an element that Redis has just handed over is lost.
+Use `.timeout(wait)` for a time limit. A zero timeout pops once and does not wait. Do not wrap a pop in `tokio::time::timeout`: if the future is dropped at the wrong moment, an element that Redis has just handed over is lost.
 
 ## Same list as Vec
 

@@ -1,7 +1,6 @@
 mod common;
 
 use common::{client, unique};
-use redissun::Error;
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
@@ -46,12 +45,23 @@ async fn times_out_with_none() {
 }
 
 #[tokio::test]
-async fn zero_timeout_is_a_config_error() {
+async fn zero_timeout_pops_once_without_waiting() {
     let deque = client().await.vec_deque::<String>(unique("deque"));
-    assert!(matches!(
-        deque.pop_front_wait().timeout(Duration::ZERO).await,
-        Err(Error::Config(_))
-    ));
+    let started = Instant::now();
+    assert_eq!(
+        deque
+            .pop_front_wait()
+            .timeout(Duration::ZERO)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(started.elapsed() < Duration::from_millis(500));
+    deque.push_back("a").await.unwrap();
+    assert_eq!(
+        deque.pop_back_wait().timeout(Duration::ZERO).await.unwrap(),
+        Some("a".to_string())
+    );
 }
 
 #[tokio::test]

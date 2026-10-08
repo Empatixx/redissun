@@ -11,14 +11,18 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
+pub(crate) struct Evictor {
+    pub(crate) handle: tokio::task::JoinHandle<()>,
+    pub(crate) wake: Arc<tokio::sync::Notify>,
+}
+
 pub(crate) struct Core {
     pool: Pool,
     id: String,
     pub(crate) lock_lease: Duration,
     pub(crate) eviction_interval: Duration,
     pub(crate) pubsub: Arc<PubSub>,
-    pub(crate) evictors:
-        std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+    pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
 }
 
 impl Core {
@@ -136,7 +140,7 @@ impl Drop for BlockingClient {
 impl Drop for Core {
     fn drop(&mut self) {
         let evictors = self.evictors.get_mut().unwrap_or_else(|e| e.into_inner());
-        evictors.values().for_each(|handle| handle.abort());
+        evictors.values().for_each(|evictor| evictor.handle.abort());
         let Ok(runtime) = Handle::try_current() else {
             return;
         };

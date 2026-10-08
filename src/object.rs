@@ -40,7 +40,8 @@ pub(crate) fn millis(duration: Duration) -> Result<i64> {
     if duration.is_zero() {
         return Err(Error::Config("duration must be positive".into()));
     }
-    Ok(duration.as_nanos().div_ceil(1_000_000) as i64)
+    i64::try_from(duration.as_nanos().div_ceil(1_000_000))
+        .map_err(|_| Error::Config("duration is too long".into()))
 }
 
 impl fmt::Debug for Key {
