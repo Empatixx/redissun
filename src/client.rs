@@ -62,6 +62,11 @@ impl<C: Codec> Client<C> {
         crate::vec_deque::VecDeque::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns the [`HashSet`](crate::HashSet) stored under `name`.
+    pub fn hash_set<V>(&self, name: impl Into<Arc<str>>) -> crate::hash_set::HashSet<V, C> {
+        crate::hash_set::HashSet::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
     /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))
