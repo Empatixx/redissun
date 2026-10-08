@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::object::{millis, tagged, Key, Object};
+use crate::pending::Pending;
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
@@ -246,15 +247,11 @@ impl RateLimiter {
         self.acquire_inner(permits, Some(Duration::ZERO)).await
     }
 
-    /// Waits up to `wait` for the limit to allow `permits`; returns whether it did.
-    pub async fn try_acquire_for(&self, permits: u64, wait: Duration) -> Result<bool> {
-        self.acquire_inner(permits, Some(wait)).await
-    }
-
-    /// Waits until the limit allows `permits`.
-    pub async fn acquire(&self, permits: u64) -> Result<()> {
-        self.acquire_inner(permits, None).await?;
-        Ok(())
+    /// Waits until the limit allows `permits`. Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out.
+    pub fn acquire(&self, permits: u64) -> Pending<'_, ()> {
+        Pending::new(move |wait| async move {
+            Ok(self.acquire_inner(permits, wait).await?.then_some(()))
+        })
     }
 
     async fn take(&self, keys: &[String], arguments: &[Bytes]) -> Result<Option<i64>> {

@@ -21,7 +21,12 @@ async fn a_missing_latch_is_already_open() {
         .await
         .expect("waiting on a missing latch must return at once")
         .unwrap();
-    assert!(latch.wait_for(Duration::from_millis(50)).await.unwrap());
+    assert!(latch
+        .wait()
+        .timeout(Duration::from_millis(50))
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -79,7 +84,12 @@ async fn wait_for_gives_up_while_the_count_is_positive() {
     let latch = client().await.count_down_latch(unique("latch"));
     latch.try_set_count(1).await.unwrap();
     let started = Instant::now();
-    assert!(!latch.wait_for(Duration::from_millis(300)).await.unwrap());
+    assert!(latch
+        .wait()
+        .timeout(Duration::from_millis(300))
+        .await
+        .unwrap()
+        .is_none());
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert!(started.elapsed() < Duration::from_secs(3));
 }
@@ -148,10 +158,11 @@ async fn the_subscription_is_released_after_waiting() {
     latch.try_set_count(1).await.unwrap();
 
     let waiting = latch.clone();
-    let wait = tokio::spawn(async move { waiting.wait_for(Duration::from_millis(800)).await });
+    let wait =
+        tokio::spawn(async move { waiting.wait().timeout(Duration::from_millis(800)).await });
     sleep(Duration::from_millis(300)).await;
     assert_eq!(subscribed_channels(&pattern).await, 1);
-    assert!(!wait.await.unwrap().unwrap());
+    assert!(wait.await.unwrap().unwrap().is_none());
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while subscribed_channels(&pattern).await > 0 {

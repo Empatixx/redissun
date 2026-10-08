@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
+use crate::pending::Pending;
 use crate::wait::{wait_on, SET_IF_ABSENT_AND_PUBLISH};
 use bytes::Bytes;
 use fred::types::scripts::Script;
@@ -96,15 +97,11 @@ impl CountDownLatch {
         self.key.get_i64_or_zero().await
     }
 
-    /// Waits until the count is zero.
-    pub async fn wait(&self) -> Result<()> {
-        self.wait_inner(None).await?;
-        Ok(())
-    }
-
-    /// Waits up to `timeout` for the count to reach zero; returns whether it did.
-    pub async fn wait_for(&self, timeout: Duration) -> Result<bool> {
-        self.wait_inner(Some(timeout)).await
+    /// Waits until the count is zero. Add `.timeout(duration)` to wait at most that long.
+    pub fn wait(&self) -> Pending<'_, ()> {
+        Pending::new(
+            move |timeout| async move { Ok(self.wait_inner(timeout).await?.then_some(())) },
+        )
     }
 
     async fn wait_inner(&self, timeout: Option<Duration>) -> Result<bool> {

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, connect_with, unique};
-use redissun::{Client, Error, LockOptions};
+use redissun::{Client, Error};
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 
@@ -71,7 +71,11 @@ async fn lock_for_gives_up_after_the_wait() {
     let other = client().await.lock(name);
 
     let started = Instant::now();
-    let result = other.lock_for(Duration::from_millis(300)).await.unwrap();
+    let result = other
+        .lock()
+        .timeout(Duration::from_millis(300))
+        .await
+        .unwrap();
     assert!(result.is_none());
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert!(started.elapsed() < Duration::from_secs(3));
@@ -98,8 +102,7 @@ async fn waiter_is_woken_by_unlock_long_before_the_lease_expires() {
 #[tokio::test]
 async fn explicit_lease_expires_without_a_watchdog() {
     let lock = client().await.lock(unique("lock"));
-    let options = LockOptions::new().lease(Duration::from_millis(300));
-    let _guard = lock.lock_with(options).await.unwrap().unwrap();
+    let _guard = lock.lock().lease(Duration::from_millis(300)).await.unwrap();
     assert!(lock.is_locked().await.unwrap());
     sleep(Duration::from_millis(700)).await;
     assert!(!lock.is_locked().await.unwrap());
@@ -134,8 +137,7 @@ async fn dropping_the_guard_releases_the_lock() {
 #[tokio::test]
 async fn unlocking_an_expired_lock_reports_lock_not_held() {
     let lock = client().await.lock(unique("lock"));
-    let options = LockOptions::new().lease(Duration::from_millis(200));
-    let guard = lock.lock_with(options).await.unwrap().unwrap();
+    let guard = lock.lock().lease(Duration::from_millis(200)).await.unwrap();
     sleep(Duration::from_millis(500)).await;
     assert!(matches!(guard.unlock().await, Err(Error::LockNotHeld)));
 }
@@ -192,12 +194,10 @@ async fn contended_lock_gives_mutual_exclusion() {
 #[tokio::test]
 async fn zero_lease_is_rejected_and_a_sub_millisecond_lease_is_accepted() {
     let lock = client().await.lock(unique("lock"));
-    let zero = lock
-        .lock_with(LockOptions::new().lease(Duration::ZERO))
-        .await;
+    let zero = lock.lock().lease(Duration::ZERO).await;
     assert!(matches!(zero, Err(Error::Config(_))));
-    let tiny = LockOptions::new().lease(Duration::from_micros(500));
-    assert!(lock.lock_with(tiny).await.unwrap().is_some());
+    let tiny = lock.lock().lease(Duration::from_micros(500)).await;
+    assert!(tiny.is_ok());
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@ use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::list;
 use crate::object::{HasKey, Key};
+use crate::pending::Pending;
 use bytes::Bytes;
 use fred::interfaces::{KeysInterface, ListInterface};
 use futures::Stream;
@@ -110,25 +111,16 @@ where
         self.decode(raw)
     }
 
-    /// Removes and returns the front value, waiting up to `timeout` for one to arrive (`BLPOP`).
-    /// Use this instead of `tokio::time::timeout`: dropping a pending pop can lose an element that Redis has just handed over.
-    pub async fn pop_front_for(&self, timeout: Duration) -> Result<Option<V>> {
-        self.pop_blocking(true, Some(timeout)).await
+    /// Removes and returns the front value, waiting for one to arrive (`BLPOP`). Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out.
+    ///
+    /// Use `.timeout` for a time limit and not `tokio::time::timeout`: dropping a pending pop can lose an element that Redis has just handed over.
+    pub fn pop_front_wait(&self) -> Pending<'_, V> {
+        Pending::new(move |wait| self.pop_blocking(true, wait))
     }
 
-    /// Removes and returns the back value, waiting up to `timeout` for one to arrive (`BRPOP`).
-    pub async fn pop_back_for(&self, timeout: Duration) -> Result<Option<V>> {
-        self.pop_blocking(false, Some(timeout)).await
-    }
-
-    /// Removes and returns the front value, waiting for one to arrive without a time limit.
-    pub async fn pop_front_wait(&self) -> Result<V> {
-        self.pop_blocking(true, None).await?.ok_or(Error::Timeout)
-    }
-
-    /// Removes and returns the back value, waiting for one to arrive without a time limit.
-    pub async fn pop_back_wait(&self) -> Result<V> {
-        self.pop_blocking(false, None).await?.ok_or(Error::Timeout)
+    /// Removes and returns the back value, waiting for one to arrive (`BRPOP`). Add `.timeout(duration)` to wait at most that long.
+    pub fn pop_back_wait(&self) -> Pending<'_, V> {
+        Pending::new(move |wait| self.pop_blocking(false, wait))
     }
 
     async fn pop_blocking(&self, front: bool, timeout: Option<Duration>) -> Result<Option<V>> {

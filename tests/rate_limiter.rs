@@ -155,17 +155,21 @@ async fn try_acquire_for_waits_for_the_window_to_move() {
 
     let started = Instant::now();
     assert!(limiter
-        .try_acquire_for(1, Duration::from_secs(3))
+        .acquire(1)
+        .timeout(Duration::from_secs(3))
         .await
-        .unwrap());
+        .unwrap()
+        .is_some());
     assert!(started.elapsed() >= Duration::from_millis(350));
     assert!(started.elapsed() < Duration::from_millis(1500));
 
     let started = Instant::now();
-    assert!(!limiter
-        .try_acquire_for(1, Duration::from_millis(100))
+    assert!(limiter
+        .acquire(1)
+        .timeout(Duration::from_millis(100))
         .await
-        .unwrap());
+        .unwrap()
+        .is_none());
     assert!(started.elapsed() >= Duration::from_millis(100));
     assert!(started.elapsed() < Duration::from_millis(450));
 }

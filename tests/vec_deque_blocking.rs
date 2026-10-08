@@ -11,7 +11,11 @@ async fn returns_at_once_when_an_element_is_there() {
     let deque = client().await.vec_deque::<String>(unique("deque"));
     deque.push_back("a").await.unwrap();
     let started = Instant::now();
-    let value = deque.pop_front_for(Duration::from_secs(5)).await.unwrap();
+    let value = deque
+        .pop_front_wait()
+        .timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
     assert_eq!(value, Some("a".to_string()));
     assert!(started.elapsed() < Duration::from_secs(1));
 }
@@ -22,14 +26,16 @@ async fn times_out_with_none() {
     let started = Instant::now();
     assert_eq!(
         deque
-            .pop_front_for(Duration::from_millis(300))
+            .pop_front_wait()
+            .timeout(Duration::from_millis(300))
             .await
             .unwrap(),
         None
     );
     assert_eq!(
         deque
-            .pop_back_for(Duration::from_millis(300))
+            .pop_back_wait()
+            .timeout(Duration::from_millis(300))
             .await
             .unwrap(),
         None
@@ -43,7 +49,7 @@ async fn times_out_with_none() {
 async fn zero_timeout_is_a_config_error() {
     let deque = client().await.vec_deque::<String>(unique("deque"));
     assert!(matches!(
-        deque.pop_front_for(Duration::ZERO).await,
+        deque.pop_front_wait().timeout(Duration::ZERO).await,
         Err(Error::Config(_))
     ));
 }

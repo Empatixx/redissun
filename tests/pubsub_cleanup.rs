@@ -22,7 +22,8 @@ async fn a_subscription_exists_while_waiting_and_is_released_afterwards() {
     let holder = client().await.lock(name.clone()).lock().await.unwrap();
     let waiter = client().await.lock(name);
 
-    let waiting = tokio::spawn(async move { waiter.lock_for(Duration::from_millis(1200)).await });
+    let waiting =
+        tokio::spawn(async move { waiter.lock().timeout(Duration::from_millis(1200)).await });
     sleep(Duration::from_millis(400)).await;
     assert_eq!(subscribed_channels(&pattern).await, 1);
 
@@ -40,8 +41,9 @@ async fn waiters_on_one_lock_share_a_subscription_until_the_last_one_leaves() {
     let short = client.lock(name.clone());
     let long = client.lock(name);
 
-    let first = tokio::spawn(async move { short.lock_for(Duration::from_millis(500)).await });
-    let second = tokio::spawn(async move { long.lock_for(Duration::from_millis(1800)).await });
+    let first = tokio::spawn(async move { short.lock().timeout(Duration::from_millis(500)).await });
+    let second =
+        tokio::spawn(async move { long.lock().timeout(Duration::from_millis(1800)).await });
     sleep(Duration::from_millis(900)).await;
     assert!(first.await.unwrap().unwrap().is_none());
     assert_eq!(subscribed_channels(&pattern).await, 1);
@@ -61,7 +63,8 @@ async fn waiting_works_again_after_the_subscription_was_released() {
     let holder = first_client.lock(name.clone()).lock().await.unwrap();
     let gave_up = second_client
         .lock(name.clone())
-        .lock_for(Duration::from_millis(300))
+        .lock()
+        .timeout(Duration::from_millis(300))
         .await
         .unwrap();
     assert!(gave_up.is_none());
@@ -100,7 +103,8 @@ async fn many_distinct_lock_names_leave_no_subscriptions_behind() {
     for i in 0..20 {
         let gave_up = waiter_client
             .lock(format!("{prefix}:{i}"))
-            .lock_for(Duration::from_millis(30))
+            .lock()
+            .timeout(Duration::from_millis(30))
             .await
             .unwrap();
         assert!(gave_up.is_none());

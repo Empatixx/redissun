@@ -1,6 +1,7 @@
-use crate::error::{Error, Result};
-use crate::lock::{acquire, channel, LockGuard, LockOptions, Mode, FORCE_UNLOCK};
+use crate::error::Result;
+use crate::lock::{acquire, channel, LockGuard, Mode, FORCE_UNLOCK};
 use crate::object::Key;
+use crate::pending::Pending;
 use bytes::Bytes;
 use fred::interfaces::HashesInterface;
 use std::fmt;
@@ -35,42 +36,24 @@ impl RwLock {
         Self { key }
     }
 
-    async fn acquire(&self, wait: Option<Duration>, mode: Mode) -> Result<Option<LockGuard>> {
-        let options = match wait {
-            Some(wait) => LockOptions::new().wait(wait),
-            None => LockOptions::new(),
-        };
-        acquire(&self.key, options, mode).await
-    }
-
-    /// Waits until a read lock is acquired.
-    pub async fn read(&self) -> Result<RwLockReadGuard> {
-        self.acquire(None, Mode::Read).await?.ok_or(Error::Timeout)
+    /// Waits until a read lock is acquired. Add `.timeout(duration)` to wait at most that long.
+    pub fn read(&self) -> Pending<'_, RwLockReadGuard> {
+        Pending::new(move |wait| acquire(&self.key, None, wait, Mode::Read))
     }
 
     /// Takes a read lock when no other owner holds the write lock; returns `None` at once otherwise.
     pub async fn try_read(&self) -> Result<Option<RwLockReadGuard>> {
-        self.acquire(Some(Duration::ZERO), Mode::Read).await
+        acquire(&self.key, None, Some(Duration::ZERO), Mode::Read).await
     }
 
-    /// Waits up to `wait` for a read lock.
-    pub async fn read_for(&self, wait: Duration) -> Result<Option<RwLockReadGuard>> {
-        self.acquire(Some(wait), Mode::Read).await
-    }
-
-    /// Waits until the write lock is acquired.
-    pub async fn write(&self) -> Result<RwLockWriteGuard> {
-        self.acquire(None, Mode::Write).await?.ok_or(Error::Timeout)
+    /// Waits until the write lock is acquired. Add `.timeout(duration)` to wait at most that long.
+    pub fn write(&self) -> Pending<'_, RwLockWriteGuard> {
+        Pending::new(move |wait| acquire(&self.key, None, wait, Mode::Write))
     }
 
     /// Takes the write lock when nobody else holds any lock; returns `None` at once otherwise.
     pub async fn try_write(&self) -> Result<Option<RwLockWriteGuard>> {
-        self.acquire(Some(Duration::ZERO), Mode::Write).await
-    }
-
-    /// Waits up to `wait` for the write lock.
-    pub async fn write_for(&self, wait: Duration) -> Result<Option<RwLockWriteGuard>> {
-        self.acquire(Some(wait), Mode::Write).await
+        acquire(&self.key, None, Some(Duration::ZERO), Mode::Write).await
     }
 
     /// Returns whether any owner holds the write lock.

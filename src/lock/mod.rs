@@ -5,11 +5,14 @@ pub use guard::LockGuard;
 
 use crate::error::{Error, Result};
 use crate::object::{millis as to_millis, HasKey, Key};
+use crate::pending::{Pending, PendingTimeout};
 use crate::shield::shielded;
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::scripts::Script;
 use std::fmt;
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -296,32 +299,38 @@ enum Attempt {
     Busy(i64),
 }
 
-/// Options for [`Lock::lock_with`].
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-pub struct LockOptions {
-    /// Time after which the lock frees itself. When unset the lock is renewed by a watchdog instead.
-    pub lease: Option<Duration>,
-    /// How long to wait for the lock. When unset the call waits indefinitely.
-    pub wait: Option<Duration>,
+/// A pending [`Lock::lock`]. Await it to wait for the lock without a limit. Set `.lease(duration)` or `.timeout(duration)` first to change that.
+#[must_use = "a pending lock does nothing until it is awaited"]
+pub struct LockRequest<'a> {
+    lock: &'a Lock,
+    lease: Option<Duration>,
 }
 
-impl LockOptions {
-    /// Options that wait indefinitely and use the watchdog.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets an explicit lease, which disables the watchdog.
+impl<'a> LockRequest<'a> {
+    /// Sets an explicit lease, which disables the watchdog. Without it the watchdog renews the lock.
     pub fn lease(mut self, lease: Duration) -> Self {
         self.lease = Some(lease);
         self
     }
 
-    /// Sets the maximum time to wait for the lock.
-    pub fn wait(mut self, wait: Duration) -> Self {
-        self.wait = Some(wait);
-        self
+    /// Waits at most `timeout` for the lock. The call then resolves to `None` when the time runs out.
+    pub fn timeout(self, timeout: Duration) -> PendingTimeout<'a, LockGuard> {
+        let (lock, lease) = (self.lock, self.lease);
+        Pending::new(move |wait| acquire(&lock.key, lease, wait, Mode::Exclusive)).timeout(timeout)
+    }
+}
+
+impl<'a> IntoFuture for LockRequest<'a> {
+    type Output = Result<LockGuard>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        let (lock, lease) = (self.lock, self.lease);
+        Box::pin(async move {
+            acquire(&lock.key, lease, None, Mode::Exclusive)
+                .await?
+                .ok_or(Error::Timeout)
+        })
     }
 }
 
@@ -352,27 +361,17 @@ impl Lock {
         Self { key }
     }
 
-    /// Waits until the lock is acquired.
-    pub async fn lock(&self) -> Result<LockGuard> {
-        self.lock_with(LockOptions::new())
-            .await?
-            .ok_or(Error::Timeout)
+    /// Waits until the lock is acquired. Add `.timeout(duration)` to wait at most that long, or `.lease(duration)` to set a lease instead of using the watchdog.
+    pub fn lock(&self) -> LockRequest<'_> {
+        LockRequest {
+            lock: self,
+            lease: None,
+        }
     }
 
     /// Acquires the lock when it is free; returns `None` immediately otherwise.
     pub async fn try_lock(&self) -> Result<Option<LockGuard>> {
-        self.lock_with(LockOptions::new().wait(Duration::ZERO))
-            .await
-    }
-
-    /// Waits up to `wait` for the lock; returns `None` when the time runs out.
-    pub async fn lock_for(&self, wait: Duration) -> Result<Option<LockGuard>> {
-        self.lock_with(LockOptions::new().wait(wait)).await
-    }
-
-    /// Acquires the lock according to `options`; returns `None` when the wait runs out.
-    pub async fn lock_with(&self, options: LockOptions) -> Result<Option<LockGuard>> {
-        acquire(&self.key, options, Mode::Exclusive).await
+        acquire(&self.key, None, Some(Duration::ZERO), Mode::Exclusive).await
     }
 
     /// Returns whether any owner holds the lock.
@@ -420,15 +419,16 @@ impl Lock {
 
 pub(crate) async fn acquire(
     key: &Key,
-    options: LockOptions,
+    lease: Option<Duration>,
+    wait: Option<Duration>,
     mode: Mode,
 ) -> Result<Option<LockGuard>> {
     let core = &key.core;
     let owner = core.owner();
-    let watchdog = options.lease.is_none();
-    let lease = options.lease.unwrap_or(core.lock_lease);
-    let deadline = options.wait.map(|wait| Instant::now() + wait);
-    let subscription = match options.wait {
+    let watchdog = lease.is_none();
+    let lease = lease.unwrap_or(core.lock_lease);
+    let deadline = wait.map(|wait| Instant::now() + wait);
+    let subscription = match wait {
         Some(wait) if wait.is_zero() => None,
         _ => Some(core.pubsub.subscribe(&channel(key.name())).await?),
     };

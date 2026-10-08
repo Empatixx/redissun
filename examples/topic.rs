@@ -14,7 +14,9 @@ async fn main() -> redissun::Result<()> {
     let jobs = client.vec_deque::<String>("example:jobs");
     println!(
         "waiting for a job = {:?}",
-        jobs.pop_front_for(Duration::from_millis(200)).await?
+        jobs.pop_front_wait()
+            .timeout(Duration::from_millis(200))
+            .await?
     );
     Ok(())
 }

@@ -105,9 +105,14 @@ async fn waiting_times_out() {
     let read = lock.read().await.unwrap();
     let other = lock_of(&client, &name);
     let started = Instant::now();
-    let got =
-        in_task(move || async move { other.write_for(Duration::from_millis(400)).await.unwrap() })
-            .await;
+    let got = in_task(move || async move {
+        other
+            .write()
+            .timeout(Duration::from_millis(400))
+            .await
+            .unwrap()
+    })
+    .await;
     assert!(got.is_none());
     assert!(started.elapsed() >= Duration::from_millis(350));
     read.unlock().await.unwrap();
@@ -154,7 +159,8 @@ async fn dropping_a_guard_releases_the_lock() {
     let writer = lock_of(&client, &name);
     let got = in_task(move || async move {
         writer
-            .write_for(Duration::from_secs(3))
+            .write()
+            .timeout(Duration::from_secs(3))
             .await
             .unwrap()
             .is_some()
@@ -189,7 +195,8 @@ async fn a_crashed_reader_stops_blocking_writers_when_its_lease_ends() {
     let started = Instant::now();
     let got = in_task(move || async move {
         writer
-            .write_for(Duration::from_secs(5))
+            .write()
+            .timeout(Duration::from_secs(5))
             .await
             .unwrap()
             .is_some()

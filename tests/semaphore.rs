@@ -31,7 +31,10 @@ async fn a_missing_semaphore_has_no_permits() {
     let semaphore = client().await.semaphore(unique("sem"));
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
     assert!(semaphore.try_acquire(1).await.unwrap().is_none());
-    let waited = semaphore.acquire_for(1, Duration::from_millis(200)).await;
+    let waited = semaphore
+        .acquire(1)
+        .timeout(Duration::from_millis(200))
+        .await;
     assert!(waited.unwrap().is_none());
 }
 
@@ -122,7 +125,10 @@ async fn acquire_for_gives_up_after_the_wait() {
     let _held = semaphore.acquire(1).await.unwrap();
 
     let started = Instant::now();
-    let result = semaphore.acquire_for(1, Duration::from_millis(300)).await;
+    let result = semaphore
+        .acquire(1)
+        .timeout(Duration::from_millis(300))
+        .await;
     assert!(result.unwrap().is_none());
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert!(started.elapsed() < Duration::from_secs(3));
@@ -204,7 +210,7 @@ async fn the_subscription_is_released_after_waiting() {
 
     let waiting = semaphore.clone();
     let wait =
-        tokio::spawn(async move { waiting.acquire_for(1, Duration::from_millis(800)).await });
+        tokio::spawn(async move { waiting.acquire(1).timeout(Duration::from_millis(800)).await });
     sleep(Duration::from_millis(300)).await;
     assert_eq!(subscribed_channels(&pattern).await, 1);
     assert!(wait.await.unwrap().unwrap().is_none());

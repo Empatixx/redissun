@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
+use crate::pending::Pending;
 use crate::shield::shielded;
 use crate::wait::{wait_on, SET_IF_ABSENT_AND_PUBLISH};
 use bytes::Bytes;
@@ -150,21 +151,14 @@ impl Semaphore {
         Ok(())
     }
 
-    /// Waits until `permits` are available and takes them.
-    pub async fn acquire(&self, permits: u64) -> Result<Permits> {
-        self.acquire_inner(permits, None)
-            .await?
-            .ok_or(Error::Timeout)
+    /// Waits until `permits` are available and takes them. Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out.
+    pub fn acquire(&self, permits: u64) -> Pending<'_, Permits> {
+        Pending::new(move |wait| self.acquire_inner(permits, wait))
     }
 
     /// Takes `permits` if they are available right now; returns `None` otherwise.
     pub async fn try_acquire(&self, permits: u64) -> Result<Option<Permits>> {
         self.acquire_inner(permits, Some(Duration::ZERO)).await
-    }
-
-    /// Waits up to `wait` for `permits`; returns `None` when the time runs out.
-    pub async fn acquire_for(&self, permits: u64, wait: Duration) -> Result<Option<Permits>> {
-        self.acquire_inner(permits, Some(wait)).await
     }
 
     async fn try_take(&self, permits: u64, argument: &Bytes) -> Result<Option<Permits>> {
