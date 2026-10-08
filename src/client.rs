@@ -52,6 +52,11 @@ impl<C: Codec> Client<C> {
         HashMap::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns the [`Vec`](crate::Vec) stored under `name`.
+    pub fn vec<V>(&self, name: impl Into<Arc<str>>) -> crate::vec::Vec<V, C> {
+        crate::vec::Vec::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
     /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))

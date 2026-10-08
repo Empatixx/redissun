@@ -22,6 +22,9 @@ pub enum Error {
     /// The operation is not supported by this object.
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+    /// The index is past the end of the list.
+    #[error("index out of range")]
+    OutOfRange,
 }
 
 /// Result alias used by every fallible redissun call.
@@ -54,5 +57,6 @@ mod tests {
             Error::Unsupported("rename".into()).to_string(),
             "unsupported operation: rename"
         );
+        assert_eq!(Error::OutOfRange.to_string(), "index out of range");
     }
 }
