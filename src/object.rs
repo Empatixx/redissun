@@ -24,6 +24,18 @@ pub trait Object {
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send;
 }
 
+pub(crate) fn tagged(name: &str) -> String {
+    let has_tag = name
+        .find('{')
+        .and_then(|open| name[open + 1..].find('}'))
+        .is_some_and(|length| length > 0);
+    if has_tag {
+        name.to_string()
+    } else {
+        format!("{{{name}}}")
+    }
+}
+
 pub(crate) fn millis(duration: Duration) -> Result<i64> {
     if duration.is_zero() {
         return Err(Error::Config("duration must be positive".into()));
@@ -70,9 +82,31 @@ impl Key {
         self.name.to_string()
     }
 
-    pub(crate) async fn del(&self) -> Result<bool> {
-        let removed: i64 = self.core.redis().del(self.redis_key()).await?;
+    pub(crate) async fn del_all(&self, companions: Vec<String>) -> Result<bool> {
+        let keys: Vec<String> = std::iter::once(self.redis_key())
+            .chain(companions)
+            .collect();
+        let removed: i64 = self.core.redis().del(keys).await?;
         Ok(removed > 0)
+    }
+
+    pub(crate) async fn expire_all(&self, ttl: Duration, companions: Vec<String>) -> Result<bool> {
+        let applied = self.expire(ttl).await?;
+        for companion in companions {
+            self.core
+                .redis()
+                .pexpire::<bool, _>(companion, millis(ttl)?, None)
+                .await?;
+        }
+        Ok(applied)
+    }
+
+    pub(crate) async fn persist_all(&self, companions: Vec<String>) -> Result<bool> {
+        let cleared = self.persist().await?;
+        for companion in companions {
+            self.core.redis().persist::<bool, _>(companion).await?;
+        }
+        Ok(cleared)
     }
 
     pub(crate) async fn exists(&self) -> Result<bool> {
@@ -113,6 +147,10 @@ mod sealed {
 
     pub trait HasKey {
         fn key(&self) -> &Key;
+
+        fn companions(&self) -> Vec<String> {
+            Vec::new()
+        }
     }
 }
 
@@ -124,7 +162,7 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn del(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.key().del()
+        self.key().del_all(self.companions())
     }
 
     fn exists(&self) -> impl Future<Output = Result<bool>> + Send {
@@ -132,11 +170,18 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send {
-        self.key().rename(new_name)
+        let companions = self.companions();
+        async move {
+            if companions.is_empty() {
+                self.key().rename(new_name).await
+            } else {
+                Err(Error::Unsupported("rename".into()))
+            }
+        }
     }
 
     fn expire(&self, ttl: Duration) -> impl Future<Output = Result<bool>> + Send {
-        self.key().expire(ttl)
+        self.key().expire_all(ttl, self.companions())
     }
 
     fn ttl(&self) -> impl Future<Output = Result<Option<Duration>>> + Send {
@@ -144,6 +189,19 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.key().persist()
+        self.key().persist_all(self.companions())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tagged;
+
+    #[test]
+    fn names_get_a_hash_tag_unless_they_already_have_a_real_one() {
+        assert_eq!(tagged("api"), "{api}");
+        assert_eq!(tagged("{team}:api"), "{team}:api");
+        assert_eq!(tagged("a{}b"), "{a{}b}");
+        assert_eq!(tagged("}a{"), "{}a{}");
     }
 }

@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::object::{millis, Key, Object};
+use crate::object::{millis, tagged, Key, Object};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
@@ -147,18 +147,6 @@ impl RateType {
             RateType::Overall => "0",
             RateType::PerClient => "1",
         }
-    }
-}
-
-fn tagged(name: &str) -> String {
-    let has_tag = name
-        .find('{')
-        .and_then(|open| name[open + 1..].find('}'))
-        .is_some_and(|length| length > 0);
-    if has_tag {
-        name.to_string()
-    } else {
-        format!("{{{name}}}")
     }
 }
 
@@ -376,18 +364,5 @@ impl Object for RateLimiter {
 
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
         self.persist_all()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::tagged;
-
-    #[test]
-    fn names_get_a_hash_tag_unless_they_already_have_a_real_one() {
-        assert_eq!(tagged("api"), "{api}");
-        assert_eq!(tagged("{team}:api"), "{team}:api");
-        assert_eq!(tagged("a{}b"), "{a{}b}");
-        assert_eq!(tagged("}a{"), "{}a{}");
     }
 }

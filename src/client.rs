@@ -4,9 +4,10 @@ use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
 use crate::hash_map::HashMap;
+use crate::hash_map_cache::HashMapCache;
 use crate::latch::CountDownLatch;
 use crate::lock::Lock;
-use crate::object::Key;
+use crate::object::{tagged, Key};
 use crate::rate_limiter::RateLimiter;
 use crate::rw_lock::RwLock;
 use crate::semaphore::Semaphore;
@@ -74,6 +75,15 @@ impl<C: Codec> Client<C> {
         Topic::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns the [`HashMapCache`] stored under `name`.
+    pub fn hash_map_cache<K, V>(&self, name: impl Into<Arc<str>>) -> HashMapCache<K, V, C> {
+        let name: Arc<str> = name.into();
+        HashMapCache::new(
+            Key::new(self.core.clone(), tagged(&name)),
+            self.codec.clone(),
+        )
+    }
+
     /// Returns the [`Lock`] named `name`.
     pub fn lock(&self, name: impl Into<Arc<str>>) -> Lock {
         Lock::new(Key::new(self.core.clone(), name))
@@ -82,7 +92,7 @@ impl<C: Codec> Client<C> {
     /// Returns the [`RwLock`] named `name`.
     pub fn rw_lock(&self, name: impl Into<Arc<str>>) -> RwLock {
         let name: Arc<str> = name.into();
-        RwLock::new(Key::new(self.core.clone(), format!("{{{name}}}")))
+        RwLock::new(Key::new(self.core.clone(), tagged(&name)))
     }
 
     /// Returns the [`Semaphore`] named `name`.
