@@ -56,6 +56,10 @@ async fn main() -> redissun::Result<()> {
 | `Bucket` | `RBucket` | string |
 | `Map` | `RMap` | hash |
 | `Lock` | `RLock` | hash and pub/sub |
+| `AtomicLong` | `RAtomicLong` | string |
+| `Semaphore` | `RSemaphore` | string and pub/sub |
+| `CountDownLatch` | `RCountDownLatch` | string and pub/sub |
+| `RateLimiter` | `RRateLimiter` | hash, string and sorted set |
 
 ### Bucket
 
@@ -96,6 +100,61 @@ guard.unlock().await?;
 - `lock_with(options)` lets you choose both wait time and lease.
 
 A lock has a lease. A watchdog renews it while you hold the lock. If your program crashes, the lock frees itself when the lease ends. Waiting programs wake up as soon as the lock is released. They do not poll.
+
+### AtomicLong
+
+A shared counter. A missing counter reads as 0.
+
+```rust
+let visits = client.atomic_long("visits");
+let total = visits.incr().await?;
+```
+
+### Semaphore
+
+Limits how many programs do something at the same time.
+
+```rust
+let semaphore = client.semaphore("workers");
+semaphore.try_set_permits(3).await?;
+
+let permits = semaphore.acquire(1).await?;
+// do the work
+permits.release().await?;
+```
+
+`Permits` returns the permits when you drop it. Call `forget()` to keep them taken and `semaphore.release(n)` to give them back later.
+
+### CountDownLatch
+
+One side counts down, the other side waits for zero.
+
+```rust
+let latch = client.count_down_latch("ready");
+latch.try_set_count(3).await?;
+
+latch.count_down().await?;   // in each worker
+latch.wait().await?;         // in the coordinator
+```
+
+### RateLimiter
+
+At most `rate` permits in any window of `interval`. The window slides, it does not reset.
+
+```rust
+use redissun::RateType;
+use std::time::Duration;
+
+let limiter = client.rate_limiter("api");
+limiter.try_set_rate(RateType::Overall, 100, Duration::from_secs(1)).await?;
+
+if limiter.try_acquire(1).await? {
+    // allowed
+}
+limiter.acquire(1).await?; // or wait until it is allowed
+```
+
+`RateType::Overall` shares the limit between all clients. `RateType::PerClient` gives each client its own.
 
 ### Common methods
 

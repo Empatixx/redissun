@@ -1,0 +1,50 @@
+---
+title: RateLimiter
+description: Allow at most a number of actions in a time window.
+---
+
+A `RateLimiter` allows at most `rate` permits in any window of length `interval`. The window slides. It does not reset at fixed moments.
+
+```rust
+use redissun::RateType;
+use std::time::Duration;
+
+let limiter = client.rate_limiter("api");
+limiter.try_set_rate(RateType::Overall, 100, Duration::from_secs(1)).await?;
+
+if limiter.try_acquire(1).await? {
+    // allowed
+}
+```
+
+## Setting the rate
+
+| Method | What it does |
+|---|---|
+| `try_set_rate(type, rate, interval)` | sets the rate, only if the limiter is not set yet |
+| `set_rate(type, rate, interval)` | replaces the rate and forgets the permits already used |
+
+`RateType::Overall` shares the limit between all clients. `RateType::PerClient` counts the permits of each client separately.
+
+## Taking permits
+
+| Method | What it does |
+|---|---|
+| `try_acquire(n)` | `true` if allowed now |
+| `try_acquire_for(n, wait)` | waits up to `wait` for the window to move |
+| `acquire(n)` | waits until allowed |
+| `available_permits()` | permits you can take now |
+
+Asking for more permits than `rate` is an error. A limiter that was never set is an error too. `0` permits and a `0` rate are `Error::Config`.
+
+## How it works
+
+This is the same method Redisson uses. Three Redis keys hold the state: a hash with the settings, a number with the permits left, and a sorted set with the permits that were taken, scored by time. A Lua script removes the entries that are older than the interval and then either records the new permits or returns how many milliseconds to wait.
+
+One difference: the time comes from the Redis server, not from your computer. So clients with different clocks agree.
+
+## Things to know
+
+- All keys share the hash tag `{name}`, so they stay in one slot in Redis Cluster.
+- `rename` is not supported and returns `Error::Unsupported`.
+- `del`, `expire` and `persist` work on all keys of the limiter.

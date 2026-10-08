@@ -1,0 +1,30 @@
+---
+title: AtomicLong
+description: A shared counter.
+---
+
+An `AtomicLong` is a number in a Redis string. A missing counter reads as 0.
+
+```rust
+let visits = client.atomic_long("visits");
+
+let total = visits.incr().await?;
+visits.add_and_get(10).await?;
+```
+
+## Methods
+
+| Method | Redis command | Returns |
+|---|---|---|
+| `get()` | `GET` | the value, 0 if missing |
+| `set(v)` | `SET` | nothing |
+| `get_and_set(v)` | `SET GET` | the old value |
+| `get_and_delete()` | `GETDEL` | the old value |
+| `compare_and_set(expected, update)` | Lua script | `true` if the value was changed |
+| `add_and_get(delta)` | `INCRBY` | the new value |
+| `get_and_add(delta)` | `INCRBY` | the value before |
+| `incr()` and `decr()` | `INCR`, `DECR` | the new value |
+
+`compare_and_set` treats a missing counter as 0, like Redisson. `get_and_set` and `get_and_delete` need Redis 6.2 or newer.
+
+The value is stored as a plain integer, not through the codec. Other tools can read it. If the key holds something that is not an integer, the call returns an error.

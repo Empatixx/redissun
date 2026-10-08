@@ -12,6 +12,10 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `Bucket` | string | `RBucket` |
 | `Map` | hash | `RMap` |
 | `Lock` | hash and pub/sub | `RLock` |
+| `AtomicLong` | string | `RAtomicLong` |
+| `Semaphore` | string and pub/sub | `RSemaphore` |
+| `CountDownLatch` | string and pub/sub | `RCountDownLatch` |
+| `RateLimiter` | hash, string and sorted set | `RRateLimiter` |
 
 - It uses tokio. Every call is `async`.
 - Values are turned into bytes by a codec. The default is JSON.

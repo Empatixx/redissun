@@ -1,1 +1,1 @@
-{"title": "Objects", "pages": ["bucket", "map", "lock"]}
+{"title": "Objects", "pages": ["bucket", "map", "atomic-long", "lock", "semaphore", "count-down-latch", "rate-limiter"]}

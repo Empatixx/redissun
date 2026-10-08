@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0] - unreleased
+
+### Added
+
+- `AtomicLong`: `get`, `set`, `get_and_set`, `get_and_delete`, `compare_and_set`, `add_and_get`, `get_and_add`, `incr`, `decr`.
+- `Semaphore` with `Permits` guards: `try_set_permits`, `add_permits`, `available_permits`, `drain_permits`, `acquire`, `try_acquire`, `acquire_for`, `release`.
+- `CountDownLatch`: `try_set_count`, `count_down`, `count`, `wait`, `wait_for`.
+- `RateLimiter` with a sliding window and `RateType::{Overall, PerClient}`: `try_set_rate`, `set_rate`, `try_acquire`, `try_acquire_for`, `acquire`, `available_permits`.
+- `Error::Unsupported`.
+- `Debug` for all public handle types. It never prints the connection URL.
+
+### Fixed
+
+- Pub/sub subscriptions are now released when the last waiter on a channel leaves. Before, a process that waited on many different lock names kept every subscription until it exited.
+
+
 ## [0.1.0] - unreleased
 
 ### Added

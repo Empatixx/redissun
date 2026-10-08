@@ -10,6 +10,10 @@ description: How Redisson names and behaviour map to redissun.
 | `RBucket` | `Bucket` |
 | `RMap` | `Map` |
 | `RLock` | `Lock` |
+| `RAtomicLong` | `AtomicLong` |
+| `RSemaphore` | `Semaphore` |
+| `RCountDownLatch` | `CountDownLatch` |
+| `RRateLimiter` | `RateLimiter` |
 | `redisson.getMap("x")` | `client.map("x")` |
 | `redisson.getLock("x")` | `client.lock("x")` |
 
@@ -57,9 +61,60 @@ description: How Redisson names and behaviour map to redissun.
 | `forceUnlock()` | `force_unlock().await` |
 | `lockWatchdogTimeout` | `Client::builder().lock_lease(..)` |
 
+## AtomicLong
+
+| Redisson | redissun |
+|---|---|
+| `get()` | `get()` |
+| `set(v)` | `set(v)` |
+| `getAndSet(v)` | `get_and_set(v)` |
+| `getAndDelete()` | `get_and_delete()` |
+| `compareAndSet(e, u)` | `compare_and_set(e, u)` |
+| `addAndGet(d)` | `add_and_get(d)` |
+| `getAndAdd(d)` | `get_and_add(d)` |
+| `incrementAndGet()` | `incr()` |
+| `decrementAndGet()` | `decr()` |
+
+## Semaphore
+
+| Redisson | redissun |
+|---|---|
+| `trySetPermits(n)` | `try_set_permits(n)` |
+| `addPermits(n)` | `add_permits(n)` |
+| `availablePermits()` | `available_permits()` |
+| `drainPermits()` | `drain_permits()` |
+| `acquire(n)` | `acquire(n)`, returns a `Permits` value |
+| `tryAcquire(n)` | `try_acquire(n)` |
+| `tryAcquire(n, wait, unit)` | `acquire_for(n, wait)` |
+| `release(n)` | `permits.release()` or `semaphore.release(n)` |
+
+## CountDownLatch
+
+| Redisson | redissun |
+|---|---|
+| `trySetCount(n)` | `try_set_count(n)` |
+| `countDown()` | `count_down()` |
+| `getCount()` | `count()` |
+| `await()` | `wait()` |
+| `await(time, unit)` | `wait_for(time)` |
+
+## RateLimiter
+
+| Redisson | redissun |
+|---|---|
+| `trySetRate(mode, rate, interval, unit)` | `try_set_rate(type, rate, interval)` |
+| `setRate(...)` | `set_rate(...)` |
+| `tryAcquire(n)` | `try_acquire(n)` |
+| `tryAcquire(n, timeout, unit)` | `try_acquire_for(n, timeout)` |
+| `acquire(n)` | `acquire(n)` |
+| `availablePermits()` | `available_permits()` |
+| `RateType.OVERALL`, `PER_CLIENT` | `RateType::Overall`, `RateType::PerClient` |
+
 ## Behavioural differences
 
 - The lock owner is a client and a tokio task, not a thread.
 - Unlocking goes through a guard value. Unlocking something you do not hold is `Error::LockNotHeld` instead of an `IllegalMonitorStateException`.
 - Values use a serde codec rather than Redisson's Java codecs, so data written by Redisson is not readable by redissun and the other way round.
-- Only `Bucket`, `Map` and `Lock` exist in 0.1.
+- When a semaphore or latch changes, redissun wakes every waiter and each one tries again. Redisson wakes only as many as there are permits.
+- The rate limiter reads the time from the Redis server. Redisson sends the time of the client.
+- `RateLimiter` has no `keepAliveTime` setting yet.

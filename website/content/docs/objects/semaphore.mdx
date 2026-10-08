@@ -1,0 +1,46 @@
+---
+title: Semaphore
+description: Limit how many programs do something at once.
+---
+
+A `Semaphore` holds a number of permits in Redis. A program takes permits before it works and gives them back after.
+
+```rust
+let semaphore = client.semaphore("workers");
+semaphore.try_set_permits(3).await?;
+
+let permits = semaphore.acquire(1).await?;
+// do the work
+permits.release().await?;
+```
+
+## Methods
+
+| Method | What it does |
+|---|---|
+| `try_set_permits(n)` | sets the permits, only if the semaphore does not exist. Returns `true` if it did. |
+| `add_permits(n)` | adds permits and wakes waiters |
+| `available_permits()` | permits free now. A missing semaphore has 0. |
+| `drain_permits()` | takes all free permits and returns how many |
+| `acquire(n)` | waits for `n` permits |
+| `try_acquire(n)` | takes `n` permits or returns `None` at once |
+| `acquire_for(n, wait)` | waits up to `wait`, then returns `None` |
+| `release(n)` | gives `n` permits back by hand |
+
+## The Permits value
+
+`acquire`, `try_acquire` and `acquire_for` return `Permits`.
+
+- `release().await` gives the permits back and shows errors.
+- If you drop it, the permits are given back in the background.
+- `forget()` keeps the permits taken. Give them back later with `semaphore.release(n)`.
+- `count()` tells you how many permits it holds.
+
+## How it works
+
+This is how Redisson does it. The permits are a number in one Redis string. Taking permits is a Lua script that checks and subtracts in one step. Releasing adds the number and publishes a message. Waiting programs listen to that message and try again. If a message is lost, they try again after two seconds.
+
+## Things to know
+
+- Permits have no owner. If a program crashes while it holds permits, they are lost until someone adds them back with `release` or `add_permits`.
+- `0` permits is an error.

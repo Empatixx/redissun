@@ -1,0 +1,32 @@
+---
+title: CountDownLatch
+description: Wait until other programs finish their part.
+---
+
+A `CountDownLatch` starts with a count. Programs count it down. Other programs wait until the count is zero.
+
+```rust
+let latch = client.count_down_latch("ready");
+latch.try_set_count(3).await?;
+
+latch.count_down().await?;   // in each worker
+latch.wait().await?;         // in the coordinator
+```
+
+## Methods
+
+| Method | What it does |
+|---|---|
+| `try_set_count(n)` | sets the count, only if the latch does not exist. Returns `true` if it did. |
+| `count_down()` | lowers the count by one |
+| `count()` | the current count. A missing latch has 0. |
+| `wait()` | waits until the count is zero |
+| `wait_for(timeout)` | waits up to `timeout`. Returns `true` if the count reached zero. |
+
+## How it works
+
+When the count reaches zero, the key is removed and a message is published. All waiting programs wake up at once. A latch that does not exist counts as open, so `wait` returns at once.
+
+After the latch is finished you can set a new count with `try_set_count`.
+
+If you delete the latch with `del`, the waiting programs also continue. They notice it within two seconds.
