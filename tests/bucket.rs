@@ -150,3 +150,25 @@ async fn expire_rejects_a_zero_ttl_and_rounds_a_sub_millisecond_ttl_up() {
     ));
     assert!(bucket.expire(Duration::from_micros(500)).await.unwrap());
 }
+
+#[tokio::test]
+async fn a_string_bucket_accepts_str_references() {
+    let bucket = client().await.bucket::<String>(unique("bucket"));
+    bucket.set("hello").await.unwrap();
+    assert_eq!(bucket.get().await.unwrap().as_deref(), Some("hello"));
+    assert!(!bucket.set_nx("other").await.unwrap());
+    assert_eq!(
+        bucket.get_set("world").await.unwrap().as_deref(),
+        Some("hello")
+    );
+    assert!(bucket.compare_and_set("world", "again").await.unwrap());
+    bucket
+        .set_ex("short", Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(bucket.get().await.unwrap().as_deref(), Some("short"));
+
+    let owned = "owned".to_string();
+    bucket.set(&owned).await.unwrap();
+    assert_eq!(bucket.get().await.unwrap().as_deref(), Some("owned"));
+}

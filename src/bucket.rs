@@ -7,6 +7,7 @@ use fred::types::scripts::Script;
 use fred::types::{Expiration, SetOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -67,7 +68,11 @@ where
     C: Codec,
 {
     /// Stores the value, replacing any existing one.
-    pub async fn set(&self, value: &V) -> Result<()> {
+    pub async fn set<Q>(&self, value: &Q) -> Result<()>
+    where
+        V: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
         let bytes = self.codec.encode(value)?;
         self.key
             .core
@@ -84,7 +89,11 @@ where
     }
 
     /// Stores the value with a time to live.
-    pub async fn set_ex(&self, value: &V, ttl: Duration) -> Result<()> {
+    pub async fn set_ex<Q>(&self, value: &Q, ttl: Duration) -> Result<()>
+    where
+        V: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
         let bytes = self.codec.encode(value)?;
         self.key
             .core
@@ -101,7 +110,11 @@ where
     }
 
     /// Stores the value only when the key is missing; returns whether it was stored.
-    pub async fn set_nx(&self, value: &V) -> Result<bool> {
+    pub async fn set_nx<Q>(&self, value: &Q) -> Result<bool>
+    where
+        V: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
         let bytes = self.codec.encode(value)?;
         let stored: Option<String> = self
             .key
@@ -119,7 +132,11 @@ where
     }
 
     /// Stores the value and returns the previous one. Needs Redis 6.2 or newer.
-    pub async fn get_set(&self, value: &V) -> Result<Option<V>> {
+    pub async fn get_set<Q>(&self, value: &Q) -> Result<Option<V>>
+    where
+        V: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
         let bytes = self.codec.encode(value)?;
         let previous: Option<Bytes> = self
             .key
@@ -137,7 +154,11 @@ where
     }
 
     /// Replaces the value with `new` only when it currently equals `expected`; returns whether it did.
-    pub async fn compare_and_set(&self, expected: &V, new: &V) -> Result<bool> {
+    pub async fn compare_and_set<Q>(&self, expected: &Q, new: &Q) -> Result<bool>
+    where
+        V: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
         let swapped: i64 = self
             .key
             .core

@@ -17,7 +17,7 @@ async fn main() -> redissun::Result<()> {
     let client = Client::builder().url("redis://127.0.0.1:6379").build().await?;
 
     let motd = client.bucket::<String>("motd");
-    motd.set(&"hello".to_string()).await?;
+    motd.set("hello").await?;
 
     let users = client.map::<String, User>("users");
     users.insert("jirka".into(), User { name: "Jirka".into() }).await?;

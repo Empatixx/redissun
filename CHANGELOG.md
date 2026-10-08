@@ -11,6 +11,10 @@
 - `Error::Unsupported`.
 - `Debug` for all public handle types. It never prints the connection URL.
 
+### Changed
+
+- `Bucket` methods take the value as a borrowed form, so a `Bucket<String>` accepts `&str` (`bucket.set("hello")`) as well as `&String`.
+
 ### Fixed
 
 - Cancelling `Lock::lock` or `Semaphore::acquire` at any moment no longer leaves the lock held or the permits lost.

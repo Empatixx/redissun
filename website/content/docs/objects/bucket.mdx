@@ -8,7 +8,7 @@ A `Bucket` keeps one value in a Redis string.
 ```rust
 let bucket = client.bucket::<String>("greeting");
 
-bucket.set(&"hello".to_string()).await?;
+bucket.set("hello").await?;
 let value = bucket.get().await?;
 ```
 
@@ -25,6 +25,8 @@ let value = bucket.get().await?;
 | `compare_and_set(&expected, &new)` | Lua script | `true` if the value was changed |
 
 `get_set` and `get_del` need Redis 6.2 or newer.
+
+Values are passed by reference. For a `Bucket<String>` you can pass a `&str` such as `bucket.set("hello")`, or a `&String`.
 
 A time limit must be longer than zero. Very small limits are rounded up to one millisecond.
 

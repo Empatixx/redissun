@@ -67,7 +67,7 @@ One value under one key.
 
 ```rust
 let bucket = client.bucket::<String>("greeting");
-bucket.set(&"hello".to_string()).await?;
+bucket.set("hello").await?;
 let value = bucket.get().await?;
 ```
 
