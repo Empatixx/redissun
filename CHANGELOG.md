@@ -11,6 +11,7 @@
 
 ### Changed
 
+- The license is now Apache-2.0 (it was MIT).
 - Breaking: `Map` is now `HashMap` (`client.hash_map`) and `AtomicLong` is now `AtomicI64` (`client.atomic_i64`), so the names follow Rust.
 
 ## [0.2.0] - unreleased

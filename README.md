@@ -5,7 +5,7 @@ Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.co
 [![CI](https://github.com/Empatixx/redissun/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redissun/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/redissun.svg)](https://crates.io/crates/redissun)
 [![docs.rs](https://img.shields.io/docsrs/redissun)](https://docs.rs/redissun)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 With redissun you use a `HashMap`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
 
@@ -247,4 +247,4 @@ The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOS
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
