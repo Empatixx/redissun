@@ -153,7 +153,7 @@ let sessions = client.hash_map_cache::<String, User>("sessions");
 sessions.insert("abc", &user).ttl(Duration::from_secs(60)).await?;
 ```
 
-Entries can also expire when nobody reads them (`.max_idle(duration)`). Time comes from the Redis server, and a background task deletes expired entries.
+Entries can also expire when nobody reads them (`.max_idle(duration)`). Time comes from the Redis server, and a background task deletes expired entries. `set_max_size` limits the size (LRU or LFU), and `events()` tells you about every change.
 
 ### Topic
 

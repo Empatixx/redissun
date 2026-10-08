@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0] - unreleased
+
+### Added
+
+- `HashMapCache::set_max_size` and `try_set_max_size` limit the number of entries, with `EvictionMode::{Lru, Lfu}`.
+- `HashMapCache::events` returns `Events`, which receives `Event::{Created, Updated, Removed, Expired}` for the changes of every client.
+
 ## [0.5.0] - unreleased
 
 ### Added

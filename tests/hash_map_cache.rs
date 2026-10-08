@@ -2,7 +2,7 @@ mod common;
 
 use common::{client, connect_with, raw_command, unique};
 use futures::TryStreamExt;
-use redissun::{Error, Object};
+use redissun::{Error, Event, EvictionMode, Object};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -416,4 +416,212 @@ async fn evict_expired_also_removes_orphans_from_the_sets() {
     raw_command(&["ZADD", &timeouts, "1", "\"ghost\""]).await;
     assert_eq!(cache.evict_expired().await.unwrap(), 1);
     assert_eq!(raw_command(&["ZCARD", &timeouts]).await.trim(), ":0");
+}
+
+async fn pause() {
+    sleep(Duration::from_millis(15)).await;
+}
+
+#[tokio::test]
+async fn lru_drops_the_entry_that_was_used_longest_ago() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.set_max_size(3, EvictionMode::Lru).await.unwrap();
+    for (key, value) in [("a", 1u32), ("b", 2), ("c", 3)] {
+        cache.insert(key, &value).await.unwrap();
+        pause().await;
+    }
+    assert_eq!(cache.get("a").await.unwrap(), Some(1));
+    pause().await;
+    cache.insert("d", &4u32).await.unwrap();
+    assert_eq!(cache.len().await.unwrap(), 3);
+    assert_eq!(cache.get("b").await.unwrap(), None);
+    for key in ["a", "c", "d"] {
+        assert!(cache.contains_key(key).await.unwrap(), "{key}");
+    }
+}
+
+#[tokio::test]
+async fn lfu_drops_the_entry_that_was_used_least_often() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.set_max_size(2, EvictionMode::Lfu).await.unwrap();
+    cache.insert("a", &1u32).await.unwrap();
+    cache.insert("b", &2u32).await.unwrap();
+    for _ in 0..3 {
+        cache.get("a").await.unwrap();
+    }
+    cache.insert("c", &3u32).await.unwrap();
+    assert_eq!(cache.len().await.unwrap(), 2);
+    assert_eq!(cache.get("b").await.unwrap(), None);
+    assert!(cache.contains_key("a").await.unwrap());
+    assert!(cache.contains_key("c").await.unwrap());
+}
+
+#[tokio::test]
+async fn the_size_limit_is_shared_by_every_handle_and_zero_removes_it() {
+    let client = client().await;
+    let name = unique("cache");
+    let first = client.hash_map_cache::<String, u32>(name.clone());
+    let second = client.hash_map_cache::<String, u32>(name);
+    first.set_max_size(1, EvictionMode::Lru).await.unwrap();
+    first.insert("a", &1u32).await.unwrap();
+    pause().await;
+    second.insert("b", &2u32).await.unwrap();
+    assert_eq!(first.len().await.unwrap(), 1);
+    first.set_max_size(0, EvictionMode::Lru).await.unwrap();
+    first.insert("c", &3u32).await.unwrap();
+    first.insert("d", &4u32).await.unwrap();
+    assert_eq!(first.len().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn try_set_max_size_only_sets_it_once() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    assert!(cache.try_set_max_size(2, EvictionMode::Lru).await.unwrap());
+    assert!(!cache.try_set_max_size(5, EvictionMode::Lfu).await.unwrap());
+    for i in 0..4u32 {
+        cache.insert(&format!("k{i}"), &i).await.unwrap();
+        pause().await;
+    }
+    assert_eq!(cache.len().await.unwrap(), 2);
+}
+
+async fn next(
+    events: &mut redissun::Events<String, String, redissun::JsonCodec>,
+) -> Event<String, String> {
+    tokio::time::timeout(Duration::from_secs(3), events.recv())
+        .await
+        .expect("no event arrived")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn events_report_created_updated_and_removed_entries() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache.events().await.unwrap();
+    cache.insert("a:1", "x:y").await.unwrap();
+    cache.insert("a:1", "z").await.unwrap();
+    cache.remove("a:1").await.unwrap();
+    assert_eq!(
+        next(&mut events).await,
+        Event::Created {
+            key: "a:1".into(),
+            value: "x:y".into()
+        }
+    );
+    assert_eq!(
+        next(&mut events).await,
+        Event::Updated {
+            key: "a:1".into(),
+            value: "z".into(),
+            previous: "x:y".into()
+        }
+    );
+    assert_eq!(
+        next(&mut events).await,
+        Event::Removed {
+            key: "a:1".into(),
+            value: "z".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn events_report_expired_entries_and_size_evictions() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache.events().await.unwrap();
+    cache
+        .insert("short", "1")
+        .ttl(Duration::from_millis(150))
+        .await
+        .unwrap();
+    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(cache.evict_expired().await.unwrap(), 1);
+    assert_eq!(
+        next(&mut events).await,
+        Event::Expired {
+            key: "short".into(),
+            value: "1".into()
+        }
+    );
+
+    cache.set_max_size(1, EvictionMode::Lru).await.unwrap();
+    cache.insert("a", "1").await.unwrap();
+    pause().await;
+    cache.insert("b", "2").await.unwrap();
+    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    assert_eq!(
+        next(&mut events).await,
+        Event::Removed {
+            key: "a".into(),
+            value: "1".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn every_listener_gets_every_event_and_stopping_one_does_not_affect_the_other() {
+    let client = client().await;
+    let name = unique("cache");
+    let writer = client.hash_map_cache::<String, String>(name.clone());
+    let mut first = writer.events().await.unwrap();
+    let mut second = client
+        .hash_map_cache::<String, String>(name)
+        .events()
+        .await
+        .unwrap();
+    writer.insert("a", "1").await.unwrap();
+    assert!(matches!(next(&mut first).await, Event::Created { .. }));
+    assert!(matches!(next(&mut second).await, Event::Created { .. }));
+    drop(first);
+    writer.insert("b", "2").await.unwrap();
+    assert!(matches!(next(&mut second).await, Event::Created { .. }));
+}
+
+#[tokio::test]
+async fn nothing_is_published_until_somebody_listens() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    cache.insert("a", "1").await.unwrap();
+    let options = raw_command(&[
+        "HGET",
+        &format!("redissun__map_cache_options:{{{name}}}"),
+        "has-listeners",
+    ])
+    .await;
+    assert!(options.starts_with("$-1"), "{options}");
+    let _events = cache.events().await.unwrap();
+    let options = raw_command(&[
+        "HGET",
+        &format!("redissun__map_cache_options:{{{name}}}"),
+        "has-listeners",
+    ])
+    .await;
+    assert!(options.contains('1'), "{options}");
+}
+
+#[tokio::test]
+async fn clear_keeps_the_size_limit_and_del_removes_it() {
+    let name = unique("cache");
+    let cache = client().await.hash_map_cache::<String, u32>(name.clone());
+    cache.set_max_size(1, EvictionMode::Lru).await.unwrap();
+    cache.insert("a", &1u32).await.unwrap();
+    cache.clear().await.unwrap();
+    let options = format!("redissun__map_cache_options:{{{name}}}");
+    assert_eq!(raw_command(&["EXISTS", &options]).await.trim(), ":1");
+    cache.del().await.unwrap();
+    assert_eq!(raw_command(&["EXISTS", &options]).await.trim(), ":0");
 }

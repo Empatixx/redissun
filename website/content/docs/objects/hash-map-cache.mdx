@@ -27,6 +27,9 @@ let found = sessions.get("abc").await?;
 | `len()`, `is_empty()`, `clear()` | `len` counts live entries only and deletes nothing |
 | `iter()`, `keys()`, `values()` | streams of live entries. They are `async`, because they delete expired entries first. |
 | `evict_expired()` | deletes expired entries now and returns how many |
+| `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
+| `try_set_max_size(n, mode)` | the same, but only when no limit was set before |
+| `events()` | starts listening to changes. See below. |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
 
@@ -37,6 +40,39 @@ let found = sessions.get("abc").await?;
 - A background task deletes the rest, like the eviction task in Redisson. It starts when you get the cache from the client, and runs once per cache name and client. It wakes up every `eviction_interval` (5 seconds by default) while there is work, and waits longer and longer (up to two hours) while there is none. It cleans up to 100 entries from each set per run. You can set the interval with `Client::builder().eviction_interval(..)`.
 - The task stops when the client is dropped.
 
+## Maximum size
+
+```rust
+use redissun::EvictionMode;
+
+cache.set_max_size(1000, EvictionMode::Lru).await?;
+```
+
+When the cache is full, an insert drops one entry: with `Lru` the one that was used longest ago, with `Lfu` the one that was used least often. Reads (`get`) and inserts count as use. The limit is stored in Redis, so every client of the cache follows it. Entries that were added before the limit was set are not tracked until they are used.
+
+## Listening to changes
+
+```rust
+use redissun::Event;
+
+let mut events = cache.events().await?;
+while let Ok(event) = events.recv().await {
+    match event {
+        Event::Created { key, value } => {}
+        Event::Updated { key, value, previous } => {}
+        Event::Removed { key, value } => {}
+        Event::Expired { key, value } => {}
+        _ => {}
+    }
+}
+```
+
+- You get the changes made by every client, not only yours.
+- `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries whose time ended.
+- Nothing is published to Redis until the first listener appears.
+- A listener has a buffer of 256 events. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
+- `into_stream()` turns the listener into a `Stream`.
+
 ## How it is stored
 
 This is the scheme of Redisson's `RMapCache`:
@@ -46,7 +82,11 @@ This is the scheme of Redisson's `RMapCache`:
 | `{name}` | hash | the values, each with its idle time in front |
 | `redissun__timeout__set:{name}` | sorted set | entry and the time when its time to live ends |
 | `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends |
+| `redissun__map_cache_last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
+| `redissun__map_cache_options:{name}` | hash | `max-size`, `mode` and `has-listeners` |
+
+Events are published on the channel `redissun__map_cache_events:{name}`.
 
 ## Object methods
 
-`del`, `expire` and `persist` apply to all three Redis keys. `rename` is not supported and returns `Error::Unsupported`. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.
+`del`, `expire` and `persist` apply to all five Redis keys. `clear` deletes the entries but keeps the size limit. `rename` is not supported and returns `Error::Unsupported`. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.

@@ -49,7 +49,7 @@ pub use codec::{Codec, JsonCodec};
 pub use config::ClientBuilder;
 pub use error::{Error, Result};
 pub use hash_map::HashMap;
-pub use hash_map_cache::{HashMapCache, Insert, InsertNx};
+pub use hash_map_cache::{Event, Events, EvictionMode, HashMapCache, Insert, InsertNx};
 pub use hash_set::HashSet;
 pub use latch::CountDownLatch;
 pub use lock::{Lock, LockGuard, LockRequest};

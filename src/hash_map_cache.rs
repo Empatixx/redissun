@@ -1,8 +1,10 @@
 use crate::codec::Codec;
 use crate::core::{Core, Evictor};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::object::{millis, HasKey, Key};
+use crate::pubsub::Subscription;
 use bytes::Bytes;
+use fred::interfaces::HashesInterface;
 use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
 use futures::{stream, Stream, StreamExt};
@@ -16,6 +18,7 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::Notify;
 
 const EVICT_BATCH: usize = 100;
@@ -24,24 +27,35 @@ const SCAN_PAGE: u32 = 100;
 
 const PRELUDE: &str = "local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
-local MAIN, TIMEOUT, IDLE = KEYS[1], KEYS[2], KEYS[3]
+local MAIN, TIMEOUT, IDLE, ACCESS, OPTIONS, CHANNEL = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
+local maxSize = tonumber(redis.call('HGET', OPTIONS, 'max-size')) or 0
+local lfu = redis.call('HGET', OPTIONS, 'mode') == 'LFU'
+local listening = redis.call('HGET', OPTIONS, 'has-listeners') ~= false
+local function emit(kind, field, value, previous)
+    if listening then
+        previous = previous or ''
+        redis.call('PUBLISH', CHANNEL, kind .. #field .. ':' .. #value .. ':' .. field .. value .. previous)
+    end
+end
 local function drop(field)
     redis.call('HDEL', MAIN, field)
     redis.call('ZREM', TIMEOUT, field)
     redis.call('ZREM', IDLE, field)
+    redis.call('ZREM', ACCESS, field)
+end
+local function unwrap(raw)
+    local sep = string.find(raw, ':', 1, true)
+    if sep then
+        return string.sub(raw, sep + 1), tonumber(string.sub(raw, 1, sep - 1)) or 0
+    end
+    return raw, 0
 end
 local function fetch(field)
     local raw = redis.call('HGET', MAIN, field)
     if raw == false then
         return false
     end
-    local sep = string.find(raw, ':', 1, true)
-    local idle = 0
-    local value = raw
-    if sep then
-        idle = tonumber(string.sub(raw, 1, sep - 1)) or 0
-        value = string.sub(raw, sep + 1)
-    end
+    local value, idle = unwrap(raw)
     local expires = math.huge
     local timeoutScore = redis.call('ZSCORE', TIMEOUT, field)
     if timeoutScore then
@@ -54,6 +68,7 @@ local function fetch(field)
         end
     end
     if expires <= now then
+        emit('E', field, value)
         drop(field)
         return false
     end
@@ -72,6 +87,35 @@ local function store(field, value, ttl, idle)
         redis.call('ZREM', IDLE, field)
     end
 end
+local function touch(field)
+    if maxSize > 0 then
+        if lfu then
+            redis.call('ZINCRBY', ACCESS, 1, field)
+        else
+            redis.call('ZADD', ACCESS, now, field)
+        end
+    end
+end
+local function enforce(field)
+    if maxSize > 0 then
+        local excess = redis.call('HLEN', MAIN) - maxSize
+        if excess > 0 then
+            for _, victim in ipairs(redis.call('ZRANGE', ACCESS, 0, excess)) do
+                if excess <= 0 then
+                    break
+                end
+                if victim ~= field then
+                    local raw = redis.call('HGET', MAIN, victim)
+                    if raw then
+                        emit('R', victim, (unwrap(raw)))
+                    end
+                    drop(victim)
+                    excess = excess - 1
+                end
+            end
+        end
+    end
+end
 ";
 
 fn script(body: &str) -> Script {
@@ -87,6 +131,7 @@ static GET: LazyLock<Script> = LazyLock::new(|| {
         if idle > 0 then
             redis.call('ZADD', IDLE, now + idle, ARGV[1])
         end
+        touch(ARGV[1])
         return value",
     )
 });
@@ -95,6 +140,13 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     script(
         "local previous = fetch(ARGV[1])
         store(ARGV[1], ARGV[2], ARGV[3], ARGV[4])
+        if previous then
+            emit('U', ARGV[1], ARGV[2], previous)
+        else
+            emit('C', ARGV[1], ARGV[2])
+        end
+        touch(ARGV[1])
+        enforce(ARGV[1])
         return previous",
     )
 });
@@ -105,6 +157,9 @@ static INSERT_NX: LazyLock<Script> = LazyLock::new(|| {
             return 0
         end
         store(ARGV[1], ARGV[2], ARGV[3], ARGV[4])
+        emit('C', ARGV[1], ARGV[2])
+        touch(ARGV[1])
+        enforce(ARGV[1])
         return 1",
     )
 });
@@ -112,6 +167,9 @@ static INSERT_NX: LazyLock<Script> = LazyLock::new(|| {
 static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     script(
         "local previous = fetch(ARGV[1])
+        if previous then
+            emit('R', ARGV[1], previous)
+        end
         drop(ARGV[1])
         return previous",
     )
@@ -162,9 +220,14 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
         "local removed = 0
         for _, set in ipairs({TIMEOUT, IDLE}) do
             for _, field in ipairs(redis.call('ZRANGEBYSCORE', set, '-inf', now, 'LIMIT', 0, ARGV[1])) do
+                local raw = redis.call('HGET', MAIN, field)
+                if raw then
+                    emit('E', field, (unwrap(raw)))
+                end
                 local dropped = redis.call('HDEL', MAIN, field)
                 dropped = dropped + redis.call('ZREM', TIMEOUT, field)
                 dropped = dropped + redis.call('ZREM', IDLE, field)
+                dropped = dropped + redis.call('ZREM', ACCESS, field)
                 if dropped > 0 then
                     removed = removed + 1
                 end
@@ -236,6 +299,142 @@ fn wake_evictor(core: &Core, name: &str) {
     let evictors = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(evictor) = evictors.get(name) {
         evictor.wake.notify_one();
+    }
+}
+
+/// Which entry [`HashMapCache::set_max_size`] drops when the cache is full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EvictionMode {
+    /// The entry that was used longest ago.
+    #[default]
+    Lru,
+    /// The entry that was used least often.
+    Lfu,
+}
+
+impl EvictionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            EvictionMode::Lru => "LRU",
+            EvictionMode::Lfu => "LFU",
+        }
+    }
+}
+
+/// A change of a [`HashMapCache`], received through [`Events`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Event<K, V> {
+    /// A new entry was added.
+    Created {
+        /// The key of the entry.
+        key: K,
+        /// The new value.
+        value: V,
+    },
+    /// The value of an entry was replaced.
+    Updated {
+        /// The key of the entry.
+        key: K,
+        /// The new value.
+        value: V,
+        /// The value that was replaced.
+        previous: V,
+    },
+    /// An entry was removed by [`HashMapCache::remove`] or dropped because the cache was full.
+    Removed {
+        /// The key of the entry.
+        key: K,
+        /// The value it had.
+        value: V,
+    },
+    /// An entry was deleted because its time to live or idle time ended.
+    Expired {
+        /// The key of the entry.
+        key: K,
+        /// The value it had.
+        value: V,
+    },
+}
+
+/// Receives the [`Event`]s of a [`HashMapCache`]. Dropping the last listener of a cache in a client unsubscribes from Redis.
+pub struct Events<K, V, C: Codec> {
+    _subscription: Subscription,
+    receiver: broadcast::Receiver<Bytes>,
+    codec: C,
+    _marker: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V, C: Codec> fmt::Debug for Events<K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Events").finish_non_exhaustive()
+    }
+}
+
+struct RawEvent<'a> {
+    kind: u8,
+    key: &'a [u8],
+    value: &'a [u8],
+    previous: &'a [u8],
+}
+
+fn split_payload(payload: &[u8]) -> Option<RawEvent<'_>> {
+    let (&kind, rest) = payload.split_first()?;
+    let first = rest.iter().position(|byte| *byte == b':')?;
+    let key_length: usize = std::str::from_utf8(&rest[..first]).ok()?.parse().ok()?;
+    let rest = &rest[first + 1..];
+    let second = rest.iter().position(|byte| *byte == b':')?;
+    let value_length: usize = std::str::from_utf8(&rest[..second]).ok()?.parse().ok()?;
+    let rest = &rest[second + 1..];
+    let key = rest.get(..key_length)?;
+    let value = rest.get(key_length..key_length + value_length)?;
+    let previous = rest.get(key_length + value_length..)?;
+    Some(RawEvent {
+        kind,
+        key,
+        value,
+        previous,
+    })
+}
+
+impl<K, V, C> Events<K, V, C>
+where
+    K: DeserializeOwned + Send,
+    V: DeserializeOwned + Send,
+    C: Codec,
+{
+    fn parse(&self, payload: &[u8]) -> Result<Event<K, V>> {
+        let malformed = || Error::Codec("malformed cache event".into());
+        let raw = split_payload(payload).ok_or_else(malformed)?;
+        let key = self.codec.decode(raw.key)?;
+        let value = self.codec.decode(raw.value)?;
+        match raw.kind {
+            b'C' => Ok(Event::Created { key, value }),
+            b'U' => Ok(Event::Updated {
+                key,
+                value,
+                previous: self.codec.decode(raw.previous)?,
+            }),
+            b'R' => Ok(Event::Removed { key, value }),
+            b'E' => Ok(Event::Expired { key, value }),
+            _ => Err(malformed()),
+        }
+    }
+
+    /// Waits for the next event. A listener that falls more than 256 events behind gets [`Error::Lagged`] once and then continues with the newest events.
+    pub async fn recv(&mut self) -> Result<Event<K, V>> {
+        match self.receiver.recv().await {
+            Ok(payload) => self.parse(&payload),
+            Err(RecvError::Lagged(missed)) => Err(Error::Lagged(missed as usize)),
+            Err(RecvError::Closed) => Err(Error::Redis("the subscription was closed".into())),
+        }
+    }
+
+    /// Turns the listener into a stream of events. The stream never ends.
+    pub fn into_stream(self) -> impl Stream<Item = Result<Event<K, V>>> {
+        stream::unfold(self, |mut events| async move {
+            Some((events.recv().await, events))
+        })
     }
 }
 
@@ -382,7 +581,12 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
     }
 
     fn companions(&self) -> Vec<String> {
-        vec![self.timeout_key(), self.idle_key()]
+        vec![
+            self.timeout_key(),
+            self.idle_key(),
+            self.access_key(),
+            self.options_key(),
+        ]
     }
 }
 
@@ -405,12 +609,34 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
         format!("redissun__idle__set:{}", self.key.redis_key())
     }
 
+    fn access_key(&self) -> String {
+        format!(
+            "redissun__map_cache_last_access__set:{}",
+            self.key.redis_key()
+        )
+    }
+
+    fn options_key(&self) -> String {
+        format!("redissun__map_cache_options:{}", self.key.redis_key())
+    }
+
+    fn events_channel(&self) -> String {
+        format!("redissun__map_cache_events:{}", self.key.redis_key())
+    }
+
     fn redis_key(&self) -> String {
         self.key.redis_key()
     }
 
     fn redis_keys(&self) -> Vec<String> {
-        vec![self.key.redis_key(), self.timeout_key(), self.idle_key()]
+        vec![
+            self.key.redis_key(),
+            self.timeout_key(),
+            self.idle_key(),
+            self.access_key(),
+            self.options_key(),
+            self.events_channel(),
+        ]
     }
 }
 
@@ -483,6 +709,55 @@ where
             ttl: None,
             max_idle: None,
         }
+    }
+
+    /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client.
+    pub async fn set_max_size(&self, max: usize, mode: EvictionMode) -> Result<()> {
+        self.key
+            .core
+            .redis()
+            .hset::<(), _, _>(
+                self.options_key(),
+                vec![
+                    ("max-size", max.to_string()),
+                    ("mode", mode.as_str().to_string()),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the size limit only when none was set before; returns whether it did.
+    pub async fn try_set_max_size(&self, max: usize, mode: EvictionMode) -> Result<bool> {
+        let redis = self.key.core.redis();
+        redis
+            .hsetnx::<bool, _, _, _>(self.options_key(), "max-size", max.to_string())
+            .await?;
+        let set: bool = redis
+            .hsetnx(self.options_key(), "mode", mode.as_str())
+            .await?;
+        Ok(set)
+    }
+
+    /// Starts listening to the changes of the cache, made by any client. Nothing is published to Redis until somebody listens.
+    pub async fn events(&self) -> Result<Events<K, V, C>> {
+        self.key
+            .core
+            .redis()
+            .hset::<(), _, _>(self.options_key(), ("has-listeners", "1"))
+            .await?;
+        let (subscription, receiver) = self
+            .key
+            .core
+            .pubsub
+            .subscribe_with_messages(&self.events_channel())
+            .await?;
+        Ok(Events {
+            _subscription: subscription,
+            receiver,
+            codec: self.codec.clone(),
+            _marker: PhantomData,
+        })
     }
 
     /// Returns the value for the key, or `None` when it is missing or expired. A read starts the idle time of the entry again.
@@ -559,7 +834,7 @@ where
     /// Deletes every entry.
     pub async fn clear(&self) -> Result<()> {
         self.key
-            .del_all(vec![self.timeout_key(), self.idle_key()])
+            .del_all(vec![self.timeout_key(), self.idle_key(), self.access_key()])
             .await?;
         Ok(())
     }

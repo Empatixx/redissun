@@ -125,7 +125,7 @@ description: How Redisson names and behaviour map to redissun.
 | `putIfAbsent(k, v)` | `insert_nx(&k, &v)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
 
-Both delete expired entries with a background task. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. There is no maximum size (LRU or LFU) and there are no entry listeners yet.
+Both delete expired entries with a background task. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, and `addListener(...)` is `events()` followed by `recv()`.
 
 ## VecDeque blocking
 
