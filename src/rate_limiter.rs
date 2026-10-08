@@ -172,9 +172,7 @@ pub struct RateLimiter {
 
 impl fmt::Debug for RateLimiter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RateLimiter")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "RateLimiter")
     }
 }
 
@@ -271,17 +269,10 @@ impl RateLimiter {
         Ok(())
     }
 
-    async fn take(&self, permits: u64) -> Result<Option<i64>> {
+    async fn take(&self, keys: &[String], arguments: &[Bytes]) -> Result<Option<i64>> {
         self.key
             .core
-            .eval(
-                &TRY_ACQUIRE,
-                self.keys(),
-                vec![
-                    Bytes::from(permits.to_string()),
-                    Bytes::from(Uuid::new_v4().to_string()),
-                ],
-            )
+            .eval(&TRY_ACQUIRE, keys.to_vec(), arguments.to_vec())
             .await
     }
 
@@ -290,8 +281,13 @@ impl RateLimiter {
             return Err(Error::Config("permits must be positive".into()));
         }
         let deadline = wait.map(|wait| Instant::now() + wait);
+        let keys = self.keys();
+        let arguments = [
+            Bytes::from(permits.to_string()),
+            Bytes::from(Uuid::new_v4().to_string()),
+        ];
         loop {
-            let Some(delay) = self.take(permits).await? else {
+            let Some(delay) = self.take(&keys, &arguments).await? else {
                 return Ok(true);
             };
             let delay = Duration::from_millis(delay.max(1) as u64);
@@ -318,9 +314,12 @@ impl RateLimiter {
         Ok(removed > 0)
     }
 
+    fn main(&self) -> Key {
+        Key::new(self.key.core.clone(), self.main_key())
+    }
+
     async fn exists_main(&self) -> Result<bool> {
-        let found: i64 = self.key.core.redis().exists(self.main_key()).await?;
-        Ok(found > 0)
+        self.main().exists().await
     }
 
     async fn expire_all(&self, ttl: Duration) -> Result<bool> {
@@ -337,8 +336,7 @@ impl RateLimiter {
     }
 
     async fn ttl_main(&self) -> Result<Option<Duration>> {
-        let remaining: i64 = self.key.core.redis().pttl(self.main_key()).await?;
-        Ok((remaining >= 0).then(|| Duration::from_millis(remaining as u64)))
+        self.main().ttl().await
     }
 
     async fn persist_all(&self) -> Result<bool> {

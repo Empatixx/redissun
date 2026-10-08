@@ -55,6 +55,17 @@ impl Key {
         &self.name
     }
 
+    pub(crate) fn describe(&self, f: &mut fmt::Formatter<'_>, type_name: &str) -> fmt::Result {
+        f.debug_struct(type_name)
+            .field("name", &self.name())
+            .finish()
+    }
+
+    pub(crate) async fn get_i64_or_zero(&self) -> Result<i64> {
+        let value: Option<i64> = self.core.redis().get(self.redis_key()).await?;
+        Ok(value.unwrap_or(0))
+    }
+
     pub(crate) fn redis_key(&self) -> String {
         self.name.to_string()
     }

@@ -1,28 +1,15 @@
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
-use crate::wait::next_pause;
+use crate::wait::{wait_on, SET_IF_ABSENT_AND_PUBLISH};
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
 use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
-use tokio::sync::Notify;
 use tokio::time::Instant;
 
 const ZERO_COUNT_MESSAGE: &str = "0";
 const NEW_COUNT_MESSAGE: &str = "1";
-
-static TRY_SET_COUNT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 0 then
-            redis.call('SET', KEYS[1], ARGV[1])
-            redis.call('PUBLISH', ARGV[3], ARGV[2])
-            return 1
-        end
-        return 0",
-    )
-});
 
 static COUNT_DOWN: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
@@ -51,9 +38,7 @@ pub struct CountDownLatch {
 
 impl fmt::Debug for CountDownLatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CountDownLatch")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "CountDownLatch")
     }
 }
 
@@ -77,7 +62,7 @@ impl CountDownLatch {
             .key
             .core
             .eval(
-                &TRY_SET_COUNT,
+                &SET_IF_ABSENT_AND_PUBLISH,
                 vec![self.key.redis_key()],
                 vec![
                     Bytes::from(count.to_string()),
@@ -108,8 +93,7 @@ impl CountDownLatch {
 
     /// The current count. A missing latch has 0.
     pub async fn count(&self) -> Result<i64> {
-        let value: Option<i64> = self.key.core.redis().get(self.key.redis_key()).await?;
-        Ok(value.unwrap_or(0))
+        self.key.get_i64_or_zero().await
     }
 
     /// Waits until the count is zero.
@@ -132,26 +116,13 @@ impl CountDownLatch {
         }
 
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
-        let subscription = self
-            .key
-            .core
-            .pubsub
-            .subscribe(&channel(self.key.name()))
-            .await?;
-        let notify: &Notify = subscription.notify();
-        loop {
-            let notified = notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            if self.count().await? == 0 {
-                return Ok(true);
-            }
-
-            let Some(pause) = next_pause(deadline) else {
-                return Ok(false);
-            };
-            let _ = tokio::time::timeout(pause, notified).await;
-        }
+        let opened = wait_on(
+            &self.key.core,
+            &channel(self.key.name()),
+            deadline,
+            || async { Ok((self.count().await? == 0).then_some(())) },
+        )
+        .await?;
+        Ok(opened.is_some())
     }
 }

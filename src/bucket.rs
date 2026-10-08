@@ -41,9 +41,7 @@ impl<V, C: Codec> Clone for Bucket<V, C> {
 
 impl<V, C: Codec> fmt::Debug for Bucket<V, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bucket")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "Bucket")
     }
 }
 

@@ -25,9 +25,7 @@ pub struct AtomicLong {
 
 impl fmt::Debug for AtomicLong {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AtomicLong")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "AtomicLong")
     }
 }
 
@@ -44,8 +42,7 @@ impl AtomicLong {
 
     /// Returns the current value, or 0 when the counter does not exist.
     pub async fn get(&self) -> Result<i64> {
-        let value: Option<i64> = self.key.core.redis().get(self.key.redis_key()).await?;
-        Ok(value.unwrap_or(0))
+        self.key.get_i64_or_zero().await
     }
 
     /// Sets the value.

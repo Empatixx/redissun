@@ -50,9 +50,7 @@ impl<K, V, C: Codec> Clone for Map<K, V, C> {
 
 impl<K, V, C: Codec> fmt::Debug for Map<K, V, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Map")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "Map")
     }
 }
 

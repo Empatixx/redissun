@@ -107,7 +107,7 @@ async fn dispatch(pubsub: Weak<PubSub>, mut receiver: broadcast::Receiver<Messag
         let channels = pubsub.channels.lock().await;
         match message {
             Ok(message) => {
-                if let Some(entry) = channels.get(&message.channel.to_string()) {
+                if let Some(entry) = channels.get(&*message.channel) {
                     entry.notify.notify_waiters();
                 }
             }

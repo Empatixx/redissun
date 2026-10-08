@@ -1,15 +1,13 @@
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
 use crate::shield::shielded;
-use crate::wait::next_pause;
+use crate::wait::{wait_on, SET_IF_ABSENT_AND_PUBLISH};
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
 use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::Notify;
 use tokio::time::Instant;
 
 static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
@@ -41,17 +39,6 @@ static ADD_PERMITS: LazyLock<Script> = LazyLock::new(|| {
         redis.call('SET', KEYS[1], total)
         redis.call('PUBLISH', ARGV[2], total)
         return total",
-    )
-});
-
-static TRY_SET_PERMITS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 0 then
-            redis.call('SET', KEYS[1], ARGV[1])
-            redis.call('PUBLISH', ARGV[2], ARGV[1])
-            return 1
-        end
-        return 0",
     )
 });
 
@@ -87,9 +74,7 @@ pub struct Semaphore {
 
 impl fmt::Debug for Semaphore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Semaphore")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "Semaphore")
     }
 }
 
@@ -120,9 +105,10 @@ impl Semaphore {
             .key
             .core
             .eval(
-                &TRY_SET_PERMITS,
+                &SET_IF_ABSENT_AND_PUBLISH,
                 vec![self.key.redis_key()],
                 vec![
+                    Bytes::from(permits.to_string()),
                     Bytes::from(permits.to_string()),
                     Bytes::from(channel(self.key.name())),
                 ],
@@ -147,8 +133,7 @@ impl Semaphore {
 
     /// Number of permits that can be acquired right now. A missing semaphore has 0.
     pub async fn available_permits(&self) -> Result<i64> {
-        let value: Option<i64> = self.key.core.redis().get(self.key.redis_key()).await?;
-        Ok(value.unwrap_or(0))
+        self.key.get_i64_or_zero().await
     }
 
     /// Takes every available permit and returns how many there were.
@@ -205,27 +190,10 @@ impl Semaphore {
         }
 
         let deadline = wait.map(|wait| Instant::now() + wait);
-        let subscription = self
-            .key
-            .core
-            .pubsub
-            .subscribe(&channel(self.key.name()))
-            .await?;
-        let notify: &Notify = subscription.notify();
-        loop {
-            let notified = notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            if let Some(taken) = self.try_take(permits, &argument).await? {
-                return Ok(Some(taken));
-            }
-
-            let Some(pause) = next_pause(deadline) else {
-                return Ok(None);
-            };
-            let _ = tokio::time::timeout(pause, notified).await;
-        }
+        wait_on(&self.key.core, &channel(self.key.name()), deadline, || {
+            self.try_take(permits, &argument)
+        })
+        .await
     }
 }
 

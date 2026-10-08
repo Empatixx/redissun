@@ -152,9 +152,7 @@ pub struct Lock {
 
 impl fmt::Debug for Lock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Lock")
-            .field("name", &self.key.name())
-            .finish()
+        self.key.describe(f, "Lock")
     }
 }
 
