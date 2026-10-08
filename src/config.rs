@@ -2,6 +2,7 @@ use crate::client::Client;
 use crate::codec::{Codec, JsonCodec};
 use crate::core::Core;
 use crate::error::{Error, Result};
+use std::fmt;
 use std::time::Duration;
 
 /// Builder for [`Client`].
@@ -11,6 +12,17 @@ pub struct ClientBuilder<C: Codec = JsonCodec> {
     lock_lease: Duration,
     connect_timeout: Duration,
     codec: C,
+}
+
+impl<C: Codec> fmt::Debug for ClientBuilder<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("url_set", &self.url.is_some())
+            .field("pool_size", &self.pool_size)
+            .field("lock_lease", &self.lock_lease)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish()
+    }
 }
 
 impl ClientBuilder<JsonCodec> {

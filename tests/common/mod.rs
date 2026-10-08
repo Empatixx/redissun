@@ -68,3 +68,22 @@ async fn ping(port: u16) -> bool {
         && stream.read_exact(&mut reply).await.is_ok()
         && &reply == b"+PONG\r\n"
 }
+
+pub async fn raw_command(parts: &[&str]) -> String {
+    let url = redis_url().await;
+    let address = url.trim_start_matches("redis://").to_string();
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut request = format!("*{}\r\n", parts.len());
+    for part in parts {
+        request.push_str(&format!("${}\r\n{}\r\n", part.len(), part));
+    }
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut buffer = vec![0u8; 16384];
+    let read = stream.read(&mut buffer).await.unwrap();
+    String::from_utf8_lossy(&buffer[..read]).to_string()
+}
+
+pub async fn subscribed_channels(pattern: &str) -> usize {
+    let reply = raw_command(&["PUBSUB", "CHANNELS", pattern]).await;
+    reply.lines().filter(|line| line.starts_with('$')).count()
+}

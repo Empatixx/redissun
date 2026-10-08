@@ -9,6 +9,7 @@ use futures::{stream, Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
+use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
@@ -44,6 +45,14 @@ impl<K, V, C: Codec> Clone for Map<K, V, C> {
             codec: self.codec.clone(),
             _marker: PhantomData,
         }
+    }
+}
+
+impl<K, V, C: Codec> fmt::Debug for Map<K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Map")
+            .field("name", &self.key.name())
+            .finish()
     }
 }
 

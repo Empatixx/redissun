@@ -1,6 +1,7 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
 use fred::interfaces::KeysInterface;
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,12 @@ pub(crate) fn millis(duration: Duration) -> Result<i64> {
         return Err(Error::Config("duration must be positive".into()));
     }
     Ok(duration.as_nanos().div_ceil(1_000_000) as i64)
+}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Key").field(&self.name).finish()
+    }
 }
 
 #[derive(Clone)]

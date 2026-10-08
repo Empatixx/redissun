@@ -7,6 +7,7 @@ use fred::types::scripts::Script;
 use fred::types::{Expiration, SetOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -35,6 +36,14 @@ impl<V, C: Codec> Clone for Bucket<V, C> {
             codec: self.codec.clone(),
             _marker: PhantomData,
         }
+    }
+}
+
+impl<V, C: Codec> fmt::Debug for Bucket<V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bucket")
+            .field("name", &self.key.name())
+            .finish()
     }
 }
 

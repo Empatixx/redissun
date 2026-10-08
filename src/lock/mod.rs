@@ -8,7 +8,8 @@ use crate::object::{millis as to_millis, HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::scripts::Script;
-use std::sync::{Arc, LazyLock};
+use std::fmt;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -143,6 +144,14 @@ pub struct Lock {
     key: Key,
 }
 
+impl fmt::Debug for Lock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Lock")
+            .field("name", &self.key.name())
+            .finish()
+    }
+}
+
 impl HasKey for Lock {
     fn key(&self) -> &Key {
         &self.key
@@ -179,10 +188,12 @@ impl Lock {
         let watchdog = options.lease.is_none();
         let lease = options.lease.unwrap_or(core.lock_lease);
         let deadline = options.wait.map(|wait| Instant::now() + wait);
-        let notify = match options.wait {
-            Some(wait) if wait.is_zero() => Arc::new(Notify::new()),
-            _ => core.pubsub.subscribe(&channel(self.key.name())).await?,
+        let subscription = match options.wait {
+            Some(wait) if wait.is_zero() => None,
+            _ => Some(core.pubsub.subscribe(&channel(self.key.name())).await?),
         };
+        let local = Notify::new();
+        let notify: &Notify = subscription.as_ref().map_or(&local, |s| s.notify());
 
         loop {
             let notified = notify.notified();

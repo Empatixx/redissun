@@ -5,6 +5,7 @@ use crate::core::Core;
 use crate::lock::Lock;
 use crate::map::Map;
 use crate::object::Key;
+use std::fmt;
 use std::sync::Arc;
 
 /// Entry point that hands out distributed objects. Cheap to clone; clones share the connection pool.
@@ -12,6 +13,12 @@ use std::sync::Arc;
 pub struct Client<C: Codec = JsonCodec> {
     core: Arc<Core>,
     codec: C,
+}
+
+impl<C: Codec> fmt::Debug for Client<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client").finish_non_exhaustive()
+    }
 }
 
 impl Client<JsonCodec> {
