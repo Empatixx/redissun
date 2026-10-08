@@ -3,6 +3,7 @@ use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
+use crate::latch::CountDownLatch;
 use crate::lock::Lock;
 use crate::map::Map;
 use crate::object::Key;
@@ -58,5 +59,10 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Semaphore`] named `name`.
     pub fn semaphore(&self, name: impl Into<Arc<str>>) -> Semaphore {
         Semaphore::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`CountDownLatch`] named `name`.
+    pub fn count_down_latch(&self, name: impl Into<Arc<str>>) -> CountDownLatch {
+        CountDownLatch::new(Key::new(self.core.clone(), name))
     }
 }
