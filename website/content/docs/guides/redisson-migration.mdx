@@ -110,10 +110,10 @@ description: How Redisson names and behaviour map to redissun.
 |---|---|
 | `readLock().lock()` | `read()` |
 | `readLock().tryLock()` | `try_read()` |
-| `readLock().tryLock(time, unit)` | `read_for(wait)` |
+| `readLock().tryLock(time, unit)` | `read().timeout(wait)` |
 | `writeLock().lock()` | `write()` |
 | `writeLock().tryLock()` | `try_write()` |
-| `writeLock().tryLock(time, unit)` | `write_for(wait)` |
+| `writeLock().tryLock(time, unit)` | `write().timeout(wait)` |
 | `unlock()` | `unlock()` on the guard |
 
 ## HashMapCache
@@ -131,9 +131,9 @@ Redisson deletes expired entries with a background task. redissun deletes them w
 
 | Redisson | redissun |
 |---|---|
-| `poll(time, unit)` | `pop_front_for(timeout)` |
+| `poll(time, unit)` | `pop_front_wait().timeout(timeout)` |
 | `take()` | `pop_front_wait()` |
-| `pollLast(time, unit)` | `pop_back_for(timeout)` |
+| `pollLast(time, unit)` | `pop_back_wait().timeout(timeout)` |
 | `takeLast()` | `pop_back_wait()` |
 
 ## Lock
@@ -142,8 +142,8 @@ Redisson deletes expired entries with a background task. redissun deletes them w
 |---|---|
 | `lock()` | `lock().await` |
 | `tryLock()` | `try_lock().await` |
-| `tryLock(wait, unit)` | `lock_for(wait).await` |
-| `tryLock(wait, lease, unit)` | `lock_with(LockOptions::new().wait(w).lease(l)).await` |
+| `tryLock(wait, unit)` | `lock().timeout(wait).await` |
+| `tryLock(wait, lease, unit)` | `lock().lease(l).timeout(w).await` |
 | `unlock()` | `guard.unlock().await` |
 | `isLocked()` | `is_locked().await` |
 | `isHeldByCurrentThread()` | `is_held_by_current().await` |
@@ -175,7 +175,7 @@ Redisson deletes expired entries with a background task. redissun deletes them w
 | `drainPermits()` | `drain_permits()` |
 | `acquire(n)` | `acquire(n)`, returns a `Permits` value |
 | `tryAcquire(n)` | `try_acquire(n)` |
-| `tryAcquire(n, wait, unit)` | `acquire_for(n, wait)` |
+| `tryAcquire(n, wait, unit)` | `acquire(n).timeout(wait)` |
 | `release(n)` | `permits.release()` or `semaphore.release(n)` |
 
 ## CountDownLatch
@@ -186,7 +186,7 @@ Redisson deletes expired entries with a background task. redissun deletes them w
 | `countDown()` | `count_down()` |
 | `getCount()` | `count()` |
 | `await()` | `wait()` |
-| `await(time, unit)` | `wait_for(time)` |
+| `await(time, unit)` | `wait().timeout(time)` |
 
 ## RateLimiter
 
@@ -195,7 +195,7 @@ Redisson deletes expired entries with a background task. redissun deletes them w
 | `trySetRate(mode, rate, interval, unit)` | `try_set_rate(type, rate, interval)` |
 | `setRate(...)` | `set_rate(...)` |
 | `tryAcquire(n)` | `try_acquire(n)` |
-| `tryAcquire(n, timeout, unit)` | `try_acquire_for(n, timeout)` |
+| `tryAcquire(n, timeout, unit)` | `acquire(n).timeout(timeout)` |
 | `acquire(n)` | `acquire(n)` |
 | `availablePermits()` | `available_permits()` |
 | `RateType.OVERALL`, `PER_CLIENT` | `RateType::Overall`, `RateType::PerClient` |

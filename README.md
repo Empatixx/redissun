@@ -102,8 +102,8 @@ guard.unlock().await?;
 
 - `lock()` waits for the lock.
 - `try_lock()` gives up at once if the lock is taken.
-- `lock_for(wait)` gives up after `wait`.
-- `lock_with(options)` lets you choose both wait time and lease.
+- `lock().timeout(wait)` gives up after `wait` and gives `None`.
+- `lock().lease(lease)` sets the lease yourself. You can add `.timeout(wait)` too.
 
 A lock has a lease. A watchdog renews it while you hold the lock. If your program crashes, the lock frees itself when the lease ends. Waiting programs wake up as soon as the lock is released. They do not poll.
 
@@ -127,10 +127,10 @@ A queue or stack. Add and remove at both ends.
 let jobs = client.vec_deque::<String>("jobs");
 jobs.push_back("send-email").await?;
 let next = jobs.pop_front().await?;
-let waited = jobs.pop_front_for(Duration::from_secs(5)).await?;
+let waited = jobs.pop_front_wait().timeout(Duration::from_secs(5)).await?;
 ```
 
-`pop_front_for`, `pop_back_for`, `pop_front_wait` and `pop_back_wait` block until a value arrives.
+`pop_front_wait` and `pop_back_wait` block until a value arrives. Add `.timeout(duration)` to wait at most that long.
 
 ### HashSet
 

@@ -18,16 +18,17 @@ guard.unlock().await?;
 |---|---|
 | `lock()` | waits until the lock is free |
 | `try_lock()` | returns `None` at once if the lock is taken |
-| `lock_for(wait)` | returns `None` if `wait` runs out |
-| `lock_with(options)` | lets you set both wait time and lease |
+| `lock().timeout(wait)` | returns `None` if `wait` runs out |
+| `lock().lease(lease)` | sets the lease yourself, so there is no watchdog |
 
 ```rust
-use redissun::LockOptions;
 use std::time::Duration;
 
-let options = LockOptions::new().wait(Duration::from_secs(2)).lease(Duration::from_secs(10));
-let guard = lock.lock_with(options).await?;
+let guard = lock.lock().lease(Duration::from_secs(10)).await?;
+let maybe = lock.lock().lease(Duration::from_secs(10)).timeout(Duration::from_secs(2)).await?;
 ```
+
+`lock()` returns a value that you can configure and then `await`. Without `.timeout` it waits as long as needed and gives a guard. With `.timeout` it gives `Option<LockGuard>`.
 
 A lease must be longer than zero. Very small leases are rounded up to one millisecond.
 

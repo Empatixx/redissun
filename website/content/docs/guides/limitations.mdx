@@ -12,7 +12,7 @@ description: Things to know about this version.
 - **Numbers.** `HashMap::incr_by` needs values that the codec writes as plain numbers.
 - **Equal values.** `Vec`, `VecDeque` and `HashSet` compare values by their encoded bytes. The codec must give the same bytes for equal values. The JSON codec does this for structs and numbers, but not for a `HashMap` inside a value, because its key order is random.
 - **Collections.** `Vec::insert` and `Vec::remove` by index are O(n). Iteration reads pages, so changes made while you read can make you miss a value or see it twice. `VecDeque` has no blocking pop yet. `HashSet` has no `union_into` and similar yet.
-- **Blocking pops** use their own short-lived connection. A pop that is dropped while an element is on its way can lose that element. Use `pop_front_for` for time limits.
+- **Blocking pops** use their own short-lived connection. A pop that is dropped while an element is on its way can lose that element. Use `.timeout(wait)` for time limits.
 - **Topic** does not store messages. A slow subscriber that falls more than 256 messages behind gets `Error::Lagged`.
 - **RwLock** does not prefer writers, and a reader cannot be upgraded to a writer.
 - **HashMapCache** has no background eviction and no idle timeout. Expired entries use memory until they are touched or `evict_expired` runs.

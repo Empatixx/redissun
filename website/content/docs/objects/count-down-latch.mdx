@@ -21,7 +21,7 @@ latch.wait().await?;         // in the coordinator
 | `count_down()` | lowers the count by one |
 | `count()` | the current count. A missing latch has 0. |
 | `wait()` | waits until the count is zero |
-| `wait_for(timeout)` | waits up to `timeout`. Returns `true` if the count reached zero. |
+| `wait().timeout(wait)` | waits at most `wait`. Gives `Some(())` if the count reached zero and `None` if the time ran out. |
 
 ## How it works
 

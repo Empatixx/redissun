@@ -19,9 +19,8 @@ write.unlock().await?;
 
 | Method | Notes |
 |---|---|
-| `read()`, `write()` | wait until the lock is free |
+| `read()`, `write()` | wait until the lock is free. Add `.timeout(wait)` to get `None` when `wait` runs out. |
 | `try_read()`, `try_write()` | return `None` at once when the lock is busy |
-| `read_for(wait)`, `write_for(wait)` | wait at most `wait`, then return `None` |
 | `is_write_locked()` | |
 | `force_unlock()` | releases every read and write hold of every owner |
 

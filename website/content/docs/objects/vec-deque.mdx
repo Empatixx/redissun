@@ -26,8 +26,7 @@ Every pop is one atomic Redis command. If many programs pop from the same deque,
 | `len()` and `is_empty()` | `LLEN` | |
 | `clear()` | `DEL` | |
 | `iter()` | `LRANGE` | a stream, 100 values at a time |
-| `pop_front_for(timeout)`, `pop_back_for(timeout)` | `BLPOP`, `BRPOP` | wait up to `timeout`, then return `None` |
-| `pop_front_wait()`, `pop_back_wait()` | `BLPOP`, `BRPOP` | wait without a limit |
+| `pop_front_wait()`, `pop_back_wait()` | `BLPOP`, `BRPOP` | wait for a value. Add `.timeout(wait)` to get `None` when `wait` runs out. |
 
 `pop_front` and `pop_back` return `None` at once when the deque is empty.
 
@@ -39,7 +38,7 @@ The blocking pops turn a deque into a work queue. A worker waits, and a producer
 let jobs = client.vec_deque::<String>("jobs");
 
 loop {
-    if let Some(job) = jobs.pop_front_for(Duration::from_secs(5)).await? {
+    if let Some(job) = jobs.pop_front_wait().timeout(Duration::from_secs(5)).await? {
         handle(job).await;
     }
 }
@@ -47,7 +46,7 @@ loop {
 
 A blocking pop first tries a normal pop. Only when the deque is empty does it open its own short-lived connection and block on that. So a waiting worker never slows down your other calls. Each element goes to exactly one worker.
 
-Use `pop_front_for` for a time limit. Do not wrap a pop in `tokio::time::timeout`: if the future is dropped at the wrong moment, an element that Redis has just handed over is lost.
+Use `.timeout(wait)` for a time limit. Do not wrap a pop in `tokio::time::timeout`: if the future is dropped at the wrong moment, an element that Redis has just handed over is lost.
 
 ## Same list as Vec
 

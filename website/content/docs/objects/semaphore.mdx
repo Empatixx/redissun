@@ -22,14 +22,13 @@ permits.release().await?;
 | `add_permits(n)` | adds permits and wakes waiters |
 | `available_permits()` | permits free now. A missing semaphore has 0. |
 | `drain_permits()` | takes all free permits and returns how many |
-| `acquire(n)` | waits for `n` permits |
+| `acquire(n)` | waits for `n` permits. Add `.timeout(wait)` to get `None` when `wait` runs out. |
 | `try_acquire(n)` | takes `n` permits or returns `None` at once |
-| `acquire_for(n, wait)` | waits up to `wait`, then returns `None` |
 | `release(n)` | gives `n` permits back by hand |
 
 ## The Permits value
 
-`acquire`, `try_acquire` and `acquire_for` return `Permits`.
+`acquire`, `try_acquire` and `acquire(n).timeout(wait)` give `Permits`.
 
 - `release().await` gives the permits back and shows errors.
 - If you drop it, the permits are given back in the background.
