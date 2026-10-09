@@ -42,6 +42,6 @@ An entry has an id (`StreamId`) and fields in the order you gave them. Fields ar
 | `pending(group)` | count, smallest and largest id, and the count for each consumer |
 | `pending_entries(group, count)` | id, consumer, idle time and delivery count |
 | `claim(group, consumer, min_idle, ids)` | takes over entries that were idle long enough |
-| `auto_claim(group, consumer, min_idle, start, count)` | the same without knowing the ids. Needs Redis 6.2. |
+| `auto_claim(group, consumer, min_idle, start, count)` | the same without knowing the ids; returns an `AutoClaim` with `next`, `entries` and `deleted`. Needs Redis 6.2. |
 
 A waiting call uses its own short-lived connection, like the blocking pops of `VecDeque`. Use `.timeout` for a time limit and not `tokio::time::timeout`, because dropping a pending call can lose entries that Redis has just handed over.

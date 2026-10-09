@@ -1,9 +1,9 @@
 use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
 use bytes::Bytes;
-use fred::clients::{Client as RedisClient, Pool};
-use fred::interfaces::{ClientInterface, ClientLike};
-use fred::prelude::{Builder, Config, FromValue, ReconnectPolicy};
+use fred::clients::{Client as RedisClient, Pool, WithOptions};
+use fred::interfaces::{ClientInterface, ClientLike, LuaInterface};
+use fred::prelude::{Builder, Config, FromValue, Options, ReconnectPolicy};
 use fred::types::client::ClientKillFilter;
 use fred::types::scripts::Script;
 use std::sync::Arc;
@@ -20,9 +20,11 @@ pub(crate) struct Core {
     pool: Pool,
     id: String,
     pub(crate) lock_lease: Duration,
+    pub(crate) lock_settings: crate::lock::LockSettings,
     pub(crate) eviction_interval: Duration,
     pub(crate) pubsub: Arc<PubSub>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
+    pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
 }
 
 impl Core {
@@ -32,6 +34,7 @@ impl Core {
         lock_lease: Duration,
         connect_timeout: Duration,
         eviction_interval: Duration,
+        lock_settings: crate::lock::LockSettings,
     ) -> Result<Arc<Self>> {
         let config = Config::from_url(url).map_err(|e| Error::Config(e.to_string()))?;
         let mut builder = Builder::from_config(config);
@@ -59,9 +62,11 @@ impl Core {
             pool,
             id: Uuid::new_v4().to_string(),
             lock_lease,
+            lock_settings,
             eviction_interval,
             pubsub,
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
+            exclusive: std::sync::Mutex::new(Vec::new()),
         }))
     }
 
@@ -86,6 +91,10 @@ impl Core {
         })
     }
 
+    pub(crate) fn redis_no_retry(&self) -> WithOptions<RedisClient> {
+        no_retry(self.redis())
+    }
+
     pub(crate) fn client_id(&self) -> &str {
         &self.id
     }
@@ -105,6 +114,31 @@ impl Core {
     ) -> Result<R> {
         Ok(script.evalsha_with_reload(self.redis(), keys, args).await?)
     }
+
+    pub(crate) async fn eval_no_retry<R: FromValue>(
+        &self,
+        script: &Script,
+        keys: Vec<String>,
+        args: Vec<Bytes>,
+    ) -> Result<R> {
+        let client = self.redis();
+        let once = no_retry(client);
+        let sha = script.sha1().clone();
+        match once.evalsha(sha.clone(), keys.clone(), args.clone()).await {
+            Err(error) if error.details().starts_with("NOSCRIPT") => {
+                script.load(client).await?;
+                Ok(once.evalsha(sha, keys, args).await?)
+            }
+            result => Ok(result?),
+        }
+    }
+}
+
+pub(crate) fn no_retry<C: ClientLike>(client: &C) -> WithOptions<C> {
+    client.with_options(&Options {
+        max_attempts: Some(1),
+        ..Default::default()
+    })
 }
 
 pub(crate) struct BlockingClient {
@@ -146,9 +180,13 @@ impl Drop for Core {
         };
         let pool = self.pool.clone();
         let pubsub = self.pubsub.clone();
+        let exclusive = std::mem::take(self.exclusive.get_mut().unwrap_or_else(|e| e.into_inner()));
         runtime.spawn(async move {
             let _ = pool.quit().await;
             pubsub.quit().await;
+            for client in exclusive {
+                let _ = client.quit().await;
+            }
         });
     }
 }

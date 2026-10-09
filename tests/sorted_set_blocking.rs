@@ -110,3 +110,187 @@ async fn each_value_goes_to_exactly_one_consumer() {
     all.sort_unstable();
     assert_eq!(all, (0..50).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn test_take_first() {
+    let set = client().await.sorted_set::<i32>(unique("zset"));
+    let producer = set.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(1)).await;
+        producer.insert(&1, 0.1).await.unwrap();
+    });
+    let started = Instant::now();
+    assert_eq!(set.pop_first_wait().await.unwrap(), (1, 0.1));
+    assert!(started.elapsed() > Duration::from_millis(900));
+}
+
+async fn abc() -> redissun::SortedSet<String, redissun::JsonCodec> {
+    let set = client().await.sorted_set::<String>(unique("zset"));
+    for (value, score) in [("a", 0.1), ("b", 0.2), ("c", 0.3)] {
+        set.insert(value, score).await.unwrap();
+    }
+    set
+}
+
+async fn names(set: &redissun::SortedSet<String, redissun::JsonCodec>) -> Vec<String> {
+    set.range(0..usize::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(v, _)| v)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_poll_last_timeout() {
+    let empty = client().await.sorted_set::<String>(unique("zset"));
+    assert!(empty
+        .pop_last_wait()
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .is_none());
+    let set = abc().await;
+    let popped = set
+        .pop_last_wait()
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(popped.unwrap().0, "c");
+    assert_eq!(names(&set).await, ["a", "b"]);
+}
+
+#[tokio::test]
+async fn test_poll_first_timeout() {
+    let empty = client().await.sorted_set::<String>(unique("zset"));
+    assert!(empty
+        .pop_first_wait()
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .is_none());
+    let set = abc().await;
+    let popped = set
+        .pop_first_wait()
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(popped.unwrap().0, "a");
+    assert_eq!(names(&set).await, ["b", "c"]);
+}
+
+async fn six() -> redissun::SortedSet<String, redissun::JsonCodec> {
+    let set = client().await.sorted_set::<String>(unique("zset"));
+    for (value, score) in [
+        ("a", 0.1),
+        ("b", 0.2),
+        ("c", 0.3),
+        ("d", 0.4),
+        ("e", 0.5),
+        ("f", 0.6),
+    ] {
+        set.insert(value, score).await.unwrap();
+    }
+    set
+}
+
+#[tokio::test]
+async fn test_poll_first_timeout_count() {
+    let set = six().await;
+    let popped = set
+        .pop_first_many_wait(2)
+        .timeout(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(popped, [("a".to_string(), 0.1), ("b".to_string(), 0.2)]);
+    assert_eq!(names(&set).await, ["c", "d", "e", "f"]);
+    let empty = client().await.sorted_set::<String>(unique("zset"));
+    assert!(empty
+        .pop_first_many_wait(2)
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_poll_last_timeout_count() {
+    let set = six().await;
+    let popped = set
+        .pop_last_many_wait(2)
+        .timeout(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(popped, [("f".to_string(), 0.6), ("e".to_string(), 0.5)]);
+    assert_eq!(names(&set).await, ["a", "b", "c", "d"]);
+    let empty = client().await.sorted_set::<String>(unique("zset"));
+    assert!(empty
+        .pop_last_many_wait(2)
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_poll_entry_duration() {
+    let set = client().await.sorted_set::<String>(unique("zset"));
+    for (value, score) in [
+        ("v1", 1.1),
+        ("v2", 1.2),
+        ("v3", 1.3),
+        ("v4", 1.4),
+        ("v5", 1.5),
+    ] {
+        set.insert(value, score).await.unwrap();
+    }
+    let first = set
+        .pop_first_many_wait(2)
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, [("v1".to_string(), 1.1), ("v2".to_string(), 1.2)]);
+    let mut last = set
+        .pop_last_many_wait(2)
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    last.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(last, [("v4".to_string(), 1.4), ("v5".to_string(), 1.5)]);
+    assert_eq!(set.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn sub_second_timeouts_wait_a_whole_second_like_redisson() {
+    let set = client().await.sorted_set::<String>(unique("zset"));
+    let started = Instant::now();
+    assert!(set
+        .pop_first_wait()
+        .timeout(Duration::from_millis(200))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(started.elapsed() >= Duration::from_millis(900));
+}
+
+#[tokio::test]
+async fn many_wait_with_zero_timeout_pops_without_waiting() {
+    let set = six().await;
+    let popped = set
+        .pop_first_many_wait(10)
+        .timeout(Duration::ZERO)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(popped.len(), 6);
+    assert!(set
+        .pop_first_many_wait(1)
+        .timeout(Duration::ZERO)
+        .await
+        .unwrap()
+        .is_none());
+}

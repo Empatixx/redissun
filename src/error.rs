@@ -28,6 +28,9 @@ pub enum Error {
     /// The index is past the end of the list.
     #[error("index out of range")]
     OutOfRange,
+    /// No replica confirmed a lock write within `replicas_sync_timeout` although replicas are connected.
+    #[error("none of the replicas were synced; increase replicas_sync_timeout or disable check_lock_synced_replicas")]
+    NoSyncedReplicas,
 }
 
 /// Result alias used by every fallible redissun call.

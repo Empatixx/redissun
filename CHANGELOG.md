@@ -1,21 +1,45 @@
 # Changelog
 
-## [Unreleased]
+## [0.16.0] - 2026-10-09
+
+The business logic of every object was compared with Redisson's source and aligned with it, and Redisson's own tests were ported, one Rust test file per type. Many APIs changed to match Redisson's behaviour.
+
+### Changed
+
+- Retries follow Redisson. Commands that Redisson sends without a retry are sent once: taking and releasing locks and semaphore permits, `Vec::insert`, pushes and pops, `DelayedQueue::push`, `SETNX`-like writes, `HINCRBY`, `ZINCRBY`, `GEOADD`, `XADD`. Other commands are retried up to 3 times, so a non-idempotent write such as `incr` can still be applied twice when a connection drops.
+- Locks wait for a replica like Redisson's `syncedEval`: on Sentinel and Cluster the lock script is followed by `WAIT` on the same connection, and `Error::NoSyncedReplicas` is raised and retried when no replica acknowledged it. Settings: `check_lock_synced_replicas` (default true), `replicas_sync_timeout` (1 s), `fair_lock_wait_timeout` (300 s).
+- Unlock uses Redisson's unlock latch, which is deleted after a successful unlock.
+- `FencedLock` increments its token on every acquisition, reentrant ones included, and returns it from the acquire script.
+- `FairLock` and `DelayedQueue` use the client clock and Redisson's scripts.
+- `MultiLock` uses Redisson's algorithm again. Owners that list the same locks in different orders can block each other until their timeout, as in Redisson.
+- `RwLock`: a write unlock publishes only when the lock is gone. Added read and write leases, hold counts and separate force unlocks.
+- `Semaphore`: 0 permits is a no-op; added `try_set_permits_with_ttl` and `release_if_exists`; `add_permits` takes `i64`.
+- `CountDownLatch`: `try_set_count(0)` creates an open latch, and deleting a latch wakes waiters.
+- `RateLimiter`: Redisson's scripts and keys with the client clock, `release`, keep-alive time, `update_rate` and `config`. `available_permits` is no longer capped.
+- `AtomicI64`: added `compare_and_delete`, `set_if_less`, `set_if_greater`, `get_and_incr`, `get_and_decr`.
+- `BloomFilter`: HighwayHash128 with Redisson's key, so bit positions match Redisson for the same bytes; added `insert_all`, `contains_all`, `contains_each`.
+- `Bucket::compare_and_set` takes `Option` values with Redisson's null rules. `Vec::set` returns the old value and `Vec::remove` returns `Result<V>`. `BitSet::len` is replaced by `size()` and `length()`. `SortedSet` score methods take ranges and `iter` uses `ZSCAN`. Blocking pops go straight to the blocking command with whole-second timeouts.
+- `Object::expire`, `persist` and `rename` change all keys of an object in one script.
+- `HashMapCache`: Redisson's eviction order, idle and LRU/LFU refresh on `contains_key` and iteration, one channel per event kind with `events_of`, and Redisson's clean-up task (one client per run, pause growing ×1.5 up to 30 minutes).
+- `HashSetCache`: Redisson's scores and an `expired()` listener.
+- `LocalCachedMap`: messages only when something changed; `ReconnectionStrategy` (None by default, Clear, Load), `EvictionPolicy` (None by default, Lru, Lfu), `max_idle`, `store_cache_miss`. Set `.eviction_policy(EvictionPolicy::Lru)` for a bounded cache.
+- `Batch`: per-node `WAIT` and `MULTI`/`EXEC` in a cluster, Redisson's retry defaults, and `execute` fails with the first command error.
+- Added `PatternTopic`.
 
 ### Fixed
 
-- Pub/sub subscriptions are restored after a reconnect, including a Sentinel failover, and waiters are woken once they are back. Before, a dropped pub/sub connection silently stopped every `Topic` subscriber, `HashMapCache::events`, and the invalidation messages of `LocalCachedMap`, which then served stale values from its local cache forever.
-- Taking and releasing a lock (`Lock`, `FairLock`, `FencedLock`, `RwLock`) and taking and releasing semaphore permits are safe to repeat. Each call carries a request id, and its script remembers the result under `redissun__request_latch:{name}:<id>` for 30 seconds, as Redisson does for unlocking. A failed unlock is also retried for up to 10 seconds. Before, a command repeated after a dropped connection could take a lock twice, or the reply of an unlock could get lost. In both cases one hold stayed behind, and a task that took the same lock again in a loop kept it forever while every other owner waited. A repeated semaphore call could also take or return its permits twice.
-- `MultiLock` takes its locks in the order of their key names. Before, owners that listed the same locks in a different order and used `.timeout()` could block each other until both timed out, again and again.
-- `HashMapCache::events` receives events in Redis Cluster. Before, the cache published an event only when the node that holds the key had a subscriber of its own, so a listener connected to another node missed them.
-- `FencedLock` no longer leaves its watchdog running when reading the fencing token fails after the lock was taken.
+- Pub/sub subscriptions are restored after a reconnect, retried every second until they succeed, and waiters are woken. Before, a dropped pub/sub connection silently stopped `Topic` subscribers, cache events and `LocalCachedMap` invalidation.
+- Topic subscribers get `Error::Lagged` when messages were dropped.
+- `HashMapCache` events reach listeners in Redis Cluster.
+- `FencedLock` no longer leaves its watchdog running when the acquisition fails half way.
+- Sentinel test topologies use ports below the Linux ephemeral range, so a replica's outgoing connection can no longer take a sentinel's port.
 - The test containers are removed together with their volumes.
 
 ### Added
 
-- Sentinel and Cluster tests, including a master failover (`tests/sentinel.rs`, `tests/cluster.rs`).
-- Fault-injection tests in the style of Jepsen (`tests/chaos.rs`). Several clients work on one object while connections are killed and Redis is paused, and the results are checked for overlapping lock holders, fencing tokens that go backwards, an overbooked semaphore, a rate limiter that grants too much, lost acknowledged increments, and queue values that nobody pushed.
-- Git tags and GitHub releases for every published version. The publish workflow uses the version's section of this changelog as the release notes.
+- Redisson's tests, ported per type (about 1100 tests in all).
+- Sentinel and Cluster tests with a master failover, and fault-injection tests in the style of Jepsen (`tests/chaos.rs`).
+- Git tags and GitHub releases for every published version.
 
 ## [0.15.0] - 2026-10-09
 

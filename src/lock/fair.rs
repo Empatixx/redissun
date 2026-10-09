@@ -1,132 +1,172 @@
+use crate::error::Result;
+use crate::lock::sync::{synced_eval, with_sync_retry};
 use crate::object::Key;
 use bytes::Bytes;
 use fred::types::scripts::Script;
 use std::sync::LazyLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
 
-pub(crate) const SLOT_MILLIS: u64 = 5000;
-
-const NOW: &str = "local t = redis.call('TIME')
-local now = t[1] * 1000 + math.floor(t[2] / 1000)
-";
-
-const PURGE_STALE: &str = "while true do
-    local head = redis.call('LINDEX', KEYS[2], 0)
-    if head == false then break end
-    if head == ARGV[2] then break end
-    local due = redis.call('ZSCORE', KEYS[3], head)
-    if due == false or tonumber(due) + 1000 <= now then
-        redis.call('ZREM', KEYS[3], head)
-        redis.call('LPOP', KEYS[2])
+const REMOVE_STALE: &str = "while true do
+    local firstThreadId2 = redis.call('lindex', KEYS[2], 0)
+    if firstThreadId2 == false then
+        break
+    end
+    local timeout = redis.call('zscore', KEYS[3], firstThreadId2)
+    if timeout ~= false and tonumber(timeout) <= tonumber(NOW) then
+        redis.call('zrem', KEYS[3], firstThreadId2)
+        redis.call('lpop', KEYS[2])
     else
         break
     end
 end
 ";
 
-const NOTIFY_HEAD: &str = "local next = redis.call('LINDEX', KEYS[2], 0)
-if next ~= false then
-    redis.call('PUBLISH', PREFIX .. ':' .. next, MESSAGE)
-end
-";
-
-fn script(body: &str, prefix: &str, message: &str) -> Script {
-    let notify = NOTIFY_HEAD
-        .replace("PREFIX", prefix)
-        .replace("MESSAGE", message);
-    let source = body
-        .replace("--NOW--", NOW)
-        .replace("--PURGE--", PURGE_STALE)
-        .replace("--NOTIFY--", &notify);
-    Script::from_lua(source)
+fn remove_stale(now: &str) -> String {
+    REMOVE_STALE.replace("NOW", now)
 }
 
 pub(crate) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(format!(
-        "if redis.call('EXISTS', KEYS[4]) == 1 then
-            return nil
-        end
-        {NOW}{PURGE_STALE}
-        if redis.call('EXISTS', KEYS[1]) == 0
-            and (redis.call('EXISTS', KEYS[2]) == 0 or redis.call('LINDEX', KEYS[2], 0) == ARGV[2]) then
-            redis.call('LPOP', KEYS[2])
-            redis.call('ZREM', KEYS[3], ARGV[2])
-            for _, waiting in ipairs(redis.call('ZRANGE', KEYS[3], 0, -1)) do
-                redis.call('ZINCRBY', KEYS[3], -tonumber(ARGV[3]), waiting)
+        "{}
+        if (redis.call('exists', KEYS[1]) == 0)
+            and ((redis.call('exists', KEYS[2]) == 0) or (redis.call('lindex', KEYS[2], 0) == ARGV[2])) then
+            redis.call('lpop', KEYS[2])
+            redis.call('zrem', KEYS[3], ARGV[2])
+            local keys = redis.call('zrange', KEYS[3], 0, -1)
+            for i = 1, #keys, 1 do
+                redis.call('zincrby', KEYS[3], -tonumber(ARGV[3]), keys[i])
             end
-            redis.call('HSET', KEYS[1], ARGV[2], 1)
-            redis.call('PEXPIRE', KEYS[1], ARGV[1])
-            redis.call('SET', KEYS[4], 1, 'PX', ARGV[4])
+            redis.call('hset', KEYS[1], ARGV[2], 1)
+            redis.call('pexpire', KEYS[1], ARGV[1])
             return nil
         end
-        if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
-            redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
-            redis.call('PEXPIRE', KEYS[1], ARGV[1])
-            redis.call('SET', KEYS[4], 1, 'PX', ARGV[4])
+        if redis.call('hexists', KEYS[1], ARGV[2]) == 1 then
+            redis.call('hincrby', KEYS[1], ARGV[2], 1)
+            redis.call('pexpire', KEYS[1], ARGV[1])
             return nil
         end
-        local head = redis.call('LINDEX', KEYS[2], 0)
+        local timeout = redis.call('zscore', KEYS[3], ARGV[2])
+        if timeout ~= false then
+            local ttl = redis.call('pttl', KEYS[1])
+            return math.max(0, ttl)
+        end
+        local lastThreadId = redis.call('lindex', KEYS[2], -1)
         local ttl
-        if head ~= false and head ~= ARGV[2] then
-            ttl = tonumber(redis.call('ZSCORE', KEYS[3], head)) - now
+        if lastThreadId ~= false and lastThreadId ~= ARGV[2] and redis.call('zscore', KEYS[3], lastThreadId) ~= false then
+            ttl = tonumber(redis.call('zscore', KEYS[3], lastThreadId)) - tonumber(ARGV[4])
         else
-            ttl = redis.call('PTTL', KEYS[1])
+            ttl = redis.call('pttl', KEYS[1])
         end
-        if ttl < 0 then
-            ttl = 0
+        local timeout = ttl + tonumber(ARGV[3]) + tonumber(ARGV[4])
+        if redis.call('zadd', KEYS[3], timeout, ARGV[2]) == 1 then
+            redis.call('rpush', KEYS[2], ARGV[2])
         end
-        local due = ttl + tonumber(ARGV[3]) + now
-        if redis.call('ZADD', KEYS[3], due, ARGV[2]) == 1 then
-            redis.call('RPUSH', KEYS[2], ARGV[2])
+        return ttl",
+        remove_stale("ARGV[4]")
+    ))
+});
+
+pub(crate) static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(format!(
+        "{}
+        if (redis.call('exists', KEYS[1]) == 0)
+            and ((redis.call('exists', KEYS[2]) == 0) or (redis.call('lindex', KEYS[2], 0) == ARGV[2])) then
+            redis.call('lpop', KEYS[2])
+            redis.call('zrem', KEYS[3], ARGV[2])
+            local keys = redis.call('zrange', KEYS[3], 0, -1)
+            for i = 1, #keys, 1 do
+                redis.call('zincrby', KEYS[3], -tonumber(ARGV[4]), keys[i])
+            end
+            redis.call('hset', KEYS[1], ARGV[2], 1)
+            redis.call('pexpire', KEYS[1], ARGV[1])
+            return nil
         end
-        return ttl"
+        if redis.call('hexists', KEYS[1], ARGV[2]) == 1 then
+            redis.call('hincrby', KEYS[1], ARGV[2], 1)
+            redis.call('pexpire', KEYS[1], ARGV[1])
+            return nil
+        end
+        return 1",
+        remove_stale("ARGV[3]")
     ))
 });
 
 pub(crate) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    let body = "local done = redis.call('GET', KEYS[4])
-        if done ~= false then
-            return tonumber(done)
+    Script::from_lua(format!(
+        "local val = redis.call('get', KEYS[4])
+        if val ~= false then
+            return tonumber(val)
         end
-        --NOW----PURGE--
-        if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
-            --NOTIFY--
+        {}
+        if (redis.call('exists', KEYS[1]) == 0) then
+            local nextThreadId = redis.call('lindex', KEYS[2], 0)
+            if nextThreadId ~= false then
+                redis.call('publish', ARGV[6] .. ':' .. nextThreadId, ARGV[1])
+            end
+            redis.call('set', KEYS[4], 1, 'px', ARGV[5])
+            return 1
+        end
+        if (redis.call('hexists', KEYS[1], ARGV[3]) == 0) then
             return nil
         end
-        local count = redis.call('HINCRBY', KEYS[1], ARGV[2], -1)
-        if count > 0 then
-            redis.call('PEXPIRE', KEYS[1], ARGV[1])
-            redis.call('SET', KEYS[4], 0, 'PX', ARGV[4])
+        local counter = redis.call('hincrby', KEYS[1], ARGV[3], -1)
+        if (counter > 0) then
+            redis.call('pexpire', KEYS[1], ARGV[2])
+            redis.call('set', KEYS[4], 0, 'px', ARGV[5])
             return 0
         end
-        redis.call('DEL', KEYS[1])
-        --NOTIFY--
-        redis.call('SET', KEYS[4], 1, 'PX', ARGV[4])
-        return 1";
-    script(body, "ARGV[3]", "'unlocked'")
+        redis.call('del', KEYS[1])
+        redis.call('set', KEYS[4], 1, 'px', ARGV[5])
+        local nextThreadId = redis.call('lindex', KEYS[2], 0)
+        if nextThreadId ~= false then
+            redis.call('publish', ARGV[6] .. ':' .. nextThreadId, ARGV[1])
+        end
+        return 1",
+        remove_stale("ARGV[4]")
+    ))
 });
 
-pub(crate) static CANCEL: LazyLock<Script> = LazyLock::new(|| {
-    let body = "if redis.call('LINDEX', KEYS[2], 0) == ARGV[1] then
-            for _, waiting in ipairs(redis.call('ZRANGE', KEYS[3], 0, -1)) do
-                redis.call('ZINCRBY', KEYS[3], -tonumber(ARGV[2]), waiting)
-            end
+pub(crate) static ACQUIRE_FAILED: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local queue = redis.call('lrange', KEYS[1], 0, -1)
+        local i = 1
+        while i <= #queue and queue[i] ~= ARGV[1] do
+            i = i + 1
         end
-        redis.call('ZREM', KEYS[3], ARGV[1])
-        redis.call('LREM', KEYS[2], 0, ARGV[1])
-        if redis.call('EXISTS', KEYS[1]) == 0 then
-            --NOTIFY--
+        i = i + 1
+        while i <= #queue do
+            redis.call('zincrby', KEYS[2], -tonumber(ARGV[2]), queue[i])
+            i = i + 1
         end
-        return 1";
-    script(body, "ARGV[3]", "'unlocked'")
+        redis.call('zrem', KEYS[2], ARGV[1])
+        redis.call('lrem', KEYS[1], 0, ARGV[1])
+        return 1",
+    )
 });
 
 pub(crate) static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
-    let body = "local removed = redis.call('DEL', KEYS[1])
-        --NOTIFY--
-        return removed";
-    script(body, "ARGV[1]", "'unlocked'")
+    Script::from_lua(format!(
+        "{}
+        if (redis.call('del', KEYS[1]) == 1) then
+            local nextThreadId = redis.call('lindex', KEYS[2], 0)
+            if nextThreadId ~= false then
+                redis.call('publish', ARGV[3] .. ':' .. nextThreadId, ARGV[1])
+            end
+            return 1
+        end
+        return 0",
+        remove_stale("ARGV[2]")
+    ))
 });
+
+pub(crate) fn now_millis() -> Bytes {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    Bytes::from(now.to_string())
+}
 
 pub(crate) fn queue_key(key: &Key) -> String {
     format!("redissun__lock_queue:{}", key.redis_key())
@@ -148,18 +188,24 @@ pub(crate) fn channel(name: &str, owner: &str) -> String {
     format!("{}:{owner}", channel_prefix(name))
 }
 
+pub(crate) fn wait_arg(wait: Duration) -> Bytes {
+    Bytes::from(wait.as_millis().to_string())
+}
+
 pub(crate) struct Queued {
     key: Key,
     owner: String,
+    wait: Duration,
     runtime: Option<Handle>,
     armed: bool,
 }
 
 impl Queued {
-    pub(crate) fn new(key: Key, owner: String) -> Self {
+    pub(crate) fn new(key: Key, owner: String, wait: Duration) -> Self {
         Self {
             key,
             owner,
+            wait,
             runtime: Handle::try_current().ok(),
             armed: true,
         }
@@ -169,11 +215,9 @@ impl Queued {
         self.armed = false;
     }
 
-    pub(crate) async fn cancel(&mut self) {
-        if self.armed {
-            self.armed = false;
-            let _ = leave(&self.key, &self.owner).await;
-        }
+    pub(crate) async fn acquire_failed(&mut self) -> Result<()> {
+        self.armed = false;
+        acquire_failed(&self.key, &self.owner, self.wait).await
     }
 }
 
@@ -183,26 +227,25 @@ impl Drop for Queued {
             return;
         }
         if let Some(runtime) = self.runtime.clone() {
-            let (key, owner) = (self.key.clone(), self.owner.clone());
+            let (key, owner, wait) = (self.key.clone(), self.owner.clone(), self.wait);
             runtime.spawn(async move {
-                let _ = leave(&key, &owner).await;
+                let _ = acquire_failed(&key, &owner, wait).await;
             });
         }
     }
 }
 
-async fn leave(key: &Key, owner: &str) -> crate::error::Result<()> {
-    let _: i64 = key
-        .core
-        .eval(
-            &CANCEL,
-            keys(key),
-            vec![
-                Bytes::from(owner.to_string()),
-                Bytes::from(SLOT_MILLIS.to_string()),
-                Bytes::from(channel_prefix(key.name())),
-            ],
+async fn acquire_failed(key: &Key, owner: &str, wait: Duration) -> Result<()> {
+    with_sync_retry(|| async {
+        let _: i64 = synced_eval(
+            key,
+            &ACQUIRE_FAILED,
+            vec![queue_key(key), timeout_key(key)],
+            vec![Bytes::from(owner.to_string()), wait_arg(wait)],
+            true,
         )
         .await?;
-    Ok(())
+        Ok(())
+    })
+    .await
 }

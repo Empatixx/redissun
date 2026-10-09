@@ -63,3 +63,50 @@ async fn extend_accepts_a_very_large_batch() {
         "estimate {estimate}"
     );
 }
+
+#[tokio::test]
+async fn test_add_all() {
+    let log = client().await.hyper_log_log::<i32>(unique("log"));
+    log.extend([1, 2, 3].iter()).await.unwrap();
+    assert_eq!(log.count().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_add() {
+    let log = client().await.hyper_log_log::<i32>(unique("log"));
+    log.insert(&1).await.unwrap();
+    log.insert(&2).await.unwrap();
+    log.insert(&3).await.unwrap();
+    assert_eq!(log.count().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_merge() {
+    let client = client().await;
+    let tag = unique("hll");
+    let (n1, n2) = (format!("{{{tag}}}:hll1"), format!("{{{tag}}}:hll2"));
+    let hll1 = client.hyper_log_log::<String>(n1.clone());
+    assert!(hll1.insert("foo").await.unwrap());
+    assert!(hll1.insert("bar").await.unwrap());
+    assert!(hll1.insert("zap").await.unwrap());
+    assert!(hll1.insert("a").await.unwrap());
+
+    let hll2 = client.hyper_log_log::<String>(n2.clone());
+    assert!(hll2.insert("a").await.unwrap());
+    assert!(hll2.insert("b").await.unwrap());
+    assert!(hll2.insert("c").await.unwrap());
+    assert!(hll2.insert("foo").await.unwrap());
+    assert!(!hll2.insert("c").await.unwrap());
+
+    let hll3 = client.hyper_log_log::<String>(format!("{{{tag}}}:hll3"));
+    hll3.merge_from(&[n1.as_str(), n2.as_str()]).await.unwrap();
+    assert_eq!(hll3.count().await.unwrap(), 6);
+}
+
+#[tokio::test]
+async fn extend_with_nothing_creates_the_key_like_redisson() {
+    let log = client().await.hyper_log_log::<u32>(unique("hll"));
+    assert!(log.extend(std::iter::empty::<&u32>()).await.unwrap());
+    assert!(log.exists().await.unwrap());
+    assert_eq!(log.count().await.unwrap(), 0);
+}

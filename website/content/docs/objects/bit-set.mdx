@@ -21,6 +21,7 @@ let how_many = online.count().await?;
 | `set(i, value)` | returns the previous bit |
 | `count()` | how many bits are set |
 | `first_set()` | index of the lowest set bit, or `None` |
-| `len()` | size of the string in bits, a multiple of 8 |
+| `size()` | size of the string in bits, a multiple of 8 |
+| `length()` | index of the highest set bit plus one |
 
 The biggest index is 2^32 - 1, which is 512 MB. A bigger index is `Error::Config`. Setting a high index allocates the whole string up to it. `BitSet` also has the `Object` methods.

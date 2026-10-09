@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, unique};
-use redissun::Object;
+use redissun::{Comparison, Object};
 use std::time::Duration;
 
 #[tokio::test]
@@ -119,4 +119,177 @@ async fn debug_shows_the_name() {
     let name = unique("atomic");
     let counter = client().await.atomic_i64(name.clone());
     assert!(format!("{counter:?}").contains(&name));
+}
+
+#[tokio::test]
+async fn test_compare_and_delete() {
+    let al = client().await.atomic_i64(unique("test"));
+    al.set(10).await.unwrap();
+    assert!(!al.compare_and_delete(Comparison::Less, 5).await.unwrap());
+    assert!(al.exists().await.unwrap());
+    assert!(al.compare_and_delete(Comparison::Less, 15).await.unwrap());
+    assert!(!al.exists().await.unwrap());
+
+    al.set(10).await.unwrap();
+    assert!(!al
+        .compare_and_delete(Comparison::LessOrEqual, 9)
+        .await
+        .unwrap());
+    assert!(al
+        .compare_and_delete(Comparison::LessOrEqual, 10)
+        .await
+        .unwrap());
+    assert!(!al.exists().await.unwrap());
+
+    al.set(10).await.unwrap();
+    assert!(!al
+        .compare_and_delete(Comparison::Greater, 15)
+        .await
+        .unwrap());
+    assert!(al.exists().await.unwrap());
+    assert!(al.compare_and_delete(Comparison::Greater, 5).await.unwrap());
+    assert!(!al.exists().await.unwrap());
+
+    al.set(10).await.unwrap();
+    assert!(!al
+        .compare_and_delete(Comparison::GreaterOrEqual, 11)
+        .await
+        .unwrap());
+    assert!(al
+        .compare_and_delete(Comparison::GreaterOrEqual, 10)
+        .await
+        .unwrap());
+    assert!(!al.exists().await.unwrap());
+
+    al.set(10).await.unwrap();
+    assert!(!al.compare_and_delete(Comparison::Equal, 11).await.unwrap());
+    assert!(al.compare_and_delete(Comparison::Equal, 10).await.unwrap());
+    assert!(!al.exists().await.unwrap());
+
+    al.set(10).await.unwrap();
+    assert!(!al
+        .compare_and_delete(Comparison::NotEqual, 10)
+        .await
+        .unwrap());
+    assert!(al
+        .compare_and_delete(Comparison::NotEqual, 11)
+        .await
+        .unwrap());
+    assert!(!al.exists().await.unwrap());
+
+    assert!(!al.compare_and_delete(Comparison::Equal, 0).await.unwrap());
+    assert!(!al.compare_and_delete(Comparison::Less, 0).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_set_if_less() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert!(!al.set_if_less(0, 1).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 0);
+
+    al.set(12).await.unwrap();
+    assert!(al.set_if_less(13, 1).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_set_if_greater() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert!(!al.set_if_less(0, 1).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 0);
+
+    al.set(12).await.unwrap();
+    assert!(al.set_if_greater(11, 1).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_get_and_set() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert_eq!(al.get_and_set(12).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_get_zero() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert_eq!(al.get().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_get_and_delete() {
+    let client = client().await;
+    let al = client.atomic_i64(unique("test"));
+    al.set(10).await.unwrap();
+    assert_eq!(al.get_and_delete().await.unwrap(), 10);
+    assert!(!al.exists().await.unwrap());
+
+    let al2 = client.atomic_i64(unique("test2"));
+    assert_eq!(al2.get_and_delete().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_compare_and_set_zero() {
+    let client = client().await;
+    let al = client.atomic_i64(unique("test"));
+    assert!(al.compare_and_set(0, 2).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 2);
+
+    let al2 = client.atomic_i64(unique("test1"));
+    al2.set(0).await.unwrap();
+    assert!(al2.compare_and_set(0, 2).await.unwrap());
+    assert_eq!(al2.get().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_compare_and_set() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert!(!al.compare_and_set(-1, 2).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 0);
+    assert!(al.compare_and_set(0, 2).await.unwrap());
+    assert_eq!(al.get().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_set_then_increment() {
+    let al = client().await.atomic_i64(unique("test"));
+    al.set(2).await.unwrap();
+    assert_eq!(al.get_and_incr().await.unwrap(), 2);
+    assert_eq!(al.get().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_increment_and_get() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert_eq!(al.incr().await.unwrap(), 1);
+    assert_eq!(al.get().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_get_and_increment() {
+    let al = client().await.atomic_i64(unique("test"));
+    assert_eq!(al.get_and_incr().await.unwrap(), 0);
+    assert_eq!(al.get().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test() {
+    let client = client().await;
+    let name = unique("test");
+    let al = client.atomic_i64(name.clone());
+    assert_eq!(al.get().await.unwrap(), 0);
+    assert_eq!(al.get_and_incr().await.unwrap(), 0);
+    assert_eq!(al.get().await.unwrap(), 1);
+    assert_eq!(al.get_and_decr().await.unwrap(), 1);
+    assert_eq!(al.get().await.unwrap(), 0);
+    assert_eq!(al.get_and_incr().await.unwrap(), 0);
+    assert_eq!(al.get_and_set(12).await.unwrap(), 1);
+    assert_eq!(al.get().await.unwrap(), 12);
+    al.set(1).await.unwrap();
+
+    assert_eq!(client.atomic_i64(name.clone()).get().await.unwrap(), 1);
+    al.set(i64::MAX - 1000).await.unwrap();
+    assert_eq!(
+        client.atomic_i64(name).get().await.unwrap(),
+        i64::MAX - 1000
+    );
 }

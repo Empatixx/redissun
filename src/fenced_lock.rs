@@ -1,15 +1,14 @@
 use crate::error::Result;
-use crate::lock::{acquire, token_key, Lock, LockGuard, LockRequest, Mode};
+use crate::lock::{acquire, token_key, Lock, LockGuard, LockRequest, Mode, Wait};
 use crate::object::{HasKey, Key};
 use fred::interfaces::KeysInterface;
 use std::fmt;
-use std::time::Duration;
 
-/// A [`Lock`] whose every new acquisition gets a higher number, the fencing token.
+/// A [`Lock`] whose every acquisition gets a higher number, the fencing token, like Redisson's `RFencedLock`.
 ///
 /// A resource that remembers the highest token it has seen can refuse a write that carries an older one. This protects it from a holder that was paused for so long that its lease ran out and another owner took over. Read the token from [`LockGuard::fencing_token`].
 ///
-/// Reentrant holds of one owner share a token. The counter lives in the key `redissun__lock_token:{name}` and is not deleted with the lock, so it never goes back.
+/// The acquire script increments the token atomically with every acquisition, reentrant ones included, so each guard has its own token. The counter lives in the key `redissun__lock_token:{name}`. Unlocking keeps it; [`Object::del`](crate::Object::del) deletes it together with the lock.
 #[derive(Clone)]
 pub struct FencedLock {
     lock: Lock,
@@ -32,6 +31,10 @@ impl HasKey for FencedLock {
     fn key(&self) -> &Key {
         &self.key
     }
+
+    fn companions(&self) -> Vec<String> {
+        vec![token_key(&self.key)]
+    }
 }
 
 impl FencedLock {
@@ -49,7 +52,7 @@ impl FencedLock {
 
     /// Acquires the lock when it is free; returns `None` immediately otherwise.
     pub async fn try_lock(&self) -> Result<Option<LockGuard>> {
-        acquire(&self.key, None, Some(Duration::ZERO), Mode::Fenced).await
+        acquire(&self.key, None, Wait::Once, Mode::Fenced).await
     }
 
     /// The token of the latest acquisition, or 0 when the lock was never taken.

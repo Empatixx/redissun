@@ -111,7 +111,7 @@ impl Topology {
     pub async fn sentinel_failover(&self) -> (u16, u16) {
         let old = self.sentinel_master_port().await;
         self.kill(old).await;
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let new = self.sentinel_master_port().await;
             if new != old {
@@ -162,7 +162,7 @@ impl Topology {
         let old = self.cluster_master_of(key).await;
         self.kill(old).await;
         let alive = self.ports().find(|port| *port != old).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let info = self.cli(alive, &["CLUSTER", "INFO"]).await;
             if info.contains("cluster_state:ok") {
@@ -185,7 +185,7 @@ impl Topology {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(120);
         while !check().await {
             if Instant::now() > deadline {
                 let logs = Command::new("docker")
@@ -212,7 +212,7 @@ fn field(reply: &str, name: &str) -> Option<String> {
 
 fn free_base(count: u16) -> u16 {
     loop {
-        let base = 20_000 + (uuid::Uuid::new_v4().as_u128() % 30_000) as u16;
+        let base = 20_000 + (uuid::Uuid::new_v4().as_u128() % 12_000) as u16;
         let free = (base..base + count).all(|port| TcpListener::bind(("127.0.0.1", port)).is_ok());
         if free {
             return base;

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, unique};
-use redissun::{Client, FencedLock};
+use redissun::{Client, FencedLock, Object};
 use std::time::Duration;
 
 fn lock_of(client: &Client, name: &str) -> FencedLock {
@@ -24,11 +24,13 @@ async fn every_new_acquisition_gets_a_higher_token() {
 }
 
 #[tokio::test]
-async fn a_reentrant_hold_keeps_the_token() {
+async fn a_reentrant_hold_gets_a_new_token() {
     let lock = lock_of(&client().await, &unique("fenced"));
     let first = lock.lock().await.unwrap();
     let second = lock.lock().await.unwrap();
-    assert_eq!(first.fencing_token(), second.fencing_token());
+    assert_eq!(first.fencing_token(), Some(1));
+    assert_eq!(second.fencing_token(), Some(2));
+    assert_eq!(lock.current_token().await.unwrap(), 2);
     second.unlock().await.unwrap();
     first.unlock().await.unwrap();
 }
@@ -82,4 +84,39 @@ async fn lock_info_methods_work() {
     assert_eq!(lock.hold_count().await.unwrap(), 1);
     assert!(lock.force_unlock().await.unwrap());
     drop(guard);
+}
+
+#[tokio::test]
+async fn test_token_increase() {
+    let lock = lock_of(&client().await, &unique("lock"));
+    let guard = lock.lock().await.unwrap();
+    let token1 = guard.fencing_token().unwrap();
+    assert_eq!(token1, 1);
+    guard.unlock().await.unwrap();
+    assert_eq!(token1, 1);
+
+    let guard = lock.lock().await.unwrap();
+    assert_eq!(guard.fencing_token(), Some(2));
+    guard.unlock().await.unwrap();
+
+    let guard = lock.lock().await.unwrap();
+    assert_eq!(lock.current_token().await.unwrap(), 3);
+    guard.unlock().await.unwrap();
+
+    let guard = lock.lock().lease(Duration::from_secs(10)).await.unwrap();
+    assert_eq!(lock.current_token().await.unwrap(), 4);
+    guard.unlock().await.unwrap();
+
+    let guard = lock.try_lock().await.unwrap().unwrap();
+    assert_eq!(guard.fencing_token(), Some(5));
+    guard.unlock().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_the_lock_deletes_the_token() {
+    let lock = lock_of(&client().await, &unique("fenced"));
+    lock.lock().await.unwrap().unlock().await.unwrap();
+    assert_eq!(lock.current_token().await.unwrap(), 1);
+    assert!(lock.del().await.unwrap());
+    assert_eq!(lock.current_token().await.unwrap(), 0);
 }

@@ -25,7 +25,7 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = "0.15"
+redissun = "0.16"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -84,7 +84,7 @@ async fn main() -> redissun::Result<()> {
 | `RateLimiter` | hash, string and sorted set | stable |
 | `Batch` | the commands it holds | experimental |
 
-**Stable** objects are either thin wrappers over Redis commands, or coordination objects that pass the fault-injection tests (`tests/chaos.rs`) and the Sentinel and Cluster failover tests. **Experimental** objects pass their integration tests and the Cluster tests, but are not yet tested under faults, and their API may still change.
+Every object follows Redisson's logic and is tested with Redisson's own tests, ported to Rust. **Stable** objects are also thin wrappers over Redis commands or pass the fault-injection tests (`tests/chaos.rs`) and the Sentinel and Cluster failover tests. **Experimental** objects are not yet tested under faults, and their API may still change.
 
 ### Bucket
 
@@ -190,6 +190,7 @@ A `HashMap` with a cache in your program. Other instances are told when an entry
 ```rust
 let users = client
     .local_cached_map::<String, String>("users")
+    .eviction_policy(redissun::EvictionPolicy::Lru)
     .cache_size(10_000)
     .build()
     .await?;
@@ -387,10 +388,13 @@ Every object has the `Object` methods: `name`, `del`, `exists`, `rename`, `expir
 
 ## Limits
 
-- A lock lives on one Redis master. Redis copies data to replicas asynchronously, so after a Sentinel or Cluster failover a lock that had not reached the replica is gone and another owner can take it. Use `FencedLock` and check the token where correctness matters.
-- When a connection drops while a command is running, the command is sent again, up to 3 attempts in all, like Redisson's `retryAttempts`. Taking and releasing locks and semaphore permits is safe to repeat: each call carries a request id, and Redis remembers the result for 30 seconds, so a repeated call changes nothing. Other writes are not protected this way. A repeated `incr` or `push_back` can be applied twice.
-- When all attempts fail, the call returns an error and nobody knows whether Redis ran it. A semaphore `acquire` that fails this way can lose permits, and a lock `acquire` that fails this way leaves a hold until its lease ends.
-- `VecDeque` pops and `Topic` messages are delivered at most once. A value popped at the moment its connection drops can be lost.
+redissun follows Redisson's business logic, so it shares Redisson's limits.
+
+- A lock lives on one Redis master. On Sentinel and Cluster, taking or releasing a lock waits until a replica has it (`WAIT`, like Redisson's `checkLockSyncedSlaves`), but a failover can still lose a lock in rare cases. Use `FencedLock` and check the token where correctness matters.
+- Commands that Redisson never repeats are sent once, for example taking a lock or a permit. When the connection drops during such a call, it returns an error and nobody knows whether Redis ran it. A lock then holds until its lease ends; semaphore permits can be lost.
+- Other commands are retried up to 3 times, so a write such as `incr` can be applied twice.
+- `MultiLock` owners that list the same locks in different orders can block each other until their timeout. List the locks in the same order everywhere.
+- `VecDeque` pops and `Topic` messages are delivered at most once.
 
 ## Settings
 

@@ -1,10 +1,11 @@
-use crate::error::{Error, Result};
-use crate::object::{HasKey, Key};
+use crate::error::Result;
+use crate::object::{Key, Object};
 use crate::pending::Pending;
-use crate::wait::{wait_on, SET_IF_ABSENT_AND_PUBLISH};
+use crate::wait::wait_on;
 use bytes::Bytes;
 use fred::types::scripts::Script;
 use std::fmt;
+use std::future::Future;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -19,17 +20,38 @@ static COUNT_DOWN: LazyLock<Script> = LazyLock::new(|| {
             redis.call('DEL', KEYS[1])
         end
         if value == 0 then
-            redis.call('PUBLISH', ARGV[2], ARGV[1])
+            redis.call('PUBLISH', KEYS[2], ARGV[1])
         end
         return value",
     )
 });
 
+static TRY_SET_COUNT: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "if redis.call('EXISTS', KEYS[1]) == 0 then
+            redis.call('SET', KEYS[1], ARGV[2])
+            redis.call('PUBLISH', KEYS[2], ARGV[1])
+            return 1
+        end
+        return 0",
+    )
+});
+
+static DELETE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "if redis.call('DEL', KEYS[1]) == 1 then
+            redis.call('PUBLISH', KEYS[2], ARGV[1])
+            return 1
+        end
+        return 0",
+    )
+});
+
 fn channel(name: &str) -> String {
-    format!("redissun_countdownlatch__channel__{name}")
+    format!("redissun_countdownlatch__channel__{{{name}}}")
 }
 
-/// A shared count-down latch, as in Redisson's `RCountDownLatch`.
+/// A shared count-down latch, modelled on Redisson's `RCountDownLatch`.
 ///
 /// Set a count with [`CountDownLatch::try_set_count`], call [`CountDownLatch::count_down`] from any process, and let any number of processes [`CountDownLatch::wait`] until the count reaches zero. A latch that does not exist counts as open.
 #[derive(Clone)]
@@ -43,53 +65,53 @@ impl fmt::Debug for CountDownLatch {
     }
 }
 
-impl HasKey for CountDownLatch {
-    fn key(&self) -> &Key {
-        &self.key
-    }
-}
-
 impl CountDownLatch {
     pub(crate) fn new(key: Key) -> Self {
         Self { key }
     }
 
-    /// Sets the count, but only when the latch does not exist. Returns whether it was set.
+    fn keys(&self) -> Vec<String> {
+        vec![self.key.redis_key(), channel(self.key.name())]
+    }
+
+    /// Sets the count, but only when the latch does not exist. Returns whether it was set. A count of 0 creates a latch that is already open.
     pub async fn try_set_count(&self, count: u64) -> Result<bool> {
-        if count == 0 {
-            return Err(Error::Config("count must be positive".into()));
-        }
         let set: i64 = self
             .key
             .core
             .eval(
-                &SET_IF_ABSENT_AND_PUBLISH,
-                vec![self.key.redis_key()],
+                &TRY_SET_COUNT,
+                self.keys(),
                 vec![
-                    Bytes::from(count.to_string()),
                     Bytes::from(NEW_COUNT_MESSAGE),
-                    Bytes::from(channel(self.key.name())),
+                    Bytes::from(count.to_string()),
                 ],
             )
             .await?;
         Ok(set == 1)
     }
 
-    /// Lowers the count by one. At zero the latch is removed and every waiter is released.
+    /// Lowers the count by one. At zero the latch is removed and every waiter is released. The command is sent once and never retried, so a timeout cannot count down twice.
     pub async fn count_down(&self) -> Result<()> {
         let _: i64 = self
             .key
             .core
-            .eval(
+            .eval_no_retry(
                 &COUNT_DOWN,
-                vec![self.key.redis_key()],
-                vec![
-                    Bytes::from(ZERO_COUNT_MESSAGE),
-                    Bytes::from(channel(self.key.name())),
-                ],
+                self.keys(),
+                vec![Bytes::from(ZERO_COUNT_MESSAGE)],
             )
             .await?;
         Ok(())
+    }
+
+    async fn delete(&self) -> Result<bool> {
+        let deleted: i64 = self
+            .key
+            .core
+            .eval(&DELETE, self.keys(), vec![Bytes::from(NEW_COUNT_MESSAGE)])
+            .await?;
+        Ok(deleted == 1)
     }
 
     /// The current count. A missing latch has 0.
@@ -121,5 +143,35 @@ impl CountDownLatch {
         )
         .await?;
         Ok(opened.is_some())
+    }
+}
+
+impl Object for CountDownLatch {
+    fn name(&self) -> &str {
+        self.key.name()
+    }
+
+    fn del(&self) -> impl Future<Output = Result<bool>> + Send {
+        self.delete()
+    }
+
+    fn exists(&self) -> impl Future<Output = Result<bool>> + Send {
+        self.key.exists()
+    }
+
+    fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send {
+        self.key.rename(new_name)
+    }
+
+    fn expire(&self, ttl: Duration) -> impl Future<Output = Result<bool>> + Send {
+        self.key.expire(ttl)
+    }
+
+    fn ttl(&self) -> impl Future<Output = Result<Option<Duration>>> + Send {
+        self.key.ttl()
+    }
+
+    fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
+        self.key.persist()
     }
 }

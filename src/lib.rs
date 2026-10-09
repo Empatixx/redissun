@@ -28,6 +28,7 @@ mod config;
 mod core;
 mod delayed_queue;
 mod error;
+mod eviction;
 mod fair_lock;
 mod fenced_lock;
 mod geo;
@@ -56,7 +57,7 @@ mod vec;
 mod vec_deque;
 mod wait;
 
-pub use atomic_i64::AtomicI64;
+pub use atomic_i64::{AtomicI64, Comparison};
 pub use batch::{
     Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchResult,
     BatchSortedSet, BatchTopic, BatchVec, BatchVecDeque,
@@ -71,23 +72,28 @@ pub use delayed_queue::DelayedQueue;
 pub use error::{Error, Result};
 pub use fair_lock::FairLock;
 pub use fenced_lock::FencedLock;
-pub use geo::{Geo, GeoMatch, GeoPoint, GeoUnit};
+pub use geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
 pub use hash_map::HashMap;
-pub use hash_map_cache::{Event, Events, EvictionMode, HashMapCache, Insert, InsertNx};
+pub use hash_map_cache::{Event, EventKind, Events, EvictionMode, HashMapCache, Insert, InsertNx};
 pub use hash_set::HashSet;
-pub use hash_set_cache::{HashSetCache, SetInsert};
+pub use hash_set_cache::{Expirations, HashSetCache, SetInsert};
 pub use hyper_log_log::HyperLogLog;
 pub use latch::CountDownLatch;
-pub use local_cached_map::{LocalCachedMap, LocalCachedMapBuilder, SyncStrategy};
+pub use local_cached_map::{
+    EvictionPolicy, LocalCachedMap, LocalCachedMapBuilder, ReconnectionStrategy, SyncStrategy,
+};
 pub use lock::{Lock, LockGuard, LockRequest};
-pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard};
+pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
 pub use object::Object;
 pub use pending::{Pending, PendingTimeout};
-pub use rate_limiter::{RateLimiter, RateType};
+pub use rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
 pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use semaphore::{Permits, Semaphore};
-pub use sorted_set::SortedSet;
-pub use stream::{PendingEntry, PendingSummary, Stream, StreamAdd, StreamEntry, StreamId};
-pub use topic::{Subscriber, Topic};
+pub use sorted_set::{Aggregate, SortedSet};
+pub use stream::{
+    AutoClaim, PendingEntry, PendingRange, PendingSummary, ReadGroup, Stream, StreamAdd,
+    StreamConsumer, StreamEntry, StreamGroup, StreamId, StreamInfo, StreamTrim,
+};
+pub use topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
 pub use vec::Vec;
 pub use vec_deque::VecDeque;

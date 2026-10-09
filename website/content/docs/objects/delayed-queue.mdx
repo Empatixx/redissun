@@ -18,8 +18,11 @@ let job = jobs.pop_front_wait().await?;
 
 | Method | Notes |
 |---|---|
-| `push(&v, delay)` | the value reaches the destination after `delay` |
-| `remove(&v)` | takes the first waiting equal value out |
+| `push(&v, delay)` | the value reaches the destination after `delay`, like Redisson's `offer`. It is sent once and not retried. |
+| `remove(&v)`, `remove_all(&[..])`, `retain_all(&[..])` | take waiting values out |
+| `contains(&v)`, `contains_all(&[..])` | look at the waiting values |
+| `peek()`, `poll()`, `poll_many(n)` | read or take the waiting values in push order, before their delay ends |
+| `poll_last_and_offer_first_to(&deque)` | moves the last waiting value to the front of another `VecDeque` |
 | `len()`, `is_empty()` | waiting values only |
 | `values()` | the waiting values in push order |
 | `clear()` | drops the waiting values |
@@ -28,6 +31,8 @@ Equal values are kept as separate entries. `DelayedQueue` also has the `Object` 
 
 ## How it works
 
-Waiting values live in a list and in a sorted set by due time. They are stored in the same format as in Redisson, with an 8 byte random id in front. A background task in each client that holds a `DelayedQueue` for the destination moves due values to the end of the destination. A value that is due before all others wakes the tasks of every client through pub/sub, and an idle task sleeps until then. Time comes from the Redis server.
+This follows Redisson's `RedissonDelayedQueue`. Waiting values live in a list and in a sorted set by due time, in the same format as in Redisson, with an 8 byte random id in front. The due time comes from the clock of the client that pushes, as in Redisson.
 
-The task stops when the client is dropped. Keep a client alive in at least one program, or the values will stay until one is.
+Each client that holds a `DelayedQueue` for a destination runs one background task that moves due values to the end of the destination, like Redisson's `QueueTransferTask`. A value that becomes the earliest one is announced through pub/sub with its due time, and the task sleeps until then. The task also looks right after it subscribes and after a reconnect, retries after 5 seconds when Redis fails, and as a fallback looks every minute.
+
+The task stops when the last `DelayedQueue` for the destination in the client is dropped. Keep one alive in at least one program, or the values will stay until one is.

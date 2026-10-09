@@ -25,7 +25,7 @@ use crate::rw_lock::RwLock;
 use crate::semaphore::Semaphore;
 use crate::sorted_set::SortedSet;
 use crate::stream::Stream;
-use crate::topic::Topic;
+use crate::topic::{PatternTopic, Topic};
 use std::fmt;
 use std::sync::Arc;
 
@@ -76,11 +76,7 @@ impl<C: Codec> Client<C> {
 
     /// Returns the [`BloomFilter`] stored under `name`.
     pub fn bloom_filter<V>(&self, name: impl Into<Arc<str>>) -> BloomFilter<V, C> {
-        let name: Arc<str> = name.into();
-        BloomFilter::new(
-            Key::new(self.core.clone(), tagged(&name)),
-            self.codec.clone(),
-        )
+        BloomFilter::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Bucket`] stored under `name`.
@@ -151,6 +147,11 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Topic`] named `name`.
     pub fn topic<M>(&self, name: impl Into<Arc<str>>) -> Topic<M, C> {
         Topic::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`PatternTopic`] for the channels matching `pattern`.
+    pub fn pattern_topic<M>(&self, pattern: impl Into<Arc<str>>) -> PatternTopic<M, C> {
+        PatternTopic::new(Key::new(self.core.clone(), pattern), self.codec.clone())
     }
 
     /// Returns the [`HashMapCache`] stored under `name`.
