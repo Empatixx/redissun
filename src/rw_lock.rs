@@ -4,7 +4,7 @@ use crate::lock::{
     unlock_message, LockGuard, LockRequest, Mode, Wait, READ_FORCE_UNLOCK, READ_IS_LOCKED,
     WRITE_FORCE_UNLOCK,
 };
-use crate::object::Key;
+use crate::object::{HasKey, Key};
 use fred::interfaces::HashesInterface;
 use std::fmt;
 
@@ -29,6 +29,12 @@ pub struct RwLock {
 impl fmt::Debug for RwLock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.key.describe(f, "RwLock")
+    }
+}
+
+impl HasKey for RwLock {
+    fn key(&self) -> &Key {
+        &self.key
     }
 }
 
