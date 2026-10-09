@@ -110,6 +110,20 @@ impl Key {
         Ok(cleared)
     }
 
+    pub(crate) async fn command(
+        &self,
+        name: &'static str,
+        args: Vec<fred::types::Value>,
+        key_offset: usize,
+    ) -> Result<fred::types::Value> {
+        let command = fred::types::CustomCommand::new_static(
+            name,
+            fred::types::ClusterHash::Offset(key_offset),
+            false,
+        );
+        Ok(fred::interfaces::ClientLike::custom(self.core.redis(), command, args).await?)
+    }
+
     pub(crate) async fn exists(&self) -> Result<bool> {
         let found: i64 = self.core.redis().exists(self.redis_key()).await?;
         Ok(found > 0)

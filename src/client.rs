@@ -9,6 +9,7 @@ use crate::delayed_queue::DelayedQueue;
 use crate::error::Result;
 use crate::fair_lock::FairLock;
 use crate::fenced_lock::FencedLock;
+use crate::geo::Geo;
 use crate::hash_map::HashMap;
 use crate::hash_map_cache::HashMapCache;
 use crate::hash_set_cache::HashSetCache;
@@ -134,6 +135,11 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Stream`] stored under `name`.
     pub fn stream<K, V>(&self, name: impl Into<Arc<str>>) -> Stream<K, V, C> {
         Stream::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`Geo`] stored under `name`.
+    pub fn geo<V>(&self, name: impl Into<Arc<str>>) -> Geo<V, C> {
+        Geo::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Topic`] named `name`.

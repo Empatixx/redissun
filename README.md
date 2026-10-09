@@ -73,6 +73,7 @@ async fn main() -> redissun::Result<()> {
 | `HashSetCache` | `RSetCache` | sorted set |
 | `Topic` | `RTopic` | pub/sub |
 | `Stream` | `RStream` | stream |
+| `Geo` | `RGeo` | sorted set |
 | `AtomicI64` | `RAtomicLong` | string |
 | `Semaphore` | `RSemaphore` | string and pub/sub |
 | `CountDownLatch` | `RCountDownLatch` | string and pub/sub |
@@ -211,6 +212,20 @@ log.add([("id", "42")]).await?;
 for entry in log.read_group_wait("workers", "w1", None).await? {
     log.ack("workers", &[entry.id]).await?;
 }
+```
+
+### Geo
+
+Members with a position, and searches around a point.
+
+```rust
+use redissun::{GeoPoint, GeoUnit};
+
+let shops = client.geo::<String>("shops");
+shops.add("prague", GeoPoint { longitude: 14.4378, latitude: 50.0755 }).await?;
+let near = shops
+    .radius(GeoPoint { longitude: 14.4, latitude: 50.1 }, 5.0, GeoUnit::Kilometers, None)
+    .await?;
 ```
 
 ### RwLock

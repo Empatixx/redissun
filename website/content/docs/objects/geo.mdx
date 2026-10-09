@@ -1,0 +1,40 @@
+---
+title: Geo
+description: Members with a position, and searches around a point.
+---
+
+A `Geo` keeps members with a position on Earth. You can ask for the distance between members and for the members near a point.
+
+```rust
+use redissun::{GeoPoint, GeoUnit};
+
+let shops = client.geo::<String>("shops");
+shops.add("prague", GeoPoint { longitude: 14.4378, latitude: 50.0755 }).await?;
+
+let near = shops
+    .radius(GeoPoint { longitude: 14.4, latitude: 50.1 }, 5.0, GeoUnit::Kilometers, None)
+    .await?;
+for found in near {
+    println!("{} is {:.1} km away", found.value, found.distance);
+}
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `add(&v, point)` | returns `true` for a new member. An old member moves. |
+| `remove(&v)`, `pos(&v)`, `hash(&v)` | `hash` is the 11 character geohash |
+| `dist(&a, &b, unit)` | `None` when a member is missing |
+| `radius(point, radius, unit, count)` | members nearest first, each as a `GeoMatch` with `value`, `distance` and `point` |
+| `radius_of(&v, radius, unit, count)` | around another member. The member itself is included. |
+| `within_box(point, width, height, unit, count)` | members inside a rectangle |
+| `len()`, `is_empty()`, `clear()` | |
+
+`count` is `Option<usize>` and limits how many members a search returns. Units are `GeoUnit::{Meters, Kilometers, Miles, Feet}`.
+
+Longitude must be within 180 and latitude within 85.05112878 degrees, otherwise the call is `Error::Config`. Positions are stored with a precision of about 0.6 millimeters, so a position you read back can differ in the last digits. Searches need Redis 6.2 or newer.
+
+## Redis keys
+
+One sorted set `{name}` that uses the Redis geo commands, so `redis-cli` can read it too. Members go through the codec, so with the JSON codec a member `prague` is stored as `"prague"` with the quotes.

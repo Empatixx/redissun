@@ -2,6 +2,7 @@ use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::{millis as to_millis, HasKey, Key};
 use crate::pending::Pending;
+use crate::reply::{array, bytes, int, malformed, number, text};
 use bytes::Bytes;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
@@ -108,46 +109,6 @@ pub struct PendingEntry {
     pub deliveries: u64,
 }
 
-fn text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.to_string()),
-        Value::Bytes(bytes) => String::from_utf8(bytes.to_vec()).ok(),
-        Value::Integer(number) => Some(number.to_string()),
-        _ => None,
-    }
-}
-
-fn bytes(value: &Value) -> Option<Bytes> {
-    match value {
-        Value::Bytes(bytes) => Some(bytes.clone()),
-        Value::String(text) => Some(Bytes::copy_from_slice(text.as_bytes())),
-        Value::Integer(number) => Some(Bytes::from(number.to_string())),
-        _ => None,
-    }
-}
-
-fn number(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(number) => Some(*number),
-        other => text(other)?.parse().ok(),
-    }
-}
-
-fn array(value: &Value) -> &[Value] {
-    match value {
-        Value::Array(items) => items,
-        _ => &[],
-    }
-}
-
-fn int(number: impl TryInto<i64>) -> Value {
-    Value::Integer(number.try_into().unwrap_or(i64::MAX))
-}
-
-fn malformed() -> Error {
-    Error::Redis("unexpected reply to a stream command".into())
-}
-
 fn id_of(value: &Value) -> Result<StreamId> {
     text(value).map(StreamId).ok_or_else(malformed)
 }
@@ -250,12 +211,12 @@ impl<K, V, C: Codec> Stream<K, V, C> {
         key_offset: usize,
         blocking: bool,
     ) -> Result<Value> {
-        let command = CustomCommand::new_static(name, ClusterHash::Offset(key_offset), false);
         if blocking {
+            let command = CustomCommand::new_static(name, ClusterHash::Offset(key_offset), false);
             let connection = self.key.core.blocking_client().await?;
             Ok(connection.custom(command, args).await?)
         } else {
-            Ok(self.key.core.redis().custom(command, args).await?)
+            self.key.command(name, args, key_offset).await
         }
     }
 }

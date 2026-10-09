@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.14.0] - unreleased
+
+### Added
+
+- `Geo`: members with a position on Earth, as in Redisson's `RGeo`. It has `add`, `remove`, `pos`, `hash`, `dist`, `len`, `is_empty`, `clear`, and the searches `radius`, `radius_of` and `within_box`, with `GeoPoint`, `GeoUnit` and `GeoMatch`. Needs Redis 6.2 or newer.
+
 ## [0.13.0] - unreleased
 
 ### Added
