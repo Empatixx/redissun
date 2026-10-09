@@ -241,6 +241,10 @@ impl Lease {
             let _ = client.quit().await;
             return Err(error.into());
         }
+        if let Err(error) = core.name(&client).await {
+            let _ = client.quit().await;
+            return Err(error.into());
+        }
         Ok(Self {
             core: core.clone(),
             client,

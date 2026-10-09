@@ -73,3 +73,24 @@ async fn lock_writes_and_batches_take_the_client_retry_settings() {
     batch.execute().await.unwrap();
     assert_eq!(value.await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn batch_and_blocking_connections_get_the_client_name_too() {
+    let name = client_name();
+    let client = connect_with(|builder| builder.pool_size(1).client_name(name.clone())).await;
+    let batch = client.batch().atomic();
+    let read = batch.bucket::<String>(unique("bucket")).get();
+    batch.execute().await.unwrap();
+    read.await.unwrap();
+    assert_eq!(named(&name).await.len(), 2);
+
+    let queue = client.vec_deque::<String>(unique("queue"));
+    let waiting = {
+        let queue = queue.clone();
+        tokio::spawn(async move { queue.pop_front_wait().timeout(Duration::from_secs(5)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(named(&name).await.len(), 3);
+    queue.push_back("done").await.unwrap();
+    waiting.await.unwrap().unwrap();
+}
