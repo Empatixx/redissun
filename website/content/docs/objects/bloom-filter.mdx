@@ -1,0 +1,35 @@
+---
+title: BloomFilter
+description: Remember many values in little memory.
+---
+
+A `BloomFilter` answers "was this value added?" in a small, fixed amount of memory. When it says no, the answer is always right. When it says yes, it is right except for the false positive rate that you chose.
+
+```rust
+let seen = client.bloom_filter::<String>("crawled");
+seen.try_init(1_000_000, 0.01).await?;
+
+if seen.insert("https://example.com").await? {
+    // certainly new
+}
+let maybe = seen.contains("https://example.com").await?;
+```
+
+## Set up
+
+`try_init(expected_insertions, false_probability)` works once. It stores the settings in Redis, so all programs share them. It returns `false` when the filter was already set up. Until then every other call is `Error::Config`. The filter can need at most 512 MB. Adding far more values than expected makes false positives more common.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(&v)` | returns `true` when the value was certainly new |
+| `contains(&v)` | `false` means never added, `true` means possibly added |
+| `count()` | estimate of the number of added values |
+| `expected_insertions()`, `false_probability()`, `size_bits()`, `hash_iterations()` | the settings |
+
+A value cannot be removed. If the filter is deleted and set up again with other settings, a handle that cached the old ones fails once with `Error::Config` and then reads the new ones.
+
+## Redis keys
+
+The bits are the string `{name}` and the settings are the hash `{name}:config`, as in Redisson. Positions come from a fixed hash, so every program and every version of redissun computes the same positions.

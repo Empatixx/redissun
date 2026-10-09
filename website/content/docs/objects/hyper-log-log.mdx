@@ -1,0 +1,26 @@
+---
+title: HyperLogLog
+description: Count different values in 12 kB.
+---
+
+A `HyperLogLog` estimates how many different values were added. It uses about 12 kB however many values there are, and the estimate is off by less than 1%. It cannot list the values or remove one.
+
+```rust
+let visitors = client.hyper_log_log::<String>("visitors:today");
+
+visitors.insert("ann").await?;
+visitors.extend(["bob", "cecil"]).await?;
+let about = visitors.count().await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(&v)` | returns whether the estimate changed |
+| `extend(values)` | many values in one round trip |
+| `count()` | the estimate |
+| `count_with(&["other"])` | the estimate for this log and the others together, without changing anything |
+| `merge_from(&["other"])` | adds the other logs to this one |
+
+Values are told apart by their encoded bytes. In Redis Cluster, the names in `count_with` and `merge_from` must share a hash slot.

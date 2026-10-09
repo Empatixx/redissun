@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0] - unreleased
+
+### Added
+
+- `BitSet`: `get`, `set`, `count`, `first_set`, `len`.
+- `HyperLogLog`: `insert`, `extend`, `count`, `count_with`, `merge_from`.
+- `BloomFilter`: `try_init`, `insert`, `contains`, `count`, `expected_insertions`, `false_probability`, `size_bits`, `hash_iterations`. The settings are stored in Redis like in Redisson's `RBloomFilter`.
+
 ## [0.8.0] - unreleased
 
 ### Added

@@ -63,6 +63,9 @@ async fn main() -> redissun::Result<()> {
 | `FairLock` | `RFairLock` | hash, list, sorted set and pub/sub |
 | `SortedSet` | `RScoredSortedSet`, `RPriorityQueue` | sorted set |
 | `FencedLock` | `RFencedLock` | hash, string and pub/sub |
+| `BitSet` | `RBitSet` | string |
+| `HyperLogLog` | `RHyperLogLog` | HyperLogLog |
+| `BloomFilter` | `RBloomFilter` | string and hash |
 | `HashMapCache` | `RMapCache` | hash and sorted set |
 | `Topic` | `RTopic` | pub/sub |
 | `AtomicI64` | `RAtomicLong` | string |
@@ -197,6 +200,23 @@ A lock that gives every new owner a higher number. A resource can refuse a write
 let lock = client.fenced_lock("report");
 let guard = lock.lock().await?;
 let token = guard.fencing_token();
+```
+
+### BitSet, HyperLogLog and BloomFilter
+
+Compact ways to remember many things.
+
+```rust
+let online = client.bit_set("online");
+online.set(42, true).await?;
+
+let visitors = client.hyper_log_log::<String>("visitors");
+visitors.insert("ann").await?;
+let about = visitors.count().await?;
+
+let seen = client.bloom_filter::<String>("seen");
+seen.try_init(1_000_000, 0.01).await?;
+if seen.insert("url").await? { /* certainly new */ }
 ```
 
 ### SortedSet

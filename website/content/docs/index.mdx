@@ -19,6 +19,9 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `FairLock` | hash, list, sorted set and pub/sub | `RFairLock` |
 | `SortedSet` | sorted set | `RScoredSortedSet`, `RPriorityQueue` |
 | `FencedLock` | hash, string and pub/sub | `RFencedLock` |
+| `BitSet` | string | `RBitSet` |
+| `HyperLogLog` | HyperLogLog | `RHyperLogLog` |
+| `BloomFilter` | string and hash | `RBloomFilter` |
 | `HashMapCache` | hash and sorted set | `RMapCache` |
 | `Topic` | pub/sub | `RTopic` |
 | `AtomicI64` | string | `RAtomicLong` |

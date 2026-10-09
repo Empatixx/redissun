@@ -1,0 +1,26 @@
+---
+title: BitSet
+description: A shared array of bits.
+---
+
+A `BitSet` is a long row of bits in one Redis string. It is a good fit for flags, for example "was user 42 online today". A missing bit is `false`.
+
+```rust
+let online = client.bit_set("online:2026-10-09");
+
+online.set(42, true).await?;
+let is_online = online.get(42).await?;
+let how_many = online.count().await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `get(i)` | |
+| `set(i, value)` | returns the previous bit |
+| `count()` | how many bits are set |
+| `first_set()` | index of the lowest set bit, or `None` |
+| `len()` | size of the string in bits, a multiple of 8 |
+
+The biggest index is 2^32 - 1, which is 512 MB. A bigger index is `Error::Config`. Setting a high index allocates the whole string up to it. `BitSet` also has the `Object` methods.

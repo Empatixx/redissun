@@ -1,4 +1,6 @@
 use crate::atomic_i64::AtomicI64;
+use crate::bit_set::BitSet;
+use crate::bloom_filter::BloomFilter;
 use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
@@ -7,6 +9,7 @@ use crate::fair_lock::FairLock;
 use crate::fenced_lock::FencedLock;
 use crate::hash_map::HashMap;
 use crate::hash_map_cache::HashMapCache;
+use crate::hyper_log_log::HyperLogLog;
 use crate::latch::CountDownLatch;
 use crate::lock::Lock;
 use crate::object::{tagged, Key};
@@ -46,6 +49,25 @@ impl<C: Codec> Client<C> {
     /// Returns the [`AtomicI64`] stored under `name`.
     pub fn atomic_i64(&self, name: impl Into<Arc<str>>) -> AtomicI64 {
         AtomicI64::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`BitSet`] stored under `name`.
+    pub fn bit_set(&self, name: impl Into<Arc<str>>) -> BitSet {
+        BitSet::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`HyperLogLog`] stored under `name`.
+    pub fn hyper_log_log<V>(&self, name: impl Into<Arc<str>>) -> HyperLogLog<V, C> {
+        HyperLogLog::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`BloomFilter`] stored under `name`.
+    pub fn bloom_filter<V>(&self, name: impl Into<Arc<str>>) -> BloomFilter<V, C> {
+        let name: Arc<str> = name.into();
+        BloomFilter::new(
+            Key::new(self.core.clone(), tagged(&name)),
+            self.codec.clone(),
+        )
     }
 
     /// Returns the [`Bucket`] stored under `name`.

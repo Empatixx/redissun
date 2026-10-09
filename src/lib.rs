@@ -18,6 +18,8 @@
 #![deny(missing_docs)]
 
 mod atomic_i64;
+mod bit_set;
+mod bloom_filter;
 mod bucket;
 mod client;
 mod codec;
@@ -29,6 +31,7 @@ mod fenced_lock;
 mod hash_map;
 mod hash_map_cache;
 mod hash_set;
+mod hyper_log_log;
 mod latch;
 mod list;
 mod lock;
@@ -46,6 +49,8 @@ mod vec_deque;
 mod wait;
 
 pub use atomic_i64::AtomicI64;
+pub use bit_set::BitSet;
+pub use bloom_filter::BloomFilter;
 pub use bucket::Bucket;
 pub use client::Client;
 pub use codec::{Codec, JsonCodec};
@@ -56,6 +61,7 @@ pub use fenced_lock::FencedLock;
 pub use hash_map::HashMap;
 pub use hash_map_cache::{Event, Events, EvictionMode, HashMapCache, Insert, InsertNx};
 pub use hash_set::HashSet;
+pub use hyper_log_log::HyperLogLog;
 pub use latch::CountDownLatch;
 pub use lock::{Lock, LockGuard, LockRequest};
 pub use object::Object;
