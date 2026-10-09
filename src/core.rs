@@ -22,7 +22,7 @@ pub(crate) struct Core {
     pub(crate) lock_lease: Duration,
     pub(crate) lock_settings: crate::lock::LockSettings,
     pub(crate) eviction_interval: Duration,
-    pub(crate) pubsub: Arc<PubSub>,
+    pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
     pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
 }
@@ -57,17 +57,26 @@ impl Core {
                 return Err(Error::Timeout);
             }
         }
-        let pubsub = PubSub::start(pool.next()).await?;
         Ok(Arc::new(Self {
             pool,
             id: Uuid::new_v4().to_string(),
             lock_lease,
             lock_settings,
             eviction_interval,
-            pubsub,
+            pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
             exclusive: std::sync::Mutex::new(Vec::new()),
         }))
+    }
+
+    pub(crate) async fn pubsub(&self) -> Result<&Arc<PubSub>> {
+        self.pubsub
+            .get_or_try_init(|| PubSub::start(self.redis()))
+            .await
+    }
+
+    pub(crate) fn pubsub_started(&self) -> Option<&Arc<PubSub>> {
+        self.pubsub.get()
     }
 
     pub(crate) fn redis(&self) -> &RedisClient {
@@ -179,11 +188,13 @@ impl Drop for Core {
             return;
         };
         let pool = self.pool.clone();
-        let pubsub = self.pubsub.clone();
+        let pubsub = self.pubsub.take();
         let exclusive = std::mem::take(self.exclusive.get_mut().unwrap_or_else(|e| e.into_inner()));
         runtime.spawn(async move {
             let _ = pool.quit().await;
-            pubsub.quit().await;
+            if let Some(pubsub) = pubsub {
+                pubsub.quit().await;
+            }
             for client in exclusive {
                 let _ = client.quit().await;
             }

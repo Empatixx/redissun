@@ -52,20 +52,17 @@ impl<M, C: Codec> Topic<M, C> {
 
     /// Number of [`Subscriber`]s of this topic in this client, like Redisson's `countListeners`.
     pub async fn listener_count(&self) -> usize {
-        self.key
-            .core
-            .pubsub
-            .listeners::<Bytes>(&self.key.redis_key())
-            .await
+        match self.key.core.pubsub_started() {
+            Some(pubsub) => pubsub.listeners::<Bytes>(&self.key.redis_key()).await,
+            None => 0,
+        }
     }
 
     /// Ends every [`Subscriber`] of this topic in this client and unsubscribes from Redis, like Redisson's `removeAllListeners`. Their `recv` fails once the messages already received are read.
     pub async fn remove_all_listeners(&self) {
-        self.key
-            .core
-            .pubsub
-            .close::<Bytes>(&self.key.redis_key())
-            .await
+        if let Some(pubsub) = self.key.core.pubsub_started() {
+            pubsub.close::<Bytes>(&self.key.redis_key()).await;
+        }
     }
 }
 
@@ -95,7 +92,8 @@ where
         let (subscription, receiver) = self
             .key
             .core
-            .pubsub
+            .pubsub()
+            .await?
             .subscribe_with_messages(&self.key.redis_key())
             .await?;
         Ok(Subscriber {
@@ -214,20 +212,21 @@ impl<M, C: Codec> PatternTopic<M, C> {
 
     /// Number of [`PatternSubscriber`]s of this pattern in this client.
     pub async fn listener_count(&self) -> usize {
-        self.key
-            .core
-            .pubsub
-            .listeners::<PatternMessage>(&self.key.redis_key())
-            .await
+        match self.key.core.pubsub_started() {
+            Some(pubsub) => {
+                pubsub
+                    .listeners::<PatternMessage>(&self.key.redis_key())
+                    .await
+            }
+            None => 0,
+        }
     }
 
     /// Ends every [`PatternSubscriber`] of this pattern in this client and unsubscribes from Redis, like Redisson's `removeAllListeners`.
     pub async fn remove_all_listeners(&self) {
-        self.key
-            .core
-            .pubsub
-            .close::<PatternMessage>(&self.key.redis_key())
-            .await
+        if let Some(pubsub) = self.key.core.pubsub_started() {
+            pubsub.close::<PatternMessage>(&self.key.redis_key()).await;
+        }
     }
 }
 
@@ -241,7 +240,8 @@ where
         let (subscription, receiver) = self
             .key
             .core
-            .pubsub
+            .pubsub()
+            .await?
             .psubscribe_with_messages(&self.key.redis_key())
             .await?;
         Ok(PatternSubscriber {

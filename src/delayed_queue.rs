@@ -561,9 +561,10 @@ enum Wake {
 async fn wait(
     pause: Duration,
     subscription: &mut Option<(Subscription, broadcast::Receiver<Bytes>)>,
-    reconnects: &mut broadcast::Receiver<()>,
+    reconnects: &mut Option<broadcast::Receiver<()>>,
 ) -> Wake {
-    let Some((_, messages)) = subscription.as_mut() else {
+    let (Some((_, messages)), Some(reconnects)) = (subscription.as_mut(), reconnects.as_mut())
+    else {
         tokio::time::sleep(pause.min(UNSUBSCRIBED_PAUSE)).await;
         return Wake::Due;
     };
@@ -585,10 +586,7 @@ async fn wait(
 
 async fn transfer_loop(core: Weak<Core>, channel: String, keys: std::vec::Vec<String>) {
     let mut subscription = None;
-    let mut reconnects = match core.upgrade() {
-        Some(core) => core.pubsub.reconnects(),
-        None => return,
-    };
+    let mut reconnects = None;
     let mut due: Option<i64> = None;
     let mut push = true;
     loop {
@@ -596,7 +594,10 @@ async fn transfer_loop(core: Weak<Core>, channel: String, keys: std::vec::Vec<St
             return;
         };
         if subscription.is_none() {
-            subscription = strong.pubsub.subscribe_with_messages(&channel).await.ok();
+            if let Ok(pubsub) = strong.pubsub().await {
+                reconnects.get_or_insert_with(|| pubsub.reconnects());
+                subscription = pubsub.subscribe_with_messages(&channel).await.ok();
+            }
             push = push || subscription.is_some();
         }
         if push {

@@ -467,7 +467,7 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             listener: Mutex::new(None),
         });
         if self.sync != SyncStrategy::None || self.reconnection != ReconnectionStrategy::None {
-            let pubsub = self.key.core.pubsub.clone();
+            let pubsub = self.key.core.pubsub().await?.clone();
             let (subscription, messages) =
                 pubsub.subscribe_with_messages(&channel(&self.key)).await?;
             let reconnects = pubsub.reconnects();

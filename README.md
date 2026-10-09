@@ -417,7 +417,7 @@ let client = Client::builder()
 | `connect_timeout` | 10 s | how long `build` waits for the first connection |
 | `codec` | JSON | how values are turned into bytes |
 
-The client reconnects by itself after a lost connection. When the last clone of the client is dropped, its connections are closed.
+The client reconnects by itself after a lost connection. The connection for pub/sub is opened only when an object first needs it, for example a lock that has to wait or a `Topic` subscriber. When the last clone of the client is dropped, its connections are closed.
 
 ## Codecs
 

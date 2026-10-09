@@ -910,7 +910,8 @@ where
                 sources.push(
                     self.key
                         .core
-                        .pubsub
+                        .pubsub()
+                        .await?
                         .subscribe_with_messages(&self.channel(kind))
                         .await?,
                 );

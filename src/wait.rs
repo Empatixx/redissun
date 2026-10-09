@@ -26,7 +26,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Option<T>>>,
 {
-    let subscription = core.pubsub.subscribe(channel).await?;
+    let subscription = core.pubsub().await?.subscribe(channel).await?;
     let notify = subscription.notify();
     loop {
         let notified = notify.notified();

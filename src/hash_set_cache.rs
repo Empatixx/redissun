@@ -362,7 +362,8 @@ where
         let (subscription, receiver) = self
             .key
             .core
-            .pubsub
+            .pubsub()
+            .await?
             .subscribe_with_messages(&self.expired_channel())
             .await?;
         Ok(Expirations {

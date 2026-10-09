@@ -766,12 +766,16 @@ pub(crate) async fn acquire(
     let subscription = match deadline {
         Some(deadline) => {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, core.pubsub.subscribe(&wake_channel)).await {
+            match tokio::time::timeout(remaining, async {
+                core.pubsub().await?.subscribe(&wake_channel).await
+            })
+            .await
+            {
                 Ok(subscription) => subscription?,
                 Err(_) => return failed(queued).await,
             }
         }
-        None => core.pubsub.subscribe(&wake_channel).await?,
+        None => core.pubsub().await?.subscribe(&wake_channel).await?,
     };
     if expired(deadline) {
         return failed(queued).await;
