@@ -2,8 +2,8 @@ use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool};
-use fred::interfaces::{ClientInterface, ClientLike};
-use fred::prelude::{Builder, Config, FromValue, ReconnectPolicy};
+use fred::interfaces::{ClientInterface, ClientLike, LuaInterface};
+use fred::prelude::{Builder, Config, FromValue, Options, ReconnectPolicy};
 use fred::types::client::ClientKillFilter;
 use fred::types::scripts::Script;
 use std::sync::Arc;
@@ -104,6 +104,27 @@ impl Core {
         args: Vec<Bytes>,
     ) -> Result<R> {
         Ok(script.evalsha_with_reload(self.redis(), keys, args).await?)
+    }
+
+    pub(crate) async fn eval_no_retry<R: FromValue>(
+        &self,
+        script: &Script,
+        keys: Vec<String>,
+        args: Vec<Bytes>,
+    ) -> Result<R> {
+        let client = self.redis();
+        let once = client.with_options(&Options {
+            max_attempts: Some(1),
+            ..Default::default()
+        });
+        let sha = script.sha1().clone();
+        match once.evalsha(sha.clone(), keys.clone(), args.clone()).await {
+            Err(error) if error.details().starts_with("NOSCRIPT") => {
+                script.load(client).await?;
+                Ok(once.evalsha(sha, keys, args).await?)
+            }
+            result => Ok(result?),
+        }
     }
 }
 
