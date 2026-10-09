@@ -190,6 +190,7 @@ A `HashMap` with a cache in your program. Other instances are told when an entry
 ```rust
 let users = client
     .local_cached_map::<String, String>("users")
+    .eviction_policy(redissun::EvictionPolicy::Lru)
     .cache_size(10_000)
     .build()
     .await?;

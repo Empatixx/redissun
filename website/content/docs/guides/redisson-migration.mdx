@@ -309,10 +309,10 @@ For objects that use more than one key, `expire`, `persist` and `rename` change 
 |---|---|
 | `put(k, v)` | `insert(&k, &v)` |
 | `put(k, v, ttl, unit)` | `insert(&k, &v).ttl(ttl)` |
-| `putIfAbsent(k, v)` | `insert_nx(&k, &v)` |
+| `fastPutIfAbsent(k, v)` | `insert_nx(&k, &v)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
 
-Both delete expired entries with a background task. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, and `addListener(...)` is `events()` followed by `recv()`.
+Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, and `addListener(...)` is `events()` or `events_of(kinds)` followed by `recv()`. Redisson takes expiry times from the client clock; redissun takes them from the Redis server.
 
 ## VecDeque blocking
 

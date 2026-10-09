@@ -28,6 +28,7 @@ mod config;
 mod core;
 mod delayed_queue;
 mod error;
+mod eviction;
 mod fair_lock;
 mod fenced_lock;
 mod geo;
@@ -73,12 +74,14 @@ pub use fair_lock::FairLock;
 pub use fenced_lock::FencedLock;
 pub use geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
 pub use hash_map::HashMap;
-pub use hash_map_cache::{Event, Events, EvictionMode, HashMapCache, Insert, InsertNx};
+pub use hash_map_cache::{Event, EventKind, Events, EvictionMode, HashMapCache, Insert, InsertNx};
 pub use hash_set::HashSet;
-pub use hash_set_cache::{HashSetCache, SetInsert};
+pub use hash_set_cache::{Expirations, HashSetCache, SetInsert};
 pub use hyper_log_log::HyperLogLog;
 pub use latch::CountDownLatch;
-pub use local_cached_map::{LocalCachedMap, LocalCachedMapBuilder, SyncStrategy};
+pub use local_cached_map::{
+    EvictionPolicy, LocalCachedMap, LocalCachedMapBuilder, ReconnectionStrategy, SyncStrategy,
+};
 pub use lock::{Lock, LockGuard, LockRequest};
 pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
 pub use object::Object;
