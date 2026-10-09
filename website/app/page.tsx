@@ -106,7 +106,7 @@ export default function Home() {
     <HomeLayout {...baseOptions()}>
       <div className="hero-glow">
         <section className="mx-auto flex max-w-4xl flex-col items-center gap-6 px-4 pb-16 pt-20 text-center">
-          <Logo className="size-24 text-fd-primary" />
+          <Logo className="size-40 drop-shadow-md" />
           <h1 className="text-5xl font-bold tracking-tight sm:text-6xl">redissun</h1>
           <p className="max-w-2xl text-lg text-fd-muted-foreground">
             Distributed objects on Redis for Rust, closely inspired by Redisson: maps, queues,

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Empatixx/redissun/main/website/public/logo.png" alt="redissun: a crab eating the letter R" width="180">
+</p>
+
 # redissun
 
 Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.com/redisson/redisson).

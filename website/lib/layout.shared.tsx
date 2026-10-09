@@ -6,8 +6,8 @@ export function baseOptions(): BaseLayoutProps {
   return {
     nav: {
       title: (
-        <span className="inline-flex items-center gap-2 font-semibold text-fd-primary">
-          <Logo />
+        <span className="inline-flex items-center gap-2 font-semibold">
+          <Logo className="size-7" />
           <span className="text-fd-foreground">redissun</span>
         </span>
       ),
