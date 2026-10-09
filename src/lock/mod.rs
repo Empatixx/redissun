@@ -213,7 +213,7 @@ static READ_RENEW: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
     Exclusive,
     Read,
@@ -389,6 +389,12 @@ pub struct Lock {
 impl fmt::Debug for Lock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.key.describe(f, "Lock")
+    }
+}
+
+impl From<Lock> for crate::multi_lock::LockTarget {
+    fn from(lock: Lock) -> Self {
+        Self::new(lock.key, Mode::Exclusive)
     }
 }
 

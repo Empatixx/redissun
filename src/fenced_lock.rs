@@ -22,6 +22,12 @@ impl fmt::Debug for FencedLock {
     }
 }
 
+impl From<FencedLock> for crate::multi_lock::LockTarget {
+    fn from(lock: FencedLock) -> Self {
+        Self::new(lock.key, Mode::Fenced)
+    }
+}
+
 impl HasKey for FencedLock {
     fn key(&self) -> &Key {
         &self.key

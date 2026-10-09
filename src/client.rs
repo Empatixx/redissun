@@ -5,6 +5,7 @@ use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
+use crate::error::Result;
 use crate::fair_lock::FairLock;
 use crate::fenced_lock::FencedLock;
 use crate::hash_map::HashMap;
@@ -12,6 +13,7 @@ use crate::hash_map_cache::HashMapCache;
 use crate::hyper_log_log::HyperLogLog;
 use crate::latch::CountDownLatch;
 use crate::lock::Lock;
+use crate::multi_lock::{LockTarget, MultiLock};
 use crate::object::{tagged, Key};
 use crate::rate_limiter::RateLimiter;
 use crate::rw_lock::RwLock;
@@ -129,6 +131,14 @@ impl<C: Codec> Client<C> {
     pub fn fenced_lock(&self, name: impl Into<Arc<str>>) -> FencedLock {
         let name: Arc<str> = name.into();
         FencedLock::new(Key::new(self.core.clone(), tagged(&name)))
+    }
+
+    /// Returns a [`MultiLock`] over these locks, which fails with `Error::Config` when there are none.
+    pub fn multi_lock<L: Into<LockTarget>>(
+        &self,
+        locks: impl IntoIterator<Item = L>,
+    ) -> Result<MultiLock> {
+        MultiLock::new(locks.into_iter().map(Into::into).collect())
     }
 
     /// Returns the [`RwLock`] named `name`.

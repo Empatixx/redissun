@@ -23,6 +23,12 @@ impl fmt::Debug for FairLock {
     }
 }
 
+impl From<FairLock> for crate::multi_lock::LockTarget {
+    fn from(lock: FairLock) -> Self {
+        Self::new(lock.key, Mode::Fair)
+    }
+}
+
 impl HasKey for FairLock {
     fn key(&self) -> &Key {
         &self.key
