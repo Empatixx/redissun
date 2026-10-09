@@ -16,6 +16,7 @@
 //! ```
 
 #![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod atomic_i64;
 mod batch;
@@ -53,6 +54,8 @@ mod semaphore;
 mod shield;
 mod sorted_set;
 mod stream;
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+mod tls;
 mod topic;
 mod vec;
 mod vec_deque;
@@ -96,6 +99,8 @@ pub use stream::{
     AutoClaim, PendingEntry, PendingRange, PendingSummary, ReadGroup, Stream, StreamAdd,
     StreamConsumer, StreamEntry, StreamGroup, StreamId, StreamInfo, StreamTrim,
 };
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+pub use tls::TlsVerification;
 pub use topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
 pub use vec::Vec;
 pub use vec_deque::VecDeque;

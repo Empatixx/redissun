@@ -9,6 +9,7 @@ const MASTER_NAME: &str = "mymaster";
 pub struct Topology {
     id: String,
     pub base: u16,
+    tls: bool,
 }
 
 impl Drop for Topology {
@@ -23,7 +24,28 @@ impl Drop for Topology {
 
 impl Topology {
     pub async fn sentinel() -> Topology {
-        let topology = start(6, SENTINEL_SCRIPT).await;
+        Self::wait_for_sentinels(start(6, SENTINEL_SCRIPT, &[]).await).await
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub async fn sentinel_tls(
+        authority: &super::tls::Authority,
+        server: &super::tls::Leaf,
+    ) -> Topology {
+        let topology = start(6, SENTINEL_TLS_SCRIPT, &tls_env(authority, server)).await;
+        Self::wait_for_sentinels(topology).await
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub async fn cluster_tls(
+        authority: &super::tls::Authority,
+        server: &super::tls::Leaf,
+    ) -> Topology {
+        let topology = start(6, CLUSTER_TLS_SCRIPT, &tls_env(authority, server)).await;
+        Self::wait_for_cluster(topology).await
+    }
+
+    async fn wait_for_sentinels(topology: Topology) -> Topology {
         let sentinel = topology.base + 3;
         topology
             .wait_for("sentinel quorum", || async {
@@ -39,7 +61,10 @@ impl Topology {
     }
 
     pub async fn cluster() -> Topology {
-        let topology = start(6, CLUSTER_SCRIPT).await;
+        Self::wait_for_cluster(start(6, CLUSTER_SCRIPT, &[]).await).await
+    }
+
+    async fn wait_for_cluster(topology: Topology) -> Topology {
         topology
             .wait_for("cluster state ok", || async {
                 let mut ok = true;
@@ -81,8 +106,14 @@ impl Topology {
     }
 
     pub async fn cli(&self, port: u16, args: &[&str]) -> String {
+        let tls: &[&str] = if self.tls {
+            &["--tls", "--cacert", "/tmp/ca.crt"]
+        } else {
+            &[]
+        };
         let output = tokio::process::Command::new("docker")
             .args(["exec", &self.id, "redis-cli", "-p", &port.to_string()])
+            .args(tls)
             .args(args)
             .output()
             .await
@@ -220,7 +251,16 @@ fn free_base(count: u16) -> u16 {
     }
 }
 
-async fn start(count: u16, script: &str) -> Topology {
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+fn tls_env(authority: &super::tls::Authority, server: &super::tls::Leaf) -> Vec<String> {
+    vec![
+        format!("TLS_CA={}", authority.pem),
+        format!("TLS_CERT={}", server.cert),
+        format!("TLS_KEY={}", server.key),
+    ]
+}
+
+async fn start(count: u16, script: &str, env: &[String]) -> Topology {
     for _ in 0..5 {
         let base = free_base(count);
         let mut args = vec![
@@ -230,6 +270,10 @@ async fn start(count: u16, script: &str) -> Topology {
             "-e".to_string(),
             format!("BASE={base}"),
         ];
+        for variable in env {
+            args.push("-e".into());
+            args.push(variable.clone());
+        }
         for port in base..base + count {
             args.push("-p".into());
             args.push(format!("127.0.0.1:{port}:{port}"));
@@ -242,7 +286,11 @@ async fn start(count: u16, script: &str) -> Topology {
             .expect("docker is required for topology tests");
         if output.status.success() {
             let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Topology { id, base };
+            return Topology {
+                id,
+                base,
+                tls: !env.is_empty(),
+            };
         }
     }
     panic!("could not start a redis topology container");
@@ -287,5 +335,63 @@ for i in 0 1 2 3 4 5; do
   until redis-cli -p $((BASE+i)) ping >/dev/null 2>&1; do sleep 0.1; done
 done
 redis-cli --cluster create $nodes --cluster-replicas 1 --cluster-yes
+exec tail -f /dev/null
+"#;
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+const SENTINEL_TLS_SCRIPT: &str = r#"
+set -e
+printf '%s' "$TLS_CA" > /tmp/ca.crt
+printf '%s' "$TLS_CERT" > /tmp/server.crt
+printf '%s' "$TLS_KEY" > /tmp/server.key
+TLS="--tls-cert-file /tmp/server.crt --tls-key-file /tmp/server.key --tls-ca-cert-file /tmp/ca.crt --tls-auth-clients no --tls-replication yes"
+M=$BASE
+for p in $BASE $((BASE+1)) $((BASE+2)); do
+  extra=""
+  if [ "$p" != "$M" ]; then extra="--replicaof 127.0.0.1 $M"; fi
+  redis-server --port 0 --tls-port $p $TLS --daemonize yes --save "" --appendonly no \
+    --replica-announce-ip 127.0.0.1 --logfile /tmp/redis-$p.log $extra
+done
+for s in $((BASE+3)) $((BASE+4)) $((BASE+5)); do
+  cat > /tmp/sentinel-$s.conf <<EOF
+port 0
+tls-port $s
+tls-cert-file /tmp/server.crt
+tls-key-file /tmp/server.key
+tls-ca-cert-file /tmp/ca.crt
+tls-auth-clients no
+tls-replication yes
+sentinel announce-ip 127.0.0.1
+sentinel monitor mymaster 127.0.0.1 $M 2
+sentinel down-after-milliseconds mymaster 1000
+sentinel failover-timeout mymaster 5000
+sentinel parallel-syncs mymaster 1
+logfile /tmp/sentinel-$s.log
+EOF
+  redis-sentinel /tmp/sentinel-$s.conf --daemonize yes
+done
+exec tail -f /dev/null
+"#;
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+const CLUSTER_TLS_SCRIPT: &str = r#"
+set -e
+printf '%s' "$TLS_CA" > /tmp/ca.crt
+printf '%s' "$TLS_CERT" > /tmp/server.crt
+printf '%s' "$TLS_KEY" > /tmp/server.key
+TLS="--tls-cert-file /tmp/server.crt --tls-key-file /tmp/server.key --tls-ca-cert-file /tmp/ca.crt --tls-auth-clients no --tls-replication yes --tls-cluster yes"
+nodes=""
+for i in 0 1 2 3 4 5; do
+  p=$((BASE+i))
+  redis-server --port 0 --tls-port $p $TLS --daemonize yes --save "" --appendonly no \
+    --cluster-enabled yes --cluster-config-file /tmp/nodes-$p.conf \
+    --cluster-node-timeout 2000 --cluster-announce-ip 127.0.0.1 \
+    --logfile /tmp/redis-$p.log
+  nodes="$nodes 127.0.0.1:$p"
+done
+for i in 0 1 2 3 4 5; do
+  until redis-cli --tls --cacert /tmp/ca.crt -p $((BASE+i)) ping >/dev/null 2>&1; do sleep 0.1; done
+done
+redis-cli --tls --cacert /tmp/ca.crt --cluster create $nodes --cluster-replicas 1 --cluster-yes
 exec tail -f /dev/null
 "#;

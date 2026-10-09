@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+pub mod tls;
 pub mod topology;
 
 use redissun::{Client, ClientBuilder};

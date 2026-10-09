@@ -76,3 +76,42 @@ For `reconnection_delay` the jitter is fixed by the underlying client, so the ji
 Every `ping_connection_interval` each pooled connection and the pub/sub connection get a `PING`. A connection that does not answer within `timeout` is closed and opened again. This finds connections that a firewall or a load balancer dropped without a word.
 
 The pub/sub connection is opened when an object first needs it: a lock or semaphore that waits, a `Topic` subscriber, cache events, a `LocalCachedMap` or a `DelayedQueue`.
+
+## TLS
+
+TLS needs the `tls-rustls` feature:
+
+```toml
+[dependencies]
+redissun = { version = "0.16", features = ["tls-rustls"] }
+```
+
+Then use a `rediss://` URL. Sentinel and Cluster work the same way with `rediss-sentinel://` and `rediss-cluster://`. The sentinels, the masters, the replicas and the cluster nodes must all speak TLS.
+
+```rust
+use redissun::{Client, TlsVerification};
+
+let client = Client::builder()
+    .url("rediss://redis.example.com:6380")
+    .tls_ca_file("/etc/redis/ca.pem")
+    .tls_client_auth_files("/etc/redis/client.pem", "/etc/redis/client.key")
+    .tls_verification(TlsVerification::Strict)
+    .build()
+    .await?;
+```
+
+| Setting | Redisson | Meaning |
+|---|---|---|
+| `tls_ca_pem(pem)`, `tls_ca_file(path)` | `sslTruststore` | trust only the CA certificates in this PEM data. Without it the system's certificates are trusted. |
+| `tls_client_auth_pem(chain, key)`, `tls_client_auth_files(chain, key)` | `sslKeystore` | the client certificate chain and key, as PEM, for servers with `tls-auth-clients yes` |
+| `tls_verification(mode)` | `sslVerificationMode` | how the server certificate is checked |
+
+| `TlsVerification` | Redisson | Checks |
+|---|---|---|
+| `Strict` (default) | `STRICT` | the certificate is signed by a trusted CA and names the host in the URL |
+| `CaOnly` | `CA_ONLY` | the certificate is signed by a trusted CA. Use it when Sentinel or Cluster report IP addresses that the certificate does not name. |
+| `None` | `NONE` | nothing. The traffic is encrypted, but anyone in the middle can read it. Only for tests. |
+
+Files are read when you call `build()`. A missing file or bad PEM data is an `Error::Config`. A `rediss://` URL without a TLS feature is an `Error::Config` too, so a client never falls back to plain text.
+
+`tls-rustls` uses rustls with the `ring` crypto provider. If your program already uses rustls with `aws-lc-rs`, turn on `tls-rustls-aws-lc` instead, so only one provider is built. When your program installs a default rustls `CryptoProvider`, redissun uses it.

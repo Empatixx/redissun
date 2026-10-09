@@ -466,6 +466,31 @@ events.add([("payload", r#"{"id":42}"#)]).await?; // XADD events * payload {"id"
 
 To use a codec for every object, set it on the builder: `Client::builder().codec(StringCodec)`.
 
+## TLS
+
+Turn on the `tls-rustls` feature and use a `rediss://` URL. It works for a single server, Sentinel (`rediss-sentinel://`) and Cluster (`rediss-cluster://`).
+
+```toml
+redissun = { version = "0.16", features = ["tls-rustls"] }
+```
+
+```rust
+let client = Client::builder()
+    .url("rediss://redis.example.com:6380")
+    .tls_ca_file("/etc/redis/ca.pem")                                 // like sslTruststore
+    .tls_client_auth_files("/etc/redis/client.pem", "/etc/redis/client.key") // like sslKeystore
+    .build()
+    .await?;
+```
+
+| Setting | Redisson | Meaning |
+|---|---|---|
+| `tls_ca_pem`, `tls_ca_file` | `sslTruststore` | trust only these CA certificates. Without them the system's certificates are trusted. |
+| `tls_client_auth_pem`, `tls_client_auth_files` | `sslKeystore` | client certificate and key for servers with `tls-auth-clients yes` |
+| `tls_verification` | `sslVerificationMode` | `TlsVerification::Strict` (default) checks the CA and the host name, `CaOnly` checks only the CA, `None` checks nothing |
+
+`tls-rustls` uses rustls with the `ring` crypto provider. If your program already uses rustls with `aws-lc-rs`, use the `tls-rustls-aws-lc` feature instead. When your program installs a default rustls `CryptoProvider`, redissun uses that one.
+
 ## Errors
 
 Every call returns `redissun::Result`. The error is `redissun::Error`. It can grow in future versions, so add a `_` case when you match it.

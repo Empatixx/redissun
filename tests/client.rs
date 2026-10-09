@@ -55,3 +55,10 @@ async fn zero_connect_timeout_is_a_config_error() {
         .await;
     assert!(matches!(result, Err(Error::Config(_))));
 }
+
+#[cfg(not(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc")))]
+#[tokio::test]
+async fn a_rediss_url_without_a_tls_feature_is_a_config_error() {
+    let result = Client::builder().url("rediss://127.0.0.1:1").build().await;
+    assert!(matches!(result, Err(Error::Config(_))));
+}

@@ -6,6 +6,8 @@
 
 - `StringCodec` (plain UTF-8 text, like Redisson's `StringCodec`) and `BytesCodec` (raw bytes, like Redisson's `ByteArrayCodec`).
 - `Client::with_codec(codec)`: a client with another codec that shares the connections, like Redisson's `getStream(name, codec)`. For example `client.with_codec(StringCodec).stream("s")` writes `XADD s * payload <json>` without JSON quotes.
+- TLS with rustls behind the `tls-rustls` feature (`ring`) or the `tls-rustls-aws-lc` feature: `rediss://`, `rediss-sentinel://` and `rediss-cluster://` URLs, `tls_ca_pem` and `tls_ca_file` (Redisson's `sslTruststore`), `tls_client_auth_pem` and `tls_client_auth_files` for mutual TLS (`sslKeystore`), and `tls_verification` with `TlsVerification::{Strict, CaOnly, None}` (`sslVerificationMode`). A `rediss://` URL without a TLS feature is an `Error::Config` instead of a plain connection.
+- `ClientBuilder` implements `Clone`.
 - Redisson's connection settings on `ClientBuilder`: `timeout` (3 s), `retry_attempts` (4), `retry_delay` and `reconnection_delay` with `DelayStrategy` (`Constant`, `EqualJitter`, `FullJitter`, `DecorrelatedJitter`), `ping_connection_interval` (30 s), `keep_alive` with `tcp_keep_alive_idle` and `tcp_keep_alive_interval`, `tcp_no_delay` (true), `client_name` and `database`.
 - `Batch::retry_delay`. A batch now takes its `response_timeout`, `retry_attempts` and retry delay from the client settings.
 

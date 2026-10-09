@@ -29,12 +29,23 @@ struct Settings {
     tcp_no_delay: bool,
     client_name: Option<String>,
     database: Option<u8>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    tls: crate::tls::TlsSettings,
 }
 
 /// Builder for [`Client`].
 pub struct ClientBuilder<C: Codec = JsonCodec> {
     settings: Settings,
     codec: C,
+}
+
+impl<C: Codec> Clone for ClientBuilder<C> {
+    fn clone(&self) -> Self {
+        Self {
+            settings: self.settings.clone(),
+            codec: self.codec.clone(),
+        }
+    }
 }
 
 impl<C: Codec> fmt::Debug for ClientBuilder<C> {
@@ -97,6 +108,8 @@ impl ClientBuilder<JsonCodec> {
                 tcp_no_delay: true,
                 client_name: None,
                 database: None,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+                tls: Default::default(),
             },
             codec: JsonCodec,
         }
@@ -218,6 +231,55 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
+    /// How the server's TLS certificate is checked, like Redisson's `sslVerificationMode`. Defaults to [`TlsVerification::Strict`](crate::TlsVerification::Strict). Needs a `rediss://` URL.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub fn tls_verification(mut self, verification: crate::TlsVerification) -> Self {
+        self.settings.tls.verification = verification;
+        self
+    }
+
+    /// Trusts only the CA certificates in this PEM data instead of the system's, like Redisson's `sslTruststore`. Needs a `rediss://` URL.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub fn tls_ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.settings.tls.ca = Some(crate::tls::Pem::Bytes(pem.into()));
+        self
+    }
+
+    /// Like [`tls_ca_pem`](ClientBuilder::tls_ca_pem), with the PEM data read from a file when the client is built.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub fn tls_ca_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.settings.tls.ca = Some(crate::tls::Pem::File(path.into()));
+        self
+    }
+
+    /// The client certificate chain and its private key, both as PEM data, for servers that check clients (mutual TLS, `tls-auth-clients yes`), like Redisson's `sslKeystore`. Needs a `rediss://` URL.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub fn tls_client_auth_pem(
+        mut self,
+        certificate_chain: impl Into<Vec<u8>>,
+        private_key: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.settings.tls.client_auth = Some((
+            crate::tls::Pem::Bytes(certificate_chain.into()),
+            crate::tls::Pem::Bytes(private_key.into()),
+        ));
+        self
+    }
+
+    /// Like [`tls_client_auth_pem`](ClientBuilder::tls_client_auth_pem), with the PEM data read from files when the client is built.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    pub fn tls_client_auth_files(
+        mut self,
+        certificate_chain: impl Into<std::path::PathBuf>,
+        private_key: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.settings.tls.client_auth = Some((
+            crate::tls::Pem::File(certificate_chain.into()),
+            crate::tls::Pem::File(private_key.into()),
+        ));
+        self
+    }
+
     /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
@@ -250,7 +312,12 @@ impl<C: Codec> ClientBuilder<C> {
 
     fn fred_builder(&self, url: &str) -> Result<Builder> {
         let settings = &self.settings;
-        let mut config = Config::from_url(url).map_err(|e| Error::Config(e.to_string()))?;
+        let (url, tls) = match url.strip_prefix("rediss") {
+            Some(rest) => (format!("redis{rest}"), true),
+            None => (url.to_string(), false),
+        };
+        let mut config = Config::from_url(&url).map_err(|e| Error::Config(e.to_string()))?;
+        self.secure(&mut config, tls)?;
         if settings.database.is_some() {
             config.database = settings.database;
         }
@@ -267,6 +334,26 @@ impl<C: Codec> ClientBuilder<C> {
             connection.tcp.keepalive = settings.keep_alive.then(|| self.keepalive());
         });
         Ok(builder)
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+    fn secure(&self, config: &mut Config, tls: bool) -> Result<()> {
+        if tls {
+            config.tls = Some(self.settings.tls.config()?);
+        } else if !self.settings.tls.is_default() {
+            return Err(Error::Config("TLS settings need a rediss:// URL".into()));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc")))]
+    fn secure(&self, _config: &mut Config, tls: bool) -> Result<()> {
+        if tls {
+            return Err(Error::Config(
+                "rediss:// URLs need the tls-rustls or tls-rustls-aws-lc feature".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn keepalive(&self) -> TcpKeepalive {
