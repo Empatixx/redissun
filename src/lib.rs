@@ -66,7 +66,7 @@ pub use bit_set::BitSet;
 pub use bloom_filter::BloomFilter;
 pub use bucket::Bucket;
 pub use client::Client;
-pub use codec::{Codec, JsonCodec};
+pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
 pub use config::ClientBuilder;
 pub use delayed_queue::DelayedQueue;
 pub use error::{Error, Result};

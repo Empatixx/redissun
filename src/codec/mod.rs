@@ -1,6 +1,8 @@
 mod json;
+mod text;
 
 pub use json::JsonCodec;
+pub use text::{BytesCodec, StringCodec};
 
 use crate::error::Result;
 use bytes::Bytes;

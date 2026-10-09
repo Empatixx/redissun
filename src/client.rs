@@ -54,6 +54,19 @@ impl<C: Codec> Client<C> {
         Self { core, codec }
     }
 
+    /// Returns a client that stores values with `codec` and shares this client's connections, like Redisson's `getXxx(name, codec)`.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// let events = client.with_codec(redissun::StringCodec).stream::<String, String>("events");
+    /// events.add([("payload", r#"{"id":42}"#)]).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_codec<N: Codec>(&self, codec: N) -> Client<N> {
+        Client::from_parts(self.core.clone(), codec)
+    }
+
     /// Starts a [`Batch`] that sends several commands in one round trip.
     pub fn batch(&self) -> Batch<C> {
         Batch::new(self.core.clone(), self.codec.clone())

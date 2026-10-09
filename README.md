@@ -419,6 +419,27 @@ let client = Client::builder()
 
 The client reconnects by itself after a lost connection. When the last clone of the client is dropped, its connections are closed.
 
+## Codecs
+
+A codec turns values into the bytes stored in Redis. The default is JSON, so the string `jirka` is stored as `"jirka"` with the quotes.
+
+| Codec | Redisson | Stores |
+|---|---|---|
+| `JsonCodec` | `JsonJacksonCodec` | any serde value as JSON (default) |
+| `StringCodec` | `StringCodec` | strings as plain UTF-8 text, numbers and bools as their text |
+| `BytesCodec` | `ByteArrayCodec` | `Vec<u8>` and other bytes as they are |
+
+`client.with_codec(codec)` gives a client with another codec that shares the same connections, like Redisson's `getStream(name, StringCodec.INSTANCE)`:
+
+```rust
+use redissun::StringCodec;
+
+let events = client.with_codec(StringCodec).stream::<String, String>("events");
+events.add([("payload", r#"{"id":42}"#)]).await?; // XADD events * payload {"id":42}
+```
+
+To use a codec for every object, set it on the builder: `Client::builder().codec(StringCodec)`.
+
 ## Errors
 
 Every call returns `redissun::Result`. The error is `redissun::Error`. It can grow in future versions, so add a `_` case when you match it.

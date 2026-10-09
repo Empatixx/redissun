@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `StringCodec` (plain UTF-8 text, like Redisson's `StringCodec`) and `BytesCodec` (raw bytes, like Redisson's `ByteArrayCodec`).
+- `Client::with_codec(codec)`: a client with another codec that shares the connections, like Redisson's `getStream(name, codec)`. For example `client.with_codec(StringCodec).stream("s")` writes `XADD s * payload <json>` without JSON quotes.
+
 ## [0.16.0] - 2026-10-09
 
 The business logic of every object was compared with Redisson's source and aligned with it, and Redisson's own tests were ported, one Rust test file per type. Many APIs changed to match Redisson's behaviour.

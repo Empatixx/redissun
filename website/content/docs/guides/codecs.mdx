@@ -1,0 +1,45 @@
+---
+title: Codecs
+description: How values are turned into bytes, and how to store plain text.
+---
+
+A codec turns values into the bytes stored in Redis and back. Every object of a client uses the client's codec.
+
+| Codec | Redisson | Stores |
+|---|---|---|
+| `JsonCodec` | `JsonJacksonCodec` | any serde value as JSON. This is the default. |
+| `StringCodec` | `StringCodec` | strings as plain UTF-8 text, numbers and bools as their text, unit enum variants by name |
+| `BytesCodec` | `ByteArrayCodec` | `Vec<u8>`, byte arrays and strings as they are |
+
+With `JsonCodec` the string `jirka` is stored as `"jirka"`, with the quotes. `StringCodec` stores `jirka`. Use it when other programs read the same keys, or when a value is already JSON text and must not be encoded twice.
+
+## A codec for one object
+
+`client.with_codec(codec)` returns a client with another codec. It shares the connections of the first client, so it is cheap. This is Redisson's `redisson.getStream(name, StringCodec.INSTANCE)`.
+
+```rust
+use redissun::StringCodec;
+
+let events = client.with_codec(StringCodec).stream::<String, String>("events");
+let json = serde_json::to_string(&order)?;
+events.add([("payload", json.as_str())]).await?;
+// XADD events * payload {"id":42,...}
+```
+
+The field name `payload` and the JSON text are stored as they are.
+
+## A codec for every object
+
+```rust
+let client = Client::builder()
+    .url("redis://127.0.0.1:6379")
+    .codec(redissun::StringCodec)
+    .build()
+    .await?;
+```
+
+## What each codec accepts
+
+`StringCodec` and `BytesCodec` cannot store structs, maps or lists of values. They return `Error::Codec` for them. `StringCodec` parses text back into numbers and bools when you ask for them, so a counter written by `INCR` reads as an `i64`.
+
+Your own codec implements the `Codec` trait: `encode` turns a `Serialize` value into bytes and `decode` turns bytes into a `DeserializeOwned` value.
