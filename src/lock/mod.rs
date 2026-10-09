@@ -25,8 +25,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub(crate) const REQUEST_LATCH_TTL: Duration = Duration::from_secs(30);
-
 const UNLOCK_MESSAGE: &str = "0";
 const READ_UNLOCK_MESSAGE: &str = "1";
 
@@ -313,10 +311,6 @@ pub(crate) fn channel(name: &str) -> String {
 
 fn lease_arg(duration: Duration) -> Result<Bytes> {
     Ok(Bytes::from(to_millis(duration)?.to_string()))
-}
-
-pub(crate) fn request_latch(key: &Key, request: &str) -> String {
-    format!("redissun__request_latch:{}:{request}", tagged(key.name()))
 }
 
 fn unlock_latch(key: &Key, request: &str) -> String {

@@ -1,12 +1,16 @@
 use crate::codec::Codec;
-use crate::core::{BlockingClient, Core};
+use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::object::millis as to_millis;
 use crate::reply::{bytes, int, malformed, number, text};
 use bytes::Bytes;
 use fred::clients::Client as RedisClient;
-use fred::interfaces::ClientLike;
+use fred::interfaces::{ClientLike, ClusterInterface};
+use fred::prelude::Options;
+use fred::types::cluster::ClusterRouting;
+use fred::types::config::Server;
 use fred::types::{ClusterHash, CustomCommand, Resp3Frame, Value};
+use futures::FutureExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -17,18 +21,25 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 type Complete = Box<dyn FnOnce(Result<Value>) + Send>;
 type FredResult<T> = std::result::Result<T, fred::error::Error>;
-type Finished = std::result::Result<(Vec<Result<Value>>, RedisClient, BlockingClient), Failure>;
+type Replies = (Vec<Result<Value>>, usize);
+type Finished = std::result::Result<(Vec<Result<Value>>, usize, Lease), Failure>;
 type Sending = Pin<Box<dyn Future<Output = FredResult<Resp3Frame>> + Send>>;
+type Replication = Option<(&'static str, Vec<Value>)>;
+
+const IDLE_CONNECTIONS: usize = 8;
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_RETRY_ATTEMPTS: u32 = 4;
 
 struct Op {
     name: &'static str,
     args: Vec<Value>,
     key_offset: usize,
-    complete: Complete,
 }
 
 /// The reply to one command of a [`Batch`]. Await it after [`Batch::execute`]. Awaiting it earlier waits for an execution that has not started.
@@ -58,7 +69,7 @@ impl<T> Future for BatchFuture<T> {
 pub struct BatchResult {
     /// Number of commands that were sent, not counting the ones the batch adds itself.
     pub commands: usize,
-    /// How many replicas had the writes when [`Batch::sync`] or [`Batch::sync_aof`] was set; otherwise 0.
+    /// How many replicas had the writes when [`Batch::sync`] or [`Batch::sync_aof`] was set, summed over the nodes the batch wrote to; otherwise 0.
     pub synced_slaves: usize,
 }
 
@@ -70,10 +81,35 @@ enum Mode {
 }
 
 #[derive(Clone, Copy)]
-struct Replication {
+struct Replicas {
     slaves: u64,
     timeout: Duration,
     local_aof: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum RetryDelay {
+    Constant(Duration),
+    EqualJitter,
+}
+
+impl RetryDelay {
+    fn after(self, attempt: u32) -> Duration {
+        match self {
+            RetryDelay::Constant(delay) => delay,
+            RetryDelay::EqualJitter => {
+                let (base, max) = (1000u64, 2000u64);
+                let exponential = if attempt >= 63 {
+                    max
+                } else {
+                    base.saturating_mul(1u64 << attempt).min(max)
+                };
+                let half = exponential / 2;
+                let random = (Uuid::new_v4().as_u128() % u128::from(half + 1)) as u64;
+                Duration::from_millis(half + random)
+            }
+        }
+    }
 }
 
 fn frame_value(frame: Resp3Frame) -> Result<Value> {
@@ -104,6 +140,32 @@ fn frame_value(frame: Resp3Frame) -> Result<Value> {
     })
 }
 
+fn exec_items(frame: Resp3Frame) -> Result<Vec<Result<Value>>> {
+    match frame {
+        Resp3Frame::Array { data, .. } => Ok(data.into_iter().map(frame_value).collect()),
+        Resp3Frame::Null => Err(Error::Redis("the transaction was aborted".into())),
+        other => Err(frame_value(other).err().unwrap_or_else(malformed)),
+    }
+}
+
+fn duplicate(error: &Error) -> Error {
+    match error {
+        Error::Timeout => Error::Timeout,
+        Error::Codec(message) => Error::Codec(message.clone()),
+        Error::Config(message) => Error::Config(message.clone()),
+        Error::Redis(message) => Error::Redis(message.clone()),
+        other => Error::Redis(other.to_string()),
+    }
+}
+
+fn transport(error: &fred::error::Error) -> bool {
+    use fred::error::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::IO | ErrorKind::Timeout | ErrorKind::Canceled
+    )
+}
+
 enum Failure {
     Fred(fred::error::Error),
     Timeout,
@@ -112,12 +174,8 @@ enum Failure {
 
 impl Failure {
     fn retryable(&self) -> bool {
-        use fred::error::ErrorKind;
         match self {
-            Failure::Fred(error) => matches!(
-                error.kind(),
-                ErrorKind::IO | ErrorKind::Timeout | ErrorKind::Canceled
-            ),
+            Failure::Fred(error) => transport(error),
             Failure::Timeout => true,
             Failure::Other(_) => false,
         }
@@ -144,66 +202,230 @@ impl From<Error> for Failure {
     }
 }
 
-/// A dedicated connection that holds a `MULTI` transaction. Each command is sent as it is added and the answers are read at the end, so the transaction costs one round trip however long it is.
-struct Session {
+fn routing(client: &RedisClient) -> Option<ClusterRouting> {
+    if client.is_clustered() {
+        client.cached_cluster_state()
+    } else {
+        None
+    }
+}
+
+fn locate(
+    routing: Option<&ClusterRouting>,
+    args: &[Value],
+    key_offset: usize,
+) -> (Option<Server>, Option<u16>) {
+    let Some(routing) = routing else {
+        return (None, None);
+    };
+    let slot = args
+        .get(key_offset)
+        .and_then(bytes)
+        .map(|key| fred::util::redis_keyslot(&key));
+    (
+        slot.and_then(|slot| routing.get_server(slot).cloned()),
+        slot,
+    )
+}
+
+fn hashed(slot: Option<u16>, fallback: ClusterHash) -> ClusterHash {
+    slot.map_or(fallback, ClusterHash::Custom)
+}
+
+/// A connection that only one batch uses at a time, like a connection Redisson takes from its pool for a transaction. It goes back to the client's idle list when the batch finished cleanly and is closed otherwise.
+struct Lease {
+    core: Arc<Core>,
     client: RedisClient,
-    _connection: BlockingClient,
-    sending: Vec<Sending>,
-    early: Vec<Option<FredResult<Resp3Frame>>>,
+    reusable: bool,
+}
+
+impl Lease {
+    async fn take(core: &Arc<Core>) -> std::result::Result<Self, Failure> {
+        loop {
+            let idle = core
+                .exclusive
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop();
+            match idle {
+                Some(client) if client.is_connected() => {
+                    return Ok(Self {
+                        core: core.clone(),
+                        client,
+                        reusable: false,
+                    })
+                }
+                Some(client) => {
+                    tokio::spawn(async move {
+                        let _ = client.quit().await;
+                    });
+                }
+                None => break,
+            }
+        }
+        let client = core.redis().clone_new();
+        if let Err(error) = client.init().await {
+            let _ = client.quit().await;
+            return Err(error.into());
+        }
+        Ok(Self {
+            core: core.clone(),
+            client,
+            reusable: false,
+        })
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if self.reusable && self.client.is_connected() {
+            let mut idle = self
+                .core
+                .exclusive
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if idle.len() < IDLE_CONNECTIONS {
+                idle.push(self.client.clone());
+                return;
+            }
+        }
+        if let Ok(runtime) = Handle::try_current() {
+            let client = self.client.clone();
+            runtime.spawn(async move {
+                let _ = client.quit().await;
+            });
+        }
+    }
+}
+
+enum Role {
+    Multi,
+    Op(usize),
+    Exec(usize),
+    Wait,
+}
+
+struct Group {
+    server: Option<Server>,
+    slot: Option<u16>,
+    ops: Vec<usize>,
+}
+
+/// `MULTI`/`EXEC` transactions on a leased connection, one per node, as in Redisson's atomic modes. Each command is handed to the connection as it is added, in order, and the answers are read at the end, so the transactions cost one round trip however long they are.
+struct Session {
+    lease: Lease,
+    routing: Option<ClusterRouting>,
+    groups: Vec<Group>,
+    pending: Vec<(Role, Sending, Option<FredResult<Resp3Frame>>)>,
+    ops: usize,
 }
 
 impl Session {
-    async fn begin(core: &Core) -> Result<Self> {
-        let connection = core.blocking_client().await?;
-        let mut session = Self {
-            client: (*connection).clone(),
-            _connection: connection,
-            sending: Vec::new(),
-            early: Vec::new(),
-        };
-        session.send("MULTI", Vec::new(), 0).await;
-        Ok(session)
+    async fn begin(core: &Arc<Core>) -> std::result::Result<Self, Failure> {
+        let lease = Lease::take(core).await?;
+        let routing = routing(&lease.client);
+        Ok(Self {
+            lease,
+            routing,
+            groups: Vec::new(),
+            pending: Vec::new(),
+            ops: 0,
+        })
     }
 
-    async fn send(&mut self, name: &'static str, args: Vec<Value>, key_offset: usize) {
-        let client = self.client.clone();
-        let command = CustomCommand::new_static(name, ClusterHash::Offset(key_offset), false);
+    fn enqueue(&mut self, role: Role, name: &'static str, args: Vec<Value>, hash: ClusterHash) {
+        let client = self.lease.client.with_options(&Options {
+            max_attempts: Some(1),
+            ..Default::default()
+        });
+        let command = CustomCommand::new_static(name, hash, false);
         let mut sending: Sending = Box::pin(async move { client.custom_raw(command, args).await });
-        match futures::poll!(sending.as_mut()) {
-            Poll::Ready(outcome) => self.early.push(Some(outcome)),
-            Poll::Pending => self.early.push(None),
-        }
-        self.sending.push(sending);
+        let early = sending.as_mut().now_or_never();
+        self.pending.push((role, sending, early));
     }
 
-    async fn finish(
-        mut self,
-        count: usize,
-    ) -> std::result::Result<(Vec<Result<Value>>, RedisClient, BlockingClient), Failure> {
-        self.send("EXEC", Vec::new(), 0).await;
-        let mut frames = Vec::with_capacity(self.sending.len());
-        for (sending, early) in self.sending.into_iter().zip(self.early) {
-            frames.push(match early {
+    fn send(&mut self, name: &'static str, args: Vec<Value>, key_offset: usize) {
+        let (server, slot) = locate(self.routing.as_ref(), &args, key_offset);
+        let group = match self.groups.iter().position(|group| group.server == server) {
+            Some(group) => group,
+            None => {
+                self.groups.push(Group {
+                    server,
+                    slot,
+                    ops: Vec::new(),
+                });
+                self.enqueue(
+                    Role::Multi,
+                    "MULTI",
+                    Vec::new(),
+                    hashed(slot, ClusterHash::Random),
+                );
+                self.groups.len() - 1
+            }
+        };
+        let op = self.ops;
+        self.ops += 1;
+        self.groups[group].ops.push(op);
+        self.enqueue(
+            Role::Op(op),
+            name,
+            args,
+            hashed(slot, ClusterHash::Offset(key_offset)),
+        );
+    }
+
+    async fn finish(mut self, replication: Replication) -> Finished {
+        for group in 0..self.groups.len() {
+            let hash = hashed(self.groups[group].slot, ClusterHash::Random);
+            self.enqueue(Role::Exec(group), "EXEC", Vec::new(), hash.clone());
+            if let Some((name, args)) = &replication {
+                self.enqueue(Role::Wait, name, args.clone(), hash);
+            }
+        }
+        let mut outcomes: Vec<Option<Result<Value>>> = (0..self.ops).map(|_| None).collect();
+        let mut synced = 0;
+        for (role, sending, early) in std::mem::take(&mut self.pending) {
+            let frame = match early {
                 Some(outcome) => outcome,
                 None => sending.await,
-            });
-        }
-        let exec = frames.pop().ok_or_else(|| Failure::Other(malformed()))??;
-        for queued in frames.into_iter().skip(1) {
-            queued?;
-        }
-        let replies = match exec {
-            Resp3Frame::Array { data, .. } => data,
-            Resp3Frame::SimpleError { data, .. } => {
-                return Err(Failure::Other(Error::Redis(data.to_string())))
+            };
+            let frame = match frame {
+                Ok(frame) => Ok(frame),
+                Err(error) if transport(&error) => return Err(Failure::Fred(error)),
+                Err(error) => Err(Error::from(error)),
+            };
+            match role {
+                Role::Multi => {
+                    frame.and_then(frame_value)?;
+                }
+                Role::Op(op) => {
+                    if let Err(error) = frame.and_then(frame_value) {
+                        outcomes[op] = Some(Err(error));
+                    }
+                }
+                Role::Exec(group) => match frame.and_then(exec_items) {
+                    Ok(items) => {
+                        let mut items = items.into_iter();
+                        for &op in &self.groups[group].ops {
+                            let item = items.next().unwrap_or_else(|| Err(malformed()));
+                            outcomes[op].get_or_insert(item);
+                        }
+                    }
+                    Err(error) => {
+                        for &op in &self.groups[group].ops {
+                            outcomes[op].get_or_insert_with(|| Err(duplicate(&error)));
+                        }
+                    }
+                },
+                Role::Wait => synced += synced_from(frame.and_then(frame_value).ok()),
             }
-            _ => return Err(Failure::Other(malformed())),
-        };
-        let mut replies = replies.into_iter().map(frame_value);
-        let outcomes = (0..count)
-            .map(|_| replies.next().unwrap_or_else(|| Err(malformed())))
+        }
+        let outcomes = outcomes
+            .into_iter()
+            .map(|outcome| outcome.unwrap_or_else(|| Err(malformed())))
             .collect();
-        Ok((outcomes, self.client, self._connection))
+        self.lease.reusable = true;
+        Ok((outcomes, synced, self.lease))
     }
 }
 
@@ -214,7 +436,7 @@ enum Command {
         key_offset: usize,
     },
     Finish {
-        count: usize,
+        replication: Replication,
         reply: oneshot::Sender<Finished>,
     },
 }
@@ -225,16 +447,15 @@ struct Stored {
 
 impl Stored {
     fn start(core: Arc<Core>) -> Option<Self> {
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let runtime = Handle::try_current().ok()?;
         let (sender, mut receiver) = mpsc::unbounded_channel();
         runtime.spawn(async move {
             let mut session = match Session::begin(&core).await {
                 Ok(session) => session,
-                Err(error) => {
+                Err(failure) => {
                     while let Some(command) = receiver.recv().await {
                         if let Command::Finish { reply, .. } = command {
-                            let _ =
-                                reply.send(Err(Failure::Other(Error::Redis(error.to_string()))));
+                            let _ = reply.send(Err(failure));
                             return;
                         }
                     }
@@ -247,11 +468,9 @@ impl Stored {
                         name,
                         args,
                         key_offset,
-                    } => {
-                        session.send(name, args, key_offset).await;
-                    }
-                    Command::Finish { count, reply } => {
-                        let _ = reply.send(session.finish(count).await);
+                    } => session.send(name, args, key_offset),
+                    Command::Finish { replication, reply } => {
+                        let _ = reply.send(session.finish(replication).await);
                         return;
                     }
                 }
@@ -267,9 +486,11 @@ impl Stored {
 ///
 /// | Mode | Redisson | What it does |
 /// |---|---|---|
-/// | default | `IN_MEMORY` | the commands are held in memory and pipelined. Other clients' commands can run between them, and a failing command fails only its own handle. |
-/// | [`atomic`](Batch::atomic) | `IN_MEMORY_ATOMIC` | held in memory and run in one `MULTI`/`EXEC` |
-/// | [`stored_in_redis`](Batch::stored_in_redis) | `REDIS_WRITE_ATOMIC` | each command is sent to Redis at once and waits in a `MULTI` transaction on a dedicated connection until `execute` runs `EXEC`. Nothing is held in memory, and nothing is applied if the batch is dropped. |
+/// | default | `IN_MEMORY` | the commands are held in memory and pipelined. Other clients' commands can run between them. |
+/// | [`atomic`](Batch::atomic) | `IN_MEMORY_ATOMIC` | held in memory and run in one `MULTI`/`EXEC` per node on a connection that only this batch uses |
+/// | [`stored_in_redis`](Batch::stored_in_redis) | `REDIS_WRITE_ATOMIC` | each command is sent to Redis at once and waits in a `MULTI` transaction per node on a connection that only this batch uses, until `execute` runs `EXEC`. Nothing is held in memory, and nothing is applied if the batch is dropped. |
+///
+/// In every mode a command that Redis rejects fails its own handle and makes `execute` return that error, while the other handles get their replies. Redis does not roll back, so the other commands are applied, also in the atomic modes.
 ///
 /// Options: [`skip_result`](Batch::skip_result), [`response_timeout`](Batch::response_timeout), [`retry_attempts`](Batch::retry_attempts) with [`retry_interval`](Batch::retry_interval), and [`sync`](Batch::sync) or [`sync_aof`](Batch::sync_aof) to wait for replicas.
 ///
@@ -278,14 +499,14 @@ impl Stored {
 pub struct Batch<C: Codec> {
     core: Arc<Core>,
     codec: C,
-    ops: Mutex<Vec<Op>>,
+    ops: Mutex<Vec<(Op, Complete)>>,
     stored: Mutex<Option<Stored>>,
     mode: Mode,
     skip_result: bool,
-    response_timeout: Option<Duration>,
+    response_timeout: Duration,
     retry_attempts: u32,
-    retry_interval: Duration,
-    replication: Option<Replication>,
+    retry_delay: RetryDelay,
+    sync: Option<Replicas>,
 }
 
 impl<C: Codec> fmt::Debug for Batch<C> {
@@ -305,20 +526,20 @@ impl<C: Codec> Batch<C> {
             stored: Mutex::new(None),
             mode: Mode::Pipeline,
             skip_result: false,
-            response_timeout: None,
-            retry_attempts: 0,
-            retry_interval: Duration::from_millis(1500),
-            replication: None,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_delay: RetryDelay::EqualJitter,
+            sync: None,
         }
     }
 
-    /// Runs the commands in one `MULTI`/`EXEC` transaction, so no other command runs between them. Redis does not roll back: a command that fails at run time fails only its own handle.
+    /// Runs the commands in a `MULTI`/`EXEC` transaction, one per Redis node, so no other command runs between the commands of a node. Redis does not roll back: a command that fails at run time does not undo the others. In Redis Cluster the keys on one node must share a hash slot, because Redis refuses a transaction that spans slots.
     pub fn atomic(mut self) -> Self {
         self.mode = Mode::Atomic;
         self
     }
 
-    /// Sends every command to Redis when it is queued and keeps it in a `MULTI` transaction on a dedicated connection. [`execute`](Batch::execute) then runs `EXEC`. Use it for batches that are too big to hold in memory. It needs a tokio runtime when you queue, it cannot be retried, and in Redis Cluster all keys must share a hash slot.
+    /// Sends every command to Redis when it is queued and keeps it in a `MULTI` transaction per node on a connection that only this batch uses. [`execute`](Batch::execute) then runs `EXEC`. Use it for batches that are too big to hold in memory. It needs a tokio runtime when you queue and it is not retried. In Redis Cluster the keys on one node must share a hash slot.
     pub fn stored_in_redis(mut self) -> Self {
         self.mode = Mode::Stored;
         self
@@ -330,27 +551,27 @@ impl<C: Codec> Batch<C> {
         self
     }
 
-    /// Fails `execute` with `Error::Timeout` when Redis does not answer in time.
+    /// How long one attempt may wait for Redis before it fails with `Error::Timeout` or is retried. With [`sync`](Batch::sync) the sync timeout is added. The default is 3 seconds, Redisson's default `timeout`.
     pub fn response_timeout(mut self, timeout: Duration) -> Self {
-        self.response_timeout = Some(timeout);
+        self.response_timeout = timeout;
         self
     }
 
-    /// Sends the batch again up to this many times when the connection fails or the response times out. A retried write can be applied twice. The default is 0. Not available with [`stored_in_redis`](Batch::stored_in_redis).
+    /// Sends the batch again up to this many times when the connection fails or the response times out. A retried write can be applied twice. The default is 4, as in Redisson. Not used by [`stored_in_redis`](Batch::stored_in_redis).
     pub fn retry_attempts(mut self, attempts: u32) -> Self {
         self.retry_attempts = attempts;
         self
     }
 
-    /// The pause between retries. The default is 1.5 seconds.
+    /// A fixed pause between retries. By default the pause grows from about 0.5 to 2 seconds with random jitter, like Redisson's `EqualJitterDelay(1s, 2s)`.
     pub fn retry_interval(mut self, interval: Duration) -> Self {
-        self.retry_interval = interval;
+        self.retry_delay = RetryDelay::Constant(interval);
         self
     }
 
-    /// After the commands, waits until `slaves` replicas have them or `timeout` runs out (`WAIT`). [`BatchResult::synced_slaves`] says how many did.
+    /// After the commands, waits on every node the batch wrote to until `slaves` replicas have the writes or `timeout` runs out (`WAIT`). [`BatchResult::synced_slaves`] gives the sum over the nodes.
     pub fn sync(mut self, slaves: u64, timeout: Duration) -> Self {
-        self.replication = Some(Replication {
+        self.sync = Some(Replicas {
             slaves,
             timeout,
             local_aof: None,
@@ -360,7 +581,7 @@ impl<C: Codec> Batch<C> {
 
     /// Like [`sync`](Batch::sync) but also waits until `local` (0 or 1) local and `slaves` replica servers have fsynced the writes (`WAITAOF`, Redis 7.2 or newer).
     pub fn sync_aof(mut self, local: u64, slaves: u64, timeout: Duration) -> Self {
-        self.replication = Some(Replication {
+        self.sync = Some(Replicas {
             slaves,
             timeout,
             local_aof: Some(local),
@@ -413,12 +634,14 @@ impl<C: Codec> Batch<C> {
         let complete: Complete = Box::new(move |reply| {
             let _ = sender.send(reply.and_then(|value| decode(&value)));
         });
-        self.ops.lock().unwrap_or_else(|e| e.into_inner()).push(Op {
-            name,
-            args,
-            key_offset,
+        self.ops.lock().unwrap_or_else(|e| e.into_inner()).push((
+            Op {
+                name,
+                args,
+                key_offset,
+            },
             complete,
-        });
+        ));
         BatchFuture { receiver }
     }
 
@@ -430,9 +653,10 @@ impl<C: Codec> Batch<C> {
 
     /// Sends every queued command and fills the handles.
     ///
-    /// A command that Redis rejects fails only its own handle. The call itself fails when the connection fails or times out, and then every handle fails too.
+    /// As in Redisson, a command that Redis rejects fails its own handle and the call returns the first such error; the other handles still get their replies. When the connection fails or times out after the retries, the call and every handle fail.
     pub async fn execute(self) -> Result<BatchResult> {
-        let ops = std::mem::take(&mut *self.ops.lock().unwrap_or_else(|e| e.into_inner()));
+        let queued = std::mem::take(&mut *self.ops.lock().unwrap_or_else(|e| e.into_inner()));
+        let (ops, completes): (Vec<Op>, Vec<Complete>) = queued.into_iter().unzip();
         let count = ops.len();
         if count == 0 {
             return Ok(BatchResult {
@@ -448,15 +672,15 @@ impl<C: Codec> Batch<C> {
             Ok((replies, synced_slaves)) => {
                 let mut first_error = None;
                 let mut replies = replies.into_iter();
-                for op in ops {
+                for complete in completes {
                     let reply = replies.next().unwrap_or_else(|| Err(malformed()));
+                    if let Err(error) = &reply {
+                        first_error.get_or_insert_with(|| duplicate(error));
+                    }
                     if self.skip_result {
-                        if let Err(error) = reply {
-                            first_error.get_or_insert(error);
-                        }
-                        drop(op.complete);
+                        drop(complete);
                     } else {
-                        (op.complete)(reply);
+                        complete(reply);
                     }
                 }
                 match first_error {
@@ -469,21 +693,15 @@ impl<C: Codec> Batch<C> {
             }
             Err(failure) => {
                 let error = failure.into_error();
-                for op in ops {
-                    (op.complete)(Err(match &error {
-                        Error::Timeout => Error::Timeout,
-                        other => Error::Redis(other.to_string()),
-                    }));
+                for complete in completes {
+                    complete(Err(duplicate(&error)));
                 }
                 Err(error)
             }
         }
     }
 
-    async fn finish_stored(
-        &self,
-        count: usize,
-    ) -> std::result::Result<(Vec<Result<Value>>, usize), Failure> {
+    async fn finish_stored(&self, count: usize) -> std::result::Result<Replies, Failure> {
         let sender = self
             .stored
             .lock()
@@ -493,116 +711,116 @@ impl<C: Codec> Batch<C> {
             .ok_or_else(|| Failure::Other(Error::Config("nothing was stored".into())))?;
         let (reply, receiver) = oneshot::channel();
         sender
-            .send(Command::Finish { count, reply })
+            .send(Command::Finish {
+                replication: self.replication_command(),
+                reply,
+            })
             .map_err(|_| Failure::Other(malformed()))?;
-        let received = self
+        let (replies, synced, _lease) = self
             .with_timeout(async { receiver.await.map_err(|_| Failure::Other(malformed()))? })
             .await?;
-        let (replies, client, _connection) = received;
-        let synced = self.wait_for_replicas(&client).await?;
+        if replies.len() != count {
+            return Err(Failure::Other(malformed()));
+        }
         Ok((replies, synced))
+    }
+
+    fn attempt_timeout(&self) -> Duration {
+        self.response_timeout + self.sync.map_or(Duration::ZERO, |sync| sync.timeout)
     }
 
     async fn with_timeout<T>(
         &self,
         work: impl Future<Output = std::result::Result<T, Failure>>,
     ) -> std::result::Result<T, Failure> {
-        match self.response_timeout {
-            Some(limit) => tokio::time::timeout(limit, work)
-                .await
-                .unwrap_or(Err(Failure::Timeout)),
-            None => work.await,
-        }
+        tokio::time::timeout(self.attempt_timeout(), work)
+            .await
+            .unwrap_or(Err(Failure::Timeout))
     }
 
-    async fn run_with_retries(
-        &self,
-        ops: &[Op],
-    ) -> std::result::Result<(Vec<Result<Value>>, usize), Failure> {
+    async fn run_with_retries(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
         let mut attempt = 0;
         loop {
             let outcome = self.with_timeout(self.run_once(ops)).await;
             match outcome {
                 Err(failure) if failure.retryable() && attempt < self.retry_attempts => {
+                    tokio::time::sleep(self.retry_delay.after(attempt)).await;
                     attempt += 1;
-                    tokio::time::sleep(self.retry_interval).await;
                 }
                 other => return other,
             }
         }
     }
 
-    async fn run_once(
-        &self,
-        ops: &[Op],
-    ) -> std::result::Result<(Vec<Result<Value>>, usize), Failure> {
+    async fn run_once(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
         match self.mode {
             Mode::Pipeline => self.run_pipeline(ops).await,
             _ => {
                 let mut session = Session::begin(&self.core).await?;
                 for op in ops {
-                    session.send(op.name, op.args.clone(), op.key_offset).await;
+                    session.send(op.name, op.args.clone(), op.key_offset);
                 }
-                let (replies, client, _connection) = session.finish(ops.len()).await?;
-                let synced = self.wait_for_replicas(&client).await?;
+                let (replies, synced, _lease) = session.finish(self.replication_command()).await?;
                 Ok((replies, synced))
             }
         }
     }
 
-    async fn run_pipeline(
-        &self,
-        ops: &[Op],
-    ) -> std::result::Result<(Vec<Result<Value>>, usize), Failure> {
-        let pipeline = self.core.redis().pipeline();
+    async fn run_pipeline(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
+        let client = self.core.redis();
+        let routing = routing(client);
+        let pipeline = client.pipeline();
+        let mut nodes: Vec<(Option<Server>, Option<u16>)> = Vec::new();
         for op in ops {
+            let (server, slot) = locate(routing.as_ref(), &op.args, op.key_offset);
+            if !nodes.iter().any(|(known, _)| *known == server) {
+                nodes.push((server, slot));
+            }
             let command =
                 CustomCommand::new_static(op.name, ClusterHash::Offset(op.key_offset), false);
             let _: Value = pipeline.custom(command, op.args.clone()).await?;
         }
-        if let Some((name, args)) = self.replication_command() {
-            let command = CustomCommand::new_static(name, ClusterHash::Random, false);
-            let _: Value = pipeline.custom(command, args).await?;
+        let waits = match self.replication_command() {
+            Some((name, args)) => {
+                for (_, slot) in &nodes {
+                    let command =
+                        CustomCommand::new_static(name, hashed(*slot, ClusterHash::Random), false);
+                    let _: Value = pipeline.custom(command, args.clone()).await?;
+                }
+                nodes.len()
+            }
+            None => 0,
+        };
+        let replies = pipeline.try_all::<Value>().await;
+        if replies.len() != ops.len() + waits
+            || replies
+                .iter()
+                .any(|reply| matches!(reply, Err(error) if transport(error)))
+        {
+            return Err(match replies.into_iter().find_map(|reply| reply.err()) {
+                Some(error) => Failure::Fred(error),
+                None => Failure::Other(malformed()),
+            });
         }
-        let mut replies: Vec<Result<Value>> = pipeline
-            .try_all::<Value>()
-            .await
+        let mut replies: Vec<Result<Value>> = replies
             .into_iter()
             .map(|reply| reply.map_err(Error::from))
             .collect();
-        let synced = if self.replication.is_some() {
-            replies.pop().map_or(0, |reply| synced_from(reply.ok()))
-        } else {
-            0
-        };
+        let synced = replies
+            .split_off(ops.len())
+            .into_iter()
+            .map(|reply| synced_from(reply.ok()))
+            .sum();
         Ok((replies, synced))
     }
 
-    fn replication_command(&self) -> Option<(&'static str, Vec<Value>)> {
-        let replication = self.replication?;
-        let timeout = Value::Integer(
-            replication
-                .timeout
-                .as_millis()
-                .try_into()
-                .unwrap_or(i64::MAX),
-        );
-        Some(match replication.local_aof {
-            Some(local) => (
-                "WAITAOF",
-                vec![int(local), int(replication.slaves), timeout],
-            ),
-            None => ("WAIT", vec![int(replication.slaves), timeout]),
+    fn replication_command(&self) -> Replication {
+        let sync = self.sync?;
+        let timeout = Value::Integer(sync.timeout.as_millis().try_into().unwrap_or(i64::MAX));
+        Some(match sync.local_aof {
+            Some(local) => ("WAITAOF", vec![int(local), int(sync.slaves), timeout]),
+            None => ("WAIT", vec![int(sync.slaves), timeout]),
         })
-    }
-
-    async fn wait_for_replicas(&self, client: &RedisClient) -> std::result::Result<usize, Failure> {
-        let Some((name, args)) = self.replication_command() else {
-            return Ok(0);
-        };
-        let command = CustomCommand::new_static(name, ClusterHash::Random, false);
-        let reply: Value = client.custom(command, args).await?;
-        Ok(synced_from(Some(reply)))
     }
 
     /// Queues `DEL` for a key; the handle says whether it existed.
@@ -1106,14 +1324,6 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        if delta.is_nan() {
-            return self.batch.queue(
-                "ZINCRBY",
-                Err(Error::Config("a score cannot be NaN".into())),
-                0,
-                |_| Ok(0.0),
-            );
-        }
         if delta.is_nan() {
             return self.batch.queue(
                 "ZINCRBY",

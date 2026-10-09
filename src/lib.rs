@@ -91,6 +91,6 @@ pub use stream::{
     AutoClaim, PendingEntry, PendingRange, PendingSummary, ReadGroup, Stream, StreamAdd,
     StreamConsumer, StreamEntry, StreamGroup, StreamId, StreamInfo, StreamTrim,
 };
-pub use topic::{Subscriber, Topic};
+pub use topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
 pub use vec::Vec;
 pub use vec_deque::VecDeque;
