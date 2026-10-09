@@ -255,4 +255,48 @@ async fn an_invalid_id_is_a_config_error() {
     assert!("12-3".parse::<StreamId>().is_ok());
     assert!("12".parse::<StreamId>().is_ok());
     assert!("nonsense".parse::<StreamId>().is_err());
+    assert!("18446744073709551616-0".parse::<StreamId>().is_err());
+    assert!("1-*".parse::<StreamId>().is_err());
+    assert!("1-18446744073709551615".parse::<StreamId>().is_ok());
+}
+
+#[tokio::test]
+async fn read_wait_after_latest_returns_only_entries_added_later() {
+    let log = stream().await;
+    log.add(pairs(&[("n", "old")])).await.unwrap();
+    let waiting = tokio::spawn({
+        let log = log.clone();
+        async move { log.read_wait(&StreamId::latest(), None).await.unwrap() }
+    });
+    sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished());
+    log.add(pairs(&[("n", "new")])).await.unwrap();
+    let entries = waiting.await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].fields[0].1, "new");
+}
+
+#[tokio::test]
+async fn huge_counts_do_not_wrap_around() {
+    let log = stream().await;
+    log.add(pairs(&[("n", "1")])).await.unwrap();
+    log.add(pairs(&[("n", "2")])).await.unwrap();
+    let all = log
+        .range(&StreamId::min(), &StreamId::max(), Some(usize::MAX))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        log.read(&StreamId::zero(), Some(usize::MAX))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(log.trim(u64::MAX).await.unwrap(), 0);
+    log.add(pairs(&[("n", "3")]))
+        .max_len(u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(log.len().await.unwrap(), 3);
 }

@@ -56,10 +56,14 @@ impl FromStr for StreamId {
     type Err = Error;
 
     fn from_str(text: &str) -> Result<Self> {
-        let valid = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        let number = |part: &str| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part.parse::<u64>().is_ok()
+        };
         let well_formed = match text.split_once('-') {
-            Some((time, sequence)) => valid(time) && (valid(sequence) || sequence == "*"),
-            None => valid(text),
+            Some((time, sequence)) => number(time) && number(sequence),
+            None => number(text),
         };
         if well_formed || matches!(text, "-" | "+" | "$") {
             Ok(Self(text.to_string()))
@@ -136,6 +140,10 @@ fn array(value: &Value) -> &[Value] {
     }
 }
 
+fn int(number: impl TryInto<i64>) -> Value {
+    Value::Integer(number.try_into().unwrap_or(i64::MAX))
+}
+
 fn malformed() -> Error {
     Error::Redis("unexpected reply to a stream command".into())
 }
@@ -183,7 +191,7 @@ where
             }
             let mut args = vec![Value::from(self.stream.key.redis_key())];
             if let Some(max_len) = self.max_len {
-                args.extend([Value::from("MAXLEN"), Value::Integer(max_len as i64)]);
+                args.extend([Value::from("MAXLEN"), int(max_len)]);
             }
             args.push(Value::from("*"));
             args.extend(fields.into_iter().map(Value::Bytes));
@@ -194,6 +202,8 @@ where
 }
 
 /// A distributed append-only log of entries stored in a Redis Stream, with consumer groups, as in Redisson's `RStream`. Each entry has an id and fields.
+///
+/// Field names and values go through the codec, so with the JSON codec a field `temp` is stored as `"temp"` including the quotes. Other programs that read the stream must expect that.
 ///
 /// A group delivers every entry to one consumer, keeps it pending until it is acknowledged, and lets other consumers claim entries that a crashed consumer left. Needs Redis 6.2 or newer for [`auto_claim`](Stream::auto_claim).
 pub struct Stream<K, V, C: Codec> {
@@ -267,6 +277,9 @@ where
             }
             let parts = array(fields);
             let mut decoded = Vec::with_capacity(parts.len() / 2);
+            if !parts.len().is_multiple_of(2) {
+                return Err(malformed());
+            }
             for pair in parts.as_chunks::<2>().0 {
                 let key = bytes(&pair[0]).ok_or_else(malformed)?;
                 let value = bytes(&pair[1]).ok_or_else(malformed)?;
@@ -341,7 +354,7 @@ where
             Value::from(second.0.clone()),
         ];
         if let Some(count) = count {
-            args.extend([Value::from("COUNT"), Value::Integer(count as i64)]);
+            args.extend([Value::from("COUNT"), int(count)]);
         }
         let reply = self.run(name, args, 0, false).await?;
         self.entries(&reply)
@@ -383,7 +396,7 @@ where
         let args = vec![
             Value::from(self.key.redis_key()),
             Value::from("MAXLEN"),
-            Value::Integer(max_len as i64),
+            int(max_len),
         ];
         let reply = self.run("XTRIM", args, 0, false).await?;
         Ok(number(&reply).unwrap_or(0) as usize)
@@ -397,10 +410,10 @@ where
     ) -> (Vec<Value>, usize) {
         let mut args = Vec::new();
         if let Some(count) = count {
-            args.extend([Value::from("COUNT"), Value::Integer(count as i64)]);
+            args.extend([Value::from("COUNT"), int(count)]);
         }
         if let Some(block) = block {
-            args.extend([Value::from("BLOCK"), Value::Integer(block as i64)]);
+            args.extend([Value::from("BLOCK"), int(block)]);
         }
         args.push(Value::from("STREAMS"));
         let offset = args.len();
@@ -420,7 +433,7 @@ where
         self.read_reply(&reply)
     }
 
-    /// Waits until there are entries after `after` and returns them. Add `.timeout(duration)` to wait at most that long; the call then resolves to `None`.
+    /// Waits until there are entries after `after` and returns them. With [`StreamId::latest`] it waits for entries added after this call. Add `.timeout(duration)` to wait at most that long; the call then resolves to `None`.
     ///
     /// Use `.timeout` for a time limit and not `tokio::time::timeout`. A waiting call uses its own short-lived connection.
     pub fn read_wait<'a>(
@@ -429,6 +442,16 @@ where
         count: Option<usize>,
     ) -> Pending<'a, Vec<StreamEntry<K, V>>> {
         Pending::new(move |wait| async move {
+            let after = if after == &StreamId::latest() {
+                self.rev_range(&StreamId::max(), &StreamId::min(), Some(1))
+                    .await?
+                    .into_iter()
+                    .next()
+                    .map_or_else(StreamId::zero, |entry| entry.id)
+            } else {
+                after.clone()
+            };
+            let after = &after;
             let immediate = self.read(after, count).await?;
             if !immediate.is_empty() || wait.is_some_and(|wait| wait.is_zero()) {
                 return Ok((!immediate.is_empty()).then_some(immediate));
@@ -481,10 +504,10 @@ where
             Value::from(consumer.to_string()),
         ];
         if let Some(count) = count {
-            args.extend([Value::from("COUNT"), Value::Integer(count as i64)]);
+            args.extend([Value::from("COUNT"), int(count)]);
         }
         if let Some(block) = block {
-            args.extend([Value::from("BLOCK"), Value::Integer(block as i64)]);
+            args.extend([Value::from("BLOCK"), int(block)]);
         }
         args.push(Value::from("STREAMS"));
         let offset = args.len();
@@ -505,7 +528,7 @@ where
         self.read_reply(&reply)
     }
 
-    /// Waits until the group has new entries and takes them. Add `.timeout(duration)` to wait at most that long; the call then resolves to `None`.
+    /// Waits until the group has new entries and takes them. If the call is dropped just as Redis hands entries over, they stay pending for `consumer`; [`Stream::auto_claim`] recovers them. Add `.timeout(duration)` to wait at most that long; the call then resolves to `None`.
     pub fn read_group_wait<'a>(
         &'a self,
         group: &'a str,
@@ -571,7 +594,7 @@ where
             Value::from(group.to_string()),
             Value::from("-"),
             Value::from("+"),
-            Value::Integer(count as i64),
+            int(count),
         ];
         let reply = self.run("XPENDING", args, 0, false).await?;
         array(&reply)
@@ -603,7 +626,7 @@ where
             Value::from(self.key.redis_key()),
             Value::from(group.to_string()),
             Value::from(consumer.to_string()),
-            Value::Integer(min_idle.as_millis() as i64),
+            int(min_idle.as_millis()),
         ];
         args.extend(ids(entries));
         let reply = self.run("XCLAIM", args, 0, false).await?;
@@ -623,10 +646,10 @@ where
             Value::from(self.key.redis_key()),
             Value::from(group.to_string()),
             Value::from(consumer.to_string()),
-            Value::Integer(min_idle.as_millis() as i64),
+            int(min_idle.as_millis()),
             Value::from(start.0.clone()),
             Value::from("COUNT"),
-            Value::Integer(count as i64),
+            int(count),
         ];
         let reply = self.run("XAUTOCLAIM", args, 0, false).await?;
         let parts = array(&reply);
