@@ -15,9 +15,12 @@ export function baseOptions(): BaseLayoutProps {
     },
     links: [
       { text: 'Documentation', url: '/docs', active: 'nested-url' },
-      { text: 'crates.io', url: 'https://crates.io/crates/redissun', external: true },
-      { text: 'docs.rs', url: 'https://docs.rs/redissun', external: true },
       { type: 'custom', children: <GithubStars />, secondary: true },
     ],
   }
+}
+
+export function docsOptions(): BaseLayoutProps {
+  const { nav } = baseOptions()
+  return { nav, links: [] }
 }

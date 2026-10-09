@@ -98,13 +98,15 @@ function Badge({ src, alt, href }: { src: string; alt: string; href: string }) {
   )
 }
 
+const total = groups.reduce((sum, group) => sum + group.entries.length, 0)
+
 export default function Home() {
   const repo = `https://github.com/${REPO_OWNER}/${REPO_NAME}`
   return (
     <HomeLayout {...baseOptions()}>
       <div className="hero-glow">
         <section className="mx-auto flex max-w-4xl flex-col items-center gap-6 px-4 pb-16 pt-20 text-center">
-          <Logo className="size-14 text-fd-primary" />
+          <Logo className="size-24 text-fd-primary" />
           <h1 className="text-5xl font-bold tracking-tight sm:text-6xl">redissun</h1>
           <p className="max-w-2xl text-lg text-fd-muted-foreground">
             Distributed objects on Redis for Rust, closely inspired by Redisson: maps, queues,
@@ -134,8 +136,31 @@ export default function Home() {
         </section>
       </div>
 
-      <section className="mx-auto max-w-4xl px-4 pb-16">
+      <section className="mx-auto max-w-4xl px-4 pb-14">
         <DynamicCodeBlock lang="rust" code={example} />
+      </section>
+
+      <section className="mx-auto max-w-5xl px-4 pb-16">
+        <h2 className="mb-1 text-center text-2xl font-semibold tracking-tight">
+          {total} objects, one client
+        </h2>
+        <p className="mb-6 text-center text-sm text-fd-muted-foreground">
+          Everything in one place. Pick one to read its page.
+        </p>
+        <div className="flex flex-wrap justify-center gap-2">
+          {groups.flatMap((group) =>
+            group.entries.map((entry) => (
+              <Link
+                key={entry.name}
+                href={`/docs/objects/${entry.slug}`}
+                title={entry.text}
+                className="rounded-full border bg-fd-card px-3.5 py-1.5 font-mono text-sm transition-colors hover:border-fd-primary/60 hover:bg-fd-accent hover:text-fd-primary"
+              >
+                {entry.name}
+              </Link>
+            )),
+          )}
+        </div>
       </section>
 
       <section className="mx-auto grid max-w-5xl gap-4 px-4 pb-16 sm:grid-cols-3">
@@ -150,7 +175,7 @@ export default function Home() {
       <section className="mx-auto flex max-w-5xl flex-col gap-10 px-4 pb-20">
         {groups.map((group) => (
           <div key={group.title}>
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-fd-muted-foreground">
+            <h2 className="mb-3 border-b pb-2 text-sm font-semibold uppercase tracking-wider text-fd-primary">
               {group.title}
             </h2>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -173,6 +198,7 @@ export default function Home() {
         <p>
           Apache-2.0 · <a className="underline" href={repo}>GitHub</a> ·{' '}
           <a className="underline" href="https://crates.io/crates/redissun">crates.io</a> ·{' '}
+          <a className="underline" href="https://docs.rs/redissun">docs.rs</a> ·{' '}
           <a className="underline" href="/redissun/llms.txt">llms.txt</a>
         </p>
       </footer>
