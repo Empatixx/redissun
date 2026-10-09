@@ -4,6 +4,7 @@
 
 ### Added
 
+- A new look for the docs site: Rust-orange accents, a landing page with badges, a code example and every object, a logo, and a GitHub link with the star count.
 - The docs site serves `llms.txt`, `llms-full.txt` and every page as Markdown (`/llms.mdx/docs/<page>/content.md`) for language models and coding agents.
 - `Batch` (`client.batch()`): queues commands of several objects and sends them in one round trip, as in Redisson's `RBatch`. Each queued call returns a `BatchFuture` with the typed reply. Modes: pipelined by default (`IN_MEMORY`), `.atomic()` for `MULTI`/`EXEC` (`IN_MEMORY_ATOMIC`), `.stored_in_redis()` to keep the commands in a `MULTI` transaction in Redis (`REDIS_WRITE_ATOMIC`). Options: `.skip_result()`, `.response_timeout()`, `.retry_attempts()`, `.retry_interval()`, `.sync()` and `.sync_aof()`. `execute()` returns a `BatchResult`, and `discard()` throws the commands away. Batch views exist for `HashMap`, `Bucket`, `HashSet`, `AtomicI64`, `Vec`, `VecDeque`, `SortedSet` and `Topic`, plus `del` and `expire` for any key.
 
