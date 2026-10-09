@@ -1,0 +1,51 @@
+---
+title: LocalCachedMap
+description: A HashMap with a cache inside your program.
+---
+
+A `LocalCachedMap` is a `HashMap` that keeps the entries it has read in your program's memory. A read that hits the cache needs no network round trip. When another instance changes an entry, your copy is dropped or updated.
+
+```rust
+let users = client
+    .local_cached_map::<String, String>("users")
+    .cache_size(10_000)
+    .ttl(Duration::from_secs(300))
+    .build()
+    .await?;
+
+users.insert("jirka", "Jirka").await?;
+let name = users.get("jirka").await?;
+```
+
+## Options
+
+| Option | Notes |
+|---|---|
+| `cache_size(n)` | keep at most `n` entries locally and drop the least recently used. 0, the default, means no limit. |
+| `ttl(time)` | drop a local entry this long after it was stored |
+| `sync_strategy(..)` | `Invalidate` (default): other instances drop the entry. `Update`: they receive the new value. `None`: nothing is sent. |
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `get(&k)` | local cache first, then Redis. A value read from Redis is cached. |
+| `insert(&k, &v)` | writes to Redis, returns the previous value, caches the new one and tells the others |
+| `remove(&k)` | removes and tells the others |
+| `contains_key(&k)` | a cached key answers without a round trip |
+| `len()`, `is_empty()` | ask Redis |
+| `clear()` | empties the map for everybody |
+| `local_len()`, `clear_local()` | the local cache of this instance only |
+| `iter()`, `keys()`, `values()` | stream from Redis and do not use the cache |
+
+## What it guarantees
+
+- A write and its message are sent in one Lua script, as in Redisson.
+- An instance does not react to its own messages.
+- If a read was running while a change message arrived, the stale value is not cached.
+- When the pub/sub connection is lost and restored, or messages are missed, the whole local cache is cleared, because changes may have been lost.
+- A message can arrive a few milliseconds after the write, so another instance may read the old value for a short time.
+
+Only changes made through a `LocalCachedMap` are announced. A plain `HashMap` of the same name, or `del()`, changes Redis without telling the others. Their cached entries stay until they expire (`ttl`), are pushed out, or you call `clear()`.
+
+The data in Redis is a normal hash, so a `HashMap` with the same name and codec reads the same entries.

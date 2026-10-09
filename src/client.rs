@@ -14,6 +14,7 @@ use crate::hash_map_cache::HashMapCache;
 use crate::hash_set_cache::HashSetCache;
 use crate::hyper_log_log::HyperLogLog;
 use crate::latch::CountDownLatch;
+use crate::local_cached_map::LocalCachedMapBuilder;
 use crate::lock::Lock;
 use crate::multi_lock::{LockTarget, MultiLock};
 use crate::object::{tagged, Key};
@@ -119,6 +120,14 @@ impl<C: Codec> Client<C> {
             Key::new(self.core.clone(), tagged(&name)),
             self.codec.clone(),
         )
+    }
+
+    /// Starts a [`LocalCachedMap`](crate::LocalCachedMap) stored under `name`. Set its options, then `.build().await`.
+    pub fn local_cached_map<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> LocalCachedMapBuilder<K, V, C> {
+        LocalCachedMapBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Topic`] named `name`.

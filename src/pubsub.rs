@@ -21,6 +21,7 @@ struct Entry {
 pub(crate) struct PubSub {
     client: RedisClient,
     channels: Mutex<HashMap<String, Arc<Entry>>>,
+    reconnects: broadcast::Sender<()>,
 }
 
 pub(crate) struct Subscription {
@@ -54,12 +55,25 @@ impl PubSub {
         let client = base.clone_new();
         client.init().await?;
         let receiver = client.message_rx();
+        let reconnects = broadcast::channel(16).0;
+        let mut reconnected = client.reconnect_rx();
+        let announce = reconnects.clone();
+        tokio::spawn(async move {
+            while !matches!(reconnected.recv().await, Err(RecvError::Closed)) {
+                let _ = announce.send(());
+            }
+        });
         let pubsub = Arc::new(Self {
             client,
             channels: Mutex::new(HashMap::new()),
+            reconnects,
         });
         tokio::spawn(dispatch(Arc::downgrade(&pubsub), receiver));
         Ok(pubsub)
+    }
+
+    pub(crate) fn reconnects(&self) -> broadcast::Receiver<()> {
+        self.reconnects.subscribe()
     }
 
     pub(crate) async fn quit(&self) {

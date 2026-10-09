@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.12.0] - unreleased
+
+### Added
+
+- `LocalCachedMap`: a `HashMap` with a cache inside the program (`get`, `insert`, `remove`, `contains_key`, `len`, `clear`, `local_len`, `clear_local`, `iter`). Options: `cache_size` (LRU), `ttl` and `SyncStrategy::{Invalidate, Update, None}`. Writes and their messages run in one Lua script. The local cache is cleared when the pub/sub connection is restored.
+
 ## [0.11.0] - unreleased
 
 ### Added

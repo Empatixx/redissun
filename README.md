@@ -58,6 +58,7 @@ async fn main() -> redissun::Result<()> {
 | `Vec` | `RList` | list |
 | `VecDeque` | `RDeque` | list |
 | `HashSet` | `RSet` | set |
+| `LocalCachedMap` | `RLocalCachedMap` | hash and pub/sub |
 | `Lock` | `RLock` | hash and pub/sub |
 | `RwLock` | `RReadWriteLock` | hash, set, strings and pub/sub |
 | `FairLock` | `RFairLock` | hash, list, sorted set and pub/sub |
@@ -171,6 +172,20 @@ A set whose values expire.
 ```rust
 let seen = client.hash_set_cache::<String>("seen");
 seen.insert("request-1").ttl(std::time::Duration::from_secs(60)).await?;
+```
+
+### LocalCachedMap
+
+A `HashMap` with a cache in your program. Other instances are told when an entry changes.
+
+```rust
+let users = client
+    .local_cached_map::<String, String>("users")
+    .cache_size(10_000)
+    .build()
+    .await?;
+users.insert("jirka", "Jirka").await?;
+let name = users.get("jirka").await?;
 ```
 
 ### Topic
