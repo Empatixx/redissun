@@ -28,6 +28,7 @@ description: How Redisson names and behaviour map to redissun.
 | `RMapCache` | `HashMapCache` |
 | `RSetCache` | `HashSetCache` |
 | `RTopic` | `Topic` |
+| `RPatternTopic` | `PatternTopic` |
 | `RBatch` | `Batch` |
 | `RStream` | `Stream` |
 | `RGeo` | `Geo` |
@@ -117,6 +118,9 @@ description: How Redisson names and behaviour map to redissun.
 |---|---|
 | `publish(m)` | `publish(&m)` |
 | `addListener(...)` | `subscribe()` then `recv()` or `into_stream()` |
+| `removeListener(...)` | drop the `Subscriber` |
+| `removeAllListeners()` | `remove_all_listeners()` |
+| `countListeners()` | `listener_count()` |
 | `countSubscribers()` | `subscriber_count()` |
 
 ## RwLock

@@ -22,14 +22,26 @@ The message is borrowed when you publish, and you get an owned value back. Messa
 | `publish(&m)` | `PUBLISH` | returns how many Redis connections got the message |
 | `subscribe()` | `SUBSCRIBE` | returns a `Subscriber` |
 | `subscriber_count()` | `PUBSUB NUMSUB` | counts connections of all programs |
+| `listener_count()` | | counts the subscribers of this client |
+| `remove_all_listeners()` | `UNSUBSCRIBE` | ends every subscriber of this client |
 
-A `Subscriber` has `recv()` and `into_stream()`. The stream never ends.
+A `Subscriber` has `recv()` and `into_stream()`. The stream never ends. Dropping a subscriber removes it.
+
+## Pattern topics
+
+`client.pattern_topic::<M>("news.*")` listens on every channel that matches a glob pattern (`PSUBSCRIBE`), like Redisson's `RPatternTopic`. Its `PatternSubscriber::recv()` returns the channel and the message.
+
+```rust
+let mut all_news = client.pattern_topic::<String>("news.*").subscribe().await?;
+let (channel, message) = all_news.recv().await?;
+```
 
 ## Good to know
 
 - The Redis channel has the same name as the topic. A program that is not redissun can publish and listen too.
 - A subscriber gets only the messages published after `subscribe` returned. It never sees older ones.
-- Every subscriber has a buffer of 256 messages. If it falls further behind, `recv` returns `Error::Lagged(n)` once, with the number of missed messages, and then goes on with the newest ones.
+- Every subscriber has a buffer of 256 messages. If it falls further behind, or the client's pub/sub connection dropped messages, `recv` returns `Error::Lagged(n)` once, with the number of missed messages, and then goes on with the newest ones.
+- After a reconnect the client subscribes again. If that fails, it tries again every second until it works, as Redisson does.
 - A message that the codec cannot decode is a `Error::Codec`. The next `recv` works as usual.
 - All subscribers of one client share one Redis subscription. It ends when the last one is dropped.
 - Pub/sub does not store messages. A program that is offline misses them.

@@ -88,6 +88,6 @@ pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use semaphore::{Permits, Semaphore};
 pub use sorted_set::SortedSet;
 pub use stream::{PendingEntry, PendingSummary, Stream, StreamAdd, StreamEntry, StreamId};
-pub use topic::{Subscriber, Topic};
+pub use topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
 pub use vec::Vec;
 pub use vec_deque::VecDeque;

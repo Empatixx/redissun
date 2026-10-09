@@ -23,6 +23,7 @@ pub(crate) struct Core {
     pub(crate) eviction_interval: Duration,
     pub(crate) pubsub: Arc<PubSub>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
+    pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
 }
 
 impl Core {
@@ -62,6 +63,7 @@ impl Core {
             eviction_interval,
             pubsub,
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
+            exclusive: std::sync::Mutex::new(Vec::new()),
         }))
     }
 
@@ -167,9 +169,13 @@ impl Drop for Core {
         };
         let pool = self.pool.clone();
         let pubsub = self.pubsub.clone();
+        let exclusive = std::mem::take(self.exclusive.get_mut().unwrap_or_else(|e| e.into_inner()));
         runtime.spawn(async move {
             let _ = pool.quit().await;
             pubsub.quit().await;
+            for client in exclusive {
+                let _ = client.quit().await;
+            }
         });
     }
 }
