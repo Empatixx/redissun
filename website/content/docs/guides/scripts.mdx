@@ -1,0 +1,113 @@
+---
+title: Scripts and functions
+description: Run your own Lua scripts and Redis functions, like Redisson's RScript and RFunction.
+---
+
+## Scripts
+
+`client.script()` returns a `Script`, Redisson's `RScript`. A call takes keys and arguments and is then awaited. The type you ask for decides how the reply is read.
+
+```rust
+use redissun::StringCodec;
+
+let script = client.with_codec(StringCodec).script();
+let visits: i64 = script
+    .eval("return redis.call('INCRBY', KEYS[1], ARGV[1])")
+    .key("visits")
+    .arg(&5)
+    .await?;
+```
+
+`eval` sends `EVALSHA` with the script's SHA-1 first. Only when Redis answers `NOSCRIPT`, for example after a restart, it sends the whole script with `EVAL`. This is Redisson's script cache, so a long script crosses the network once per server.
+
+### A script you run often
+
+```rust
+use redissun::LuaScript;
+
+static INCR: std::sync::LazyLock<LuaScript> =
+    std::sync::LazyLock::new(|| LuaScript::new("return redis.call('INCRBY', KEYS[1], ARGV[1])"));
+
+let visits: i64 = script.run(&INCR).key("visits").arg(&1).await?;
+```
+
+`LuaScript` keeps the source and its SHA-1, so the digest is computed once.
+
+### Keys and arguments
+
+| Call | Meaning |
+|---|---|
+| `.key(k)`, `.keys(ks)` | keys, read as `KEYS[n]`. In Redis Cluster all keys must be in one hash slot, and the script runs on the node of the first key. |
+| `.arg(&v)`, `.args(vs)` | arguments, read as `ARGV[n]`, encoded by the client's codec |
+| `.arg_bytes(b)` | an argument as raw bytes, without the codec |
+| `.read_only()` | runs with `EVAL_RO` or `EVALSHA_RO`. Redis refuses a script that writes. On Redis before 7.0 the plain command is used. |
+
+Arguments go through the codec, as in Redisson. With the default JSON codec the string `abc` reaches Lua as `"abc"`, with the quotes. Use `client.with_codec(StringCodec).script()` to pass plain text and numbers. See [Codecs](/docs/guides/codecs).
+
+### Replies
+
+| Type | Redisson `ReturnType` | Reply |
+|---|---|---|
+| `()` | | ignored |
+| `bool` | `BOOLEAN` | Lua `true` or `1` is `true`; `false`, `nil` and `0` are `false` |
+| `i64` | `LONG` | an integer, or text that holds one |
+| `f64` | | a number, or text that holds one |
+| `String` | `STRING` | text or a status reply as it is |
+| `Bytes` | | the raw bytes |
+| `Decoded<V>` | `VALUE` | text decoded by the codec. Use it for values that objects stored. |
+| `Option<T>` | | `None` for `nil` |
+| `Vec<T>` | `LIST` | a Lua table |
+
+```rust
+use redissun::Decoded;
+
+let user: Option<Decoded<User>> = client
+    .script()
+    .eval("return redis.call('GET', KEYS[1])")
+    .key("user:42")
+    .await?;
+```
+
+A script error, for example `redis.error_reply('boom')`, is an `Error::Redis` with the message.
+
+### Script cache
+
+| Method | Redisson | Meaning |
+|---|---|---|
+| `eval_sha(sha)` | `evalSha` | runs a script that Redis knows. Fails with `NOSCRIPT` when it does not. |
+| `script_load(source)` | `scriptLoad` | loads a script and returns its SHA-1. In Redis Cluster on every master. |
+| `script_exists(&[sha])` | `scriptExists` | whether Redis has each script. In Redis Cluster only when every master has it. |
+| `script_flush()` | `scriptFlush` | removes all scripts. In Redis Cluster on every master. |
+| `script_kill()` | `scriptKill` | stops the running script. Fails with `NOTBUSY` when none runs. |
+
+### Retries
+
+A script call is sent again when its connection fails, up to `retry_attempts` times, as in Redisson. A script that writes can then run twice. Write scripts so that a second run does no harm, or set `retry_attempts(0)`.
+
+## Functions
+
+Redis 7.0 and newer keep functions in libraries. `client.function()` returns a `Function`, Redisson's `RFunction`.
+
+```rust
+let functions = client.with_codec(StringCodec).function();
+functions
+    .load(
+        "#!lua name=counters\n\
+         redis.register_function('incr_by', function(keys, args) \
+             return redis.call('INCRBY', keys[1], args[1]) end)",
+    )
+    .await?;
+
+let visits: i64 = functions.call("incr_by").key("visits").arg(&1).await?;
+```
+
+| Method | Redisson | Meaning |
+|---|---|---|
+| `load(code)` | `load` | loads a library and returns its name. Fails when it exists. |
+| `load_and_replace(code)` | `loadAndReplace` | loads a library and replaces the old one |
+| `delete(name)` | `delete` | deletes a library |
+| `flush()` | `flush` | deletes all libraries |
+| `kill()` | `kill` | stops the running function |
+| `call(name)` | `call` | calls a function with `FCALL`. `.read_only()` uses `FCALL_RO`, which needs the `no-writes` flag. |
+
+Loading, deleting and flushing reach every master in Redis Cluster. Calls take keys, arguments and reply types like scripts.

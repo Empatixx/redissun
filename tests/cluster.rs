@@ -278,3 +278,48 @@ async fn lock_and_data_survive_a_cluster_master_failover() {
         .expect("waiter failed after a cluster failover");
     guard.unlock().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "starts a redis cluster in docker; run with --ignored"]
+async fn scripts_and_functions_work_on_a_cluster() {
+    let topology = Topology::cluster().await;
+    let client = connect(&topology).await.with_codec(redissun::StringCodec);
+    let script = client.script();
+    let lua = redissun::LuaScript::new("return redis.call('INCRBY', KEYS[1], ARGV[1])");
+    let sha = script.script_load(lua.source()).await.unwrap();
+    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [true]);
+
+    let mut masters = std::collections::HashSet::new();
+    for n in 0..20 {
+        let key = format!("{}-{n}", unique("script"));
+        masters.insert(topology.cluster_master_of(&key).await);
+        let total: i64 = script.run(&lua).key(key.clone()).arg(&n).await.unwrap();
+        assert_eq!(total, n);
+        let read: i64 = script
+            .eval("return tonumber(redis.call('GET', KEYS[1]))")
+            .key(key)
+            .read_only()
+            .await
+            .unwrap();
+        assert_eq!(read, n);
+    }
+    assert!(masters.len() > 1);
+
+    script.script_flush().await.unwrap();
+    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [false]);
+
+    let functions = client.function();
+    let code = "#!lua name=clusterlib\nredis.register_function('cluster_incr', function(keys, args) return redis.call('INCRBY', keys[1], args[1]) end)";
+    assert_eq!(functions.load(code).await.unwrap(), "clusterlib");
+    for n in 0..10 {
+        let key = format!("{}-{n}", unique("fcall"));
+        let total: i64 = functions
+            .call("cluster_incr")
+            .key(key)
+            .arg(&n)
+            .await
+            .unwrap();
+        assert_eq!(total, n);
+    }
+    functions.delete("clusterlib").await.unwrap();
+}

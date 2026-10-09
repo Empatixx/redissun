@@ -51,6 +51,7 @@ mod rate_limiter;
 mod reply;
 mod retry;
 mod rw_lock;
+mod script;
 mod semaphore;
 mod shield;
 mod sorted_set;
@@ -95,6 +96,7 @@ pub use pending::{Pending, PendingTimeout};
 pub use rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
 pub use retry::DelayStrategy;
 pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use script::{Decoded, Function, LuaScript, Script, ScriptCall, ScriptMode, ScriptOutput};
 pub use semaphore::{Permits, Semaphore};
 pub use sorted_set::{Aggregate, SortedSet};
 pub use stream::{

@@ -4,6 +4,8 @@
 
 ### Added
 
+- `Script` (`client.script()`), like Redisson's `RScript`: `eval`, `eval_sha`, `run` for a reusable `LuaScript` (source and SHA-1), `script_load`, `script_exists`, `script_flush` and `script_kill`. `eval` and `run` send `EVALSHA` first and the source only on `NOSCRIPT`, like Redisson's script cache. Calls take `.key()`, `.arg()` (through the codec), `.arg_bytes()` and `.read_only()` (`EVAL_RO`/`EVALSHA_RO`, plain commands on Redis before 7.0). Replies become `()`, `bool`, `i64`, `f64`, `String`, `Bytes`, `Decoded<V>`, `Option<T>` or `Vec<T>` (`ScriptOutput`).
+- `Function` (`client.function()`), like Redisson's `RFunction`: `load`, `load_and_replace`, `delete`, `flush`, `kill` and `call` (`FCALL`, `.read_only()` for `FCALL_RO`). Loading, deleting and flushing reach every master in a cluster.
 - `StringCodec` (plain UTF-8 text, like Redisson's `StringCodec`) and `BytesCodec` (raw bytes, like Redisson's `ByteArrayCodec`).
 - `Client::with_codec(codec)`: a client with another codec that shares the connections, like Redisson's `getStream(name, codec)`. For example `client.with_codec(StringCodec).stream("s")` writes `XADD s * payload <json>` without JSON quotes.
 - TLS with rustls behind the `tls-rustls` feature (`ring`) or the `tls-rustls-aws-lc` feature: `rediss://`, `rediss-sentinel://` and `rediss-cluster://` URLs, `tls_ca_pem` and `tls_ca_file` (Redisson's `sslTruststore`), `tls_client_auth_pem` and `tls_client_auth_files` for mutual TLS (`sslKeystore`), and `tls_verification` with `TlsVerification::{Strict, CaOnly, None}` (`sslVerificationMode`). A `rediss://` URL without a TLS feature is an `Error::Config` instead of a plain connection.

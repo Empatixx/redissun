@@ -36,6 +36,10 @@ description: How Redisson names and behaviour map to redissun.
 | `RSemaphore` | `Semaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
+| `RScript` | `Script` (`client.script()`) |
+| `RFunction` | `Function` (`client.function()`) |
+| `StringCodec`, `ByteArrayCodec` | `StringCodec`, `BytesCodec` |
+| `redisson.getStream("x", codec)` | `client.with_codec(codec).stream("x")` |
 | `redisson.getMap("x")` | `client.hash_map("x")` |
 | `redisson.getList("x")` | `client.vec("x")` |
 | `redisson.getDeque("x")` | `client.vec_deque("x")` |
@@ -392,12 +396,56 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `availablePermits()` | `available_permits()` |
 | `RateType.OVERALL`, `PER_CLIENT` | `RateType::Overall`, `RateType::PerClient` |
 
+## Config
+
+| Redisson | redissun |
+|---|---|
+| `useSingleServer().setAddress(a)` | `.url("redis://host:6379")` |
+| `useSentinelServers()` | `.url("redis-sentinel://host:26379?sentinelServiceName=mymaster&node=host2:26379")` |
+| `useClusterServers()` | `.url("redis-cluster://host:7000?node=host2:7001")` |
+| `rediss://` addresses | `rediss://` URLs with the `tls-rustls` feature |
+| `setUsername`, `setPassword` | `.username()`, `.password()` |
+| `setCredentialsResolver` | `.credentials_resolver()` |
+| `setDatabase` | `.database()` |
+| `setClientName` | `.client_name()` |
+| `setConnectionPoolSize` | `.pool_size()` |
+| `setTimeout` | `.timeout()` |
+| `setConnectTimeout` | `.connect_timeout()` |
+| `setRetryAttempts`, `setRetryDelay` | `.retry_attempts()`, `.retry_delay()` |
+| `setReconnectionDelay` | `.reconnection_delay()` |
+| `ConstantDelay`, `EqualJitterDelay`, `FullJitterDelay`, `DecorrelatedJitterDelay` | `DelayStrategy::{Constant, EqualJitter, FullJitter, DecorrelatedJitter}` |
+| `setPingConnectionInterval` | `.ping_connection_interval()` |
+| `setKeepAlive`, `setTcpKeepAliveIdle`, `setTcpKeepAliveInterval` | `.keep_alive()`, `.tcp_keep_alive_idle()`, `.tcp_keep_alive_interval()` |
+| `setTcpNoDelay` | `.tcp_no_delay()` |
+| `setSslTruststore` | `.tls_ca_file()` or `.tls_ca_pem()` |
+| `setSslKeystore` | `.tls_client_auth_files()` or `.tls_client_auth_pem()` |
+| `setSslVerificationMode` | `.tls_verification(TlsVerification::Strict)` |
+| `setLockWatchdogTimeout` | `.lock_lease()` |
+| `setCheckLockSyncedSlaves`, `setSlavesSyncTimeout` | `.check_lock_synced_replicas()`, `.replicas_sync_timeout()` |
+| `setFairLockWaitTimeout` | `.fair_lock_wait_timeout()` |
+| `setMinCleanUpDelay` | `.eviction_interval()` |
+| `setCodec` | `.codec()` |
+
+Not available: `readMode` and `subscriptionMode` (redissun reads from and subscribes on masters only), load balancers, `natMapper`, `nameMapper`, `commandMapper`, connection pool minimum idle sizes, `subscriptionsPerConnection` (one pub/sub connection per client), `idleConnectionTimeout`, `dnsMonitoringInterval`, `sslProvider`, `sslProtocols`, `sslCiphers`, `tcpKeepAliveCount` and `tcpUserTimeout`.
+
+## RScript and RFunction
+
+| Redisson | redissun |
+|---|---|
+| `script.eval(Mode.READ_WRITE, lua, ReturnType.INTEGER, keys, values...)` | `script.eval::<i64>(lua).keys(keys).args(values).await` |
+| `Mode.READ_ONLY` | `.read_only()` |
+| `evalSha(mode, sha, type, keys, values...)` | `eval_sha(sha)` |
+| `scriptLoad`, `scriptExists`, `scriptFlush`, `scriptKill` | `script_load`, `script_exists`, `script_flush`, `script_kill` |
+| `ReturnType.BOOLEAN`, `INTEGER`, `STRING`, `VALUE`, `LIST` | `bool`, `i64`, `String`, `Decoded<V>`, `Vec<T>` |
+| `function.load(lib)`, `loadAndReplace(lib)` | `function.load(lib)`, `load_and_replace(lib)` |
+| `function.call(mode, name, type, keys, values...)` | `function.call::<T>(name).keys(keys).args(values).await` |
+
 ## Behavioural differences
 
 - The lock owner is a client and a tokio task, not a thread.
 - Unlocking goes through a guard value. Unlocking something you do not hold is `Error::LockNotHeld` instead of an `IllegalMonitorStateException`.
 - `Vec::remove(i)` past the end is `Error::OutOfRange`, also for index 0. Redisson returns `null` for index 0.
-- Values use a serde codec rather than Redisson's Java codecs, so data written by Redisson is not readable by redissun and the other way round.
+- Values use a serde codec rather than Redisson's Java codecs, so data written with Redisson's default codec is not readable by redissun and the other way round. With `StringCodec` on both sides, plain text values are shared.
 - When a semaphore or latch changes, redissun wakes every waiter and each one tries again. Redisson wakes only as many as there are permits.
 - The rate limiter reads the time from the Redis server. Redisson sends the time of the client.
 - `RateLimiter` has no `keepAliveTime` setting yet.

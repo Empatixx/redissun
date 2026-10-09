@@ -83,6 +83,7 @@ async fn main() -> redissun::Result<()> {
 | `CountDownLatch` | string and pub/sub | experimental |
 | `RateLimiter` | hash, string and sorted set | stable |
 | `Batch` | the commands it holds | experimental |
+| `Script`, `Function` | Lua scripts and functions | experimental |
 
 Every object follows Redisson's logic and is tested with Redisson's own tests, ported to Rust. **Stable** objects are also thin wrappers over Redis commands or pass the fault-injection tests (`tests/chaos.rs`) and the Sentinel and Cluster failover tests. **Experimental** objects are not yet tested under faults, and their API may still change.
 
@@ -381,6 +382,29 @@ limiter.acquire(1).await?; // or wait until it is allowed
 ```
 
 `RateType::Overall` shares the limit between all clients. `RateType::PerClient` gives each client its own.
+
+### Scripts
+
+Run your own Lua script, like Redisson's `RScript`. It sends `EVALSHA` first and the whole script only when Redis does not have it yet.
+
+```rust
+use redissun::{LuaScript, StringCodec};
+
+let script = client.with_codec(StringCodec).script();
+let visits: i64 = script
+    .eval("return redis.call('INCRBY', KEYS[1], ARGV[1])")
+    .key("visits")
+    .arg(&5)
+    .await?;
+
+// keep a script and run it many times
+let incr = LuaScript::new("return redis.call('INCRBY', KEYS[1], ARGV[1])");
+let visits: i64 = script.run(&incr).key("visits").arg(&1).await?;
+```
+
+Arguments go through the codec, as in Redisson. With the default JSON codec a string reaches Lua with quotes, so use `StringCodec` for plain text and numbers. The reply becomes `()`, `bool`, `i64`, `f64`, `String`, `Bytes`, `Decoded<V>` (decoded by the codec), `Option<T>` or `Vec<T>`. `.read_only()` uses `EVAL_RO`. Other methods: `eval_sha`, `script_load`, `script_exists`, `script_flush`, `script_kill`.
+
+`client.function()` loads and calls Redis functions (`FUNCTION LOAD`, `FCALL`), like Redisson's `RFunction`.
 
 ### Common methods
 

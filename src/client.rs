@@ -22,6 +22,7 @@ use crate::multi_lock::{LockTarget, MultiLock};
 use crate::object::{tagged, Key};
 use crate::rate_limiter::RateLimiter;
 use crate::rw_lock::RwLock;
+use crate::script::{Function, Script};
 use crate::semaphore::Semaphore;
 use crate::sorted_set::SortedSet;
 use crate::stream::Stream;
@@ -65,6 +66,16 @@ impl<C: Codec> Client<C> {
     /// ```
     pub fn with_codec<N: Codec>(&self, codec: N) -> Client<N> {
         Client::from_parts(self.core.clone(), codec)
+    }
+
+    /// Returns a [`Script`] that runs Lua scripts, like Redisson's `getScript()`. Arguments and [`Decoded`](crate::Decoded) replies use this client's codec.
+    pub fn script(&self) -> Script<C> {
+        Script::new(self.core.clone(), self.codec.clone())
+    }
+
+    /// Returns a [`Function`] that loads and calls Redis functions, like Redisson's `getFunction()`.
+    pub fn function(&self) -> Function<C> {
+        Function::new(self.core.clone(), self.codec.clone())
     }
 
     /// Starts a [`Batch`] that sends several commands in one round trip.
