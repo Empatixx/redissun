@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.0] - unreleased
+
+### Added
+
+- `HashSetCache`: a set in which every value can expire (`insert(..).ttl(d)`, `insert_nx`, `remove`, `contains`, `entry_ttl`, `len`, `evict_expired`, `iter`), stored like Redisson's `RedissonSetCache` with a background task that deletes expired values.
+- `LockGuard::unlock` now finishes the release even when the caller cancels it.
+
+### Fixed
+
+- `DelayedQueue` no longer sleeps for up to an hour when its pub/sub subscription failed. Its idle sleep is now one minute.
+
 ## [0.10.0] - unreleased
 
 ### Added

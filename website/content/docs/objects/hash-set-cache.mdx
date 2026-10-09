@@ -1,0 +1,31 @@
+---
+title: HashSetCache
+description: A set whose values expire.
+---
+
+A `HashSetCache` is a set in which every value can have its own time to live. It is the set version of `HashMapCache`.
+
+```rust
+let seen = client.hash_set_cache::<String>("seen");
+
+seen.insert("request-1").ttl(Duration::from_secs(60)).await?;
+let again = seen.contains("request-1").await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(&v)` | returns `true` when the value was new. Add `.ttl(time)` to make it expire; a new insert replaces the old time limit. |
+| `insert_nx(&v)` | adds only when there is no live value and keeps the time limit of a live one. Takes `.ttl(time)` too. |
+| `remove(&v)`, `contains(&v)` | work on live values only |
+| `entry_ttl(&v)` | time left. `None` means no limit or not in the set. |
+| `len()`, `is_empty()`, `clear()` | `len` counts live values |
+| `evict_expired()` | deletes expired values now and returns how many |
+| `iter()` | a stream of the live values |
+
+Time comes from the Redis server, so clients with different clocks agree. Expired values are hidden at once. A background task deletes them: it wakes up every `eviction_interval` when there is work, and less often when there is none.
+
+## Redis keys
+
+One sorted set `{name}`. The score of each value is its expiry time in milliseconds, and a value without a limit gets a very large score. This is the scheme of Redisson's `RedissonSetCache`.

@@ -11,6 +11,7 @@ use crate::fair_lock::FairLock;
 use crate::fenced_lock::FencedLock;
 use crate::hash_map::HashMap;
 use crate::hash_map_cache::HashMapCache;
+use crate::hash_set_cache::HashSetCache;
 use crate::hyper_log_log::HyperLogLog;
 use crate::latch::CountDownLatch;
 use crate::lock::Lock;
@@ -109,6 +110,15 @@ impl<C: Codec> Client<C> {
     /// Returns the [`SortedSet`] stored under `name`.
     pub fn sorted_set<V>(&self, name: impl Into<Arc<str>>) -> SortedSet<V, C> {
         SortedSet::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`HashSetCache`] stored under `name`.
+    pub fn hash_set_cache<V>(&self, name: impl Into<Arc<str>>) -> HashSetCache<V, C> {
+        let name: Arc<str> = name.into();
+        HashSetCache::new(
+            Key::new(self.core.clone(), tagged(&name)),
+            self.codec.clone(),
+        )
     }
 
     /// Returns the [`Topic`] named `name`.

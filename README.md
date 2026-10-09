@@ -69,6 +69,7 @@ async fn main() -> redissun::Result<()> {
 | `HyperLogLog` | `RHyperLogLog` | HyperLogLog |
 | `BloomFilter` | `RBloomFilter` | string and hash |
 | `HashMapCache` | `RMapCache` | hash and sorted set |
+| `HashSetCache` | `RSetCache` | sorted set |
 | `Topic` | `RTopic` | pub/sub |
 | `AtomicI64` | `RAtomicLong` | string |
 | `Semaphore` | `RSemaphore` | string and pub/sub |
@@ -162,6 +163,15 @@ sessions.insert("abc", &user).ttl(Duration::from_secs(60)).await?;
 ```
 
 Entries can also expire when nobody reads them (`.max_idle(duration)`). Time comes from the Redis server, and a background task deletes expired entries. `set_max_size` limits the size (LRU or LFU), and `events()` tells you about every change.
+
+### HashSetCache
+
+A set whose values expire.
+
+```rust
+let seen = client.hash_set_cache::<String>("seen");
+seen.insert("request-1").ttl(std::time::Duration::from_secs(60)).await?;
+```
 
 ### Topic
 
