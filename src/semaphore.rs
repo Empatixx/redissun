@@ -1,9 +1,8 @@
-use crate::error::{Error, Result};
-use crate::lock::{request_latch, REQUEST_LATCH_TTL};
-use crate::object::{HasKey, Key};
+use crate::error::Result;
+use crate::object::{millis, HasKey, Key};
 use crate::pending::Pending;
 use crate::shield::shielded;
-use crate::wait::{wait_on, SET_IF_ABSENT_AND_PUBLISH};
+use crate::wait::wait_on;
 use bytes::Bytes;
 use fred::types::scripts::Script;
 use std::fmt;
@@ -11,17 +10,12 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::time::Instant;
-use uuid::Uuid;
 
 static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('EXISTS', KEYS[2]) == 1 then
-            return 1
-        end
-        local value = redis.call('GET', KEYS[1])
+        "local value = redis.call('GET', KEYS[1])
         if value ~= false and tonumber(value) >= tonumber(ARGV[1]) then
             redis.call('DECRBY', KEYS[1], ARGV[1])
-            redis.call('SET', KEYS[2], 1, 'PX', ARGV[2])
             return 1
         end
         return 0",
@@ -30,14 +24,35 @@ static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 
 static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local done = redis.call('GET', KEYS[2])
-        if done ~= false then
-            return tonumber(done)
+        "local value = redis.call('INCRBY', KEYS[1], ARGV[1])
+        redis.call('PUBLISH', KEYS[2], value)",
+    )
+});
+
+static RELEASE_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "if redis.call('EXISTS', KEYS[1]) == 0 then
+            return 0
         end
         local value = redis.call('INCRBY', KEYS[1], ARGV[1])
-        redis.call('SET', KEYS[2], value, 'PX', ARGV[3])
-        redis.call('PUBLISH', ARGV[2], value)
-        return value",
+        redis.call('PUBLISH', KEYS[2], value)
+        return 1",
+    )
+});
+
+static TRY_SET_PERMITS: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local value = redis.call('GET', KEYS[1])
+        if value == false then
+            if ARGV[2] ~= nil then
+                redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+            else
+                redis.call('SET', KEYS[1], ARGV[1])
+            end
+            redis.call('PUBLISH', KEYS[2], ARGV[1])
+            return 1
+        end
+        return 0",
     )
 });
 
@@ -47,10 +62,8 @@ static ADD_PERMITS: LazyLock<Script> = LazyLock::new(|| {
         if value == false then
             value = 0
         end
-        local total = tonumber(value) + tonumber(ARGV[1])
-        redis.call('SET', KEYS[1], total)
-        redis.call('PUBLISH', ARGV[2], total)
-        return total",
+        redis.call('SET', KEYS[1], value + ARGV[1])
+        redis.call('PUBLISH', KEYS[2], value + ARGV[1])",
     )
 });
 
@@ -66,19 +79,20 @@ static DRAIN: LazyLock<Script> = LazyLock::new(|| {
 });
 
 fn channel(name: &str) -> String {
-    format!("redissun_sc:{name}")
-}
-
-fn positive(permits: u64) -> Result<Bytes> {
-    if permits == 0 {
-        return Err(Error::Config("permits must be positive".into()));
+    if name.contains('{') {
+        format!("redissun_sc:{name}")
+    } else {
+        format!("redissun_sc:{{{name}}}")
     }
-    Ok(Bytes::from(permits.to_string()))
 }
 
-/// A shared counting semaphore, as in Redisson's `RSemaphore`.
+fn keys(key: &Key) -> Vec<String> {
+    vec![key.redis_key(), channel(key.name())]
+}
+
+/// A shared counting semaphore, modelled on Redisson's `RSemaphore`.
 ///
-/// The permits live in one Redis string. They have no owner, so permits held by a process that crashes are lost until someone releases or resets them.
+/// The permits live in one Redis string. They have no owner, so permits held by a process that crashes are lost until someone releases or resets them. Acquiring and releasing are sent once and never retried, so a command that times out is not applied twice; waiters are woken through the channel `redissun_sc:{name}`.
 #[derive(Clone)]
 pub struct Semaphore {
     key: Key,
@@ -96,21 +110,12 @@ impl HasKey for Semaphore {
     }
 }
 
-fn latched(key: &Key) -> (String, Bytes) {
-    (
-        request_latch(key, &Uuid::new_v4().to_string()),
-        Bytes::from(REQUEST_LATCH_TTL.as_millis().to_string()),
-    )
-}
-
-async fn release_permits(key: &Key, permits: Bytes) -> Result<i64> {
-    let (latch, ttl) = latched(key);
+async fn release_permits(key: &Key, permits: u64) -> Result<()> {
+    if permits == 0 {
+        return Ok(());
+    }
     key.core
-        .eval(
-            &RELEASE,
-            vec![key.redis_key(), latch],
-            vec![permits, Bytes::from(channel(key.name())), ttl],
-        )
+        .eval_no_retry::<()>(&RELEASE, keys(key), vec![Bytes::from(permits.to_string())])
         .await
 }
 
@@ -119,39 +124,42 @@ impl Semaphore {
         Self { key }
     }
 
-    /// Sets the number of permits, but only when the semaphore does not exist yet. Returns whether it was set.
-    pub async fn try_set_permits(&self, permits: u64) -> Result<bool> {
+    async fn set_permits(&self, permits: i64, ttl: Option<Duration>) -> Result<bool> {
+        let mut args = vec![Bytes::from(permits.to_string())];
+        if let Some(ttl) = ttl {
+            args.push(Bytes::from(millis(ttl)?.to_string()));
+        }
         let set: i64 = self
             .key
             .core
-            .eval(
-                &SET_IF_ABSENT_AND_PUBLISH,
-                vec![self.key.redis_key()],
-                vec![
-                    Bytes::from(permits.to_string()),
-                    Bytes::from(permits.to_string()),
-                    Bytes::from(channel(self.key.name())),
-                ],
-            )
+            .eval(&TRY_SET_PERMITS, keys(&self.key), args)
             .await?;
         Ok(set == 1)
     }
 
-    /// Adds permits, creating the semaphore when needed, and wakes waiters.
-    pub async fn add_permits(&self, permits: u64) -> Result<()> {
-        let _: i64 = self
-            .key
-            .core
-            .eval(
-                &ADD_PERMITS,
-                vec![self.key.redis_key()],
-                vec![positive(permits)?, Bytes::from(channel(self.key.name()))],
-            )
-            .await?;
-        Ok(())
+    /// Sets the number of permits, but only when the semaphore does not exist yet. Returns whether it was set.
+    pub async fn try_set_permits(&self, permits: i64) -> Result<bool> {
+        self.set_permits(permits, None).await
     }
 
-    /// Number of permits that can be acquired right now. A missing semaphore has 0.
+    /// Like [`Semaphore::try_set_permits`], and the semaphore is removed after `ttl`.
+    pub async fn try_set_permits_with_ttl(&self, permits: i64, ttl: Duration) -> Result<bool> {
+        self.set_permits(permits, Some(ttl)).await
+    }
+
+    /// Adds permits, creating the semaphore when needed, and wakes waiters. A negative number takes permits away, possibly below zero.
+    pub async fn add_permits(&self, permits: i64) -> Result<()> {
+        self.key
+            .core
+            .eval::<()>(
+                &ADD_PERMITS,
+                keys(&self.key),
+                vec![Bytes::from(permits.to_string())],
+            )
+            .await
+    }
+
+    /// Number of permits that can be acquired right now. A missing semaphore has 0; the number is negative after permits were taken away with [`Semaphore::add_permits`].
     pub async fn available_permits(&self) -> Result<i64> {
         self.key.get_i64_or_zero().await
     }
@@ -164,33 +172,47 @@ impl Semaphore {
             .await
     }
 
-    /// Returns `permits` to the semaphore by hand and wakes waiters. Use it for permits that were `forget`-ed.
+    /// Returns `permits` to the semaphore by hand, creating it when needed, and wakes waiters. Use it for permits that were `forget`-ed. Releasing 0 permits does nothing.
     pub async fn release(&self, permits: u64) -> Result<()> {
-        release_permits(&self.key, positive(permits)?).await?;
-        Ok(())
+        release_permits(&self.key, permits).await
     }
 
-    /// Waits until `permits` are available and takes them. Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out.
+    /// Returns `permits` only when the semaphore exists, and wakes waiters. Returns whether it did; releasing 0 permits returns `false`.
+    pub async fn release_if_exists(&self, permits: u64) -> Result<bool> {
+        if permits == 0 {
+            return Ok(false);
+        }
+        let released: i64 = self
+            .key
+            .core
+            .eval_no_retry(
+                &RELEASE_IF_EXISTS,
+                keys(&self.key),
+                vec![Bytes::from(permits.to_string())],
+            )
+            .await?;
+        Ok(released == 1)
+    }
+
+    /// Waits until `permits` are available and takes them. Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out. Acquiring 0 permits succeeds at once.
     pub fn acquire(&self, permits: u64) -> Pending<'_, Permits> {
         Pending::new(move |wait| self.acquire_inner(permits, wait))
     }
 
-    /// Takes `permits` if they are available right now; returns `None` otherwise.
+    /// Takes `permits` if they are available right now; returns `None` otherwise. Taking 0 permits always succeeds.
     pub async fn try_acquire(&self, permits: u64) -> Result<Option<Permits>> {
         self.acquire_inner(permits, Some(Duration::ZERO)).await
     }
 
-    async fn try_take(&self, permits: u64, argument: &Bytes) -> Result<Option<Permits>> {
+    async fn try_take(&self, permits: u64) -> Result<Option<Permits>> {
         let key = self.key.clone();
-        let argument = argument.clone();
         shielded(async move {
-            let (latch, ttl) = latched(&key);
             let taken: i64 = key
                 .core
-                .eval(
+                .eval_no_retry(
                     &TRY_ACQUIRE,
-                    vec![key.redis_key(), latch],
-                    vec![argument, ttl],
+                    vec![key.redis_key()],
+                    vec![Bytes::from(permits.to_string())],
                 )
                 .await?;
             Ok((taken == 1).then(|| Permits::new(key, permits)))
@@ -199,8 +221,10 @@ impl Semaphore {
     }
 
     async fn acquire_inner(&self, permits: u64, wait: Option<Duration>) -> Result<Option<Permits>> {
-        let argument = positive(permits)?;
-        if let Some(taken) = self.try_take(permits, &argument).await? {
+        if permits == 0 {
+            return Ok(Some(Permits::new(self.key.clone(), 0)));
+        }
+        if let Some(taken) = self.try_take(permits).await? {
             return Ok(Some(taken));
         }
         if wait.is_some_and(|wait| wait.is_zero()) {
@@ -209,7 +233,7 @@ impl Semaphore {
 
         let deadline = wait.map(|wait| Instant::now() + wait);
         wait_on(&self.key.core, &channel(self.key.name()), deadline, || {
-            self.try_take(permits, &argument)
+            self.try_take(permits)
         })
         .await
     }
@@ -260,8 +284,7 @@ impl Permits {
         let Some(held) = self.held.take() else {
             return Ok(());
         };
-        release_permits(&held.key, Bytes::from(held.count.to_string())).await?;
-        Ok(())
+        release_permits(&held.key, held.count).await
     }
 
     /// Keeps the permits taken: nothing is returned now or on drop. Return them later with [`Semaphore::release`].
@@ -277,7 +300,7 @@ impl Drop for Permits {
         };
         if let Some(runtime) = held.runtime {
             runtime.spawn(async move {
-                let _ = release_permits(&held.key, Bytes::from(held.count.to_string())).await;
+                let _ = release_permits(&held.key, held.count).await;
             });
         }
     }

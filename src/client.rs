@@ -76,11 +76,7 @@ impl<C: Codec> Client<C> {
 
     /// Returns the [`BloomFilter`] stored under `name`.
     pub fn bloom_filter<V>(&self, name: impl Into<Arc<str>>) -> BloomFilter<V, C> {
-        let name: Arc<str> = name.into();
-        BloomFilter::new(
-            Key::new(self.core.clone(), tagged(&name)),
-            self.codec.clone(),
-        )
+        BloomFilter::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Bucket`] stored under `name`.

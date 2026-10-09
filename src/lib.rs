@@ -56,7 +56,7 @@ mod vec;
 mod vec_deque;
 mod wait;
 
-pub use atomic_i64::AtomicI64;
+pub use atomic_i64::{AtomicI64, Comparison};
 pub use batch::{
     Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchResult,
     BatchSortedSet, BatchTopic, BatchVec, BatchVecDeque,
@@ -83,7 +83,7 @@ pub use lock::{Lock, LockGuard, LockRequest};
 pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard};
 pub use object::Object;
 pub use pending::{Pending, PendingTimeout};
-pub use rate_limiter::{RateLimiter, RateType};
+pub use rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
 pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use semaphore::{Permits, Semaphore};
 pub use sorted_set::SortedSet;

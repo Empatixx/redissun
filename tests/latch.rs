@@ -1,7 +1,9 @@
 mod common;
 
 use common::{client, subscribed_channels, unique};
-use redissun::{Error, Object};
+use redissun::Object;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 
@@ -153,7 +155,7 @@ async fn deleting_the_latch_opens_it_for_waiters() {
 #[tokio::test]
 async fn the_subscription_is_released_after_waiting() {
     let name = unique("latch");
-    let pattern = format!("redissun_countdownlatch__channel__{name}");
+    let pattern = format!("redissun_countdownlatch__channel__{{{name}}}");
     let latch = client().await.count_down_latch(name);
     latch.try_set_count(1).await.unwrap();
 
@@ -179,11 +181,208 @@ async fn debug_shows_the_name() {
 }
 
 #[tokio::test]
-async fn a_zero_count_is_rejected_so_no_dead_key_is_left_behind() {
+async fn a_zero_count_creates_an_open_latch() {
     let latch = client().await.count_down_latch(unique("latch"));
-    assert!(matches!(
-        latch.try_set_count(0).await,
-        Err(Error::Config(_))
-    ));
+    assert!(latch.try_set_count(0).await.unwrap());
+    assert!(latch.exists().await.unwrap());
+    assert_eq!(latch.count().await.unwrap(), 0);
+    timeout(Duration::from_secs(2), latch.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    latch.count_down().await.unwrap();
     assert!(!latch.exists().await.unwrap());
+}
+
+#[tokio::test]
+async fn test_await_timeout() {
+    let client = client().await;
+    let name = unique("latch1");
+    let latch = client.count_down_latch(name.clone());
+    assert!(latch.try_set_count(1).await.unwrap());
+    let counting = client.count_down_latch(name);
+    let counter = tokio::spawn(async move {
+        sleep(Duration::from_millis(500)).await;
+        counting.count_down().await.unwrap();
+    });
+    assert_eq!(latch.count().await.unwrap(), 1);
+    let opened = latch
+        .wait()
+        .timeout(Duration::from_millis(550))
+        .await
+        .unwrap();
+    assert!(opened.is_some());
+    counter.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_await_timeout_fail() {
+    let client = client().await;
+    let name = unique("latch1");
+    let latch = client.count_down_latch(name.clone());
+    assert!(latch.try_set_count(1).await.unwrap());
+    let counting = client.count_down_latch(name);
+    let counter = tokio::spawn(async move {
+        sleep(Duration::from_millis(1000)).await;
+        counting.count_down().await.unwrap();
+    });
+    assert_eq!(latch.count().await.unwrap(), 1);
+    let opened = latch
+        .wait()
+        .timeout(Duration::from_millis(500))
+        .await
+        .unwrap();
+    assert!(opened.is_none());
+    counter.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_multi_await() {
+    let client = client().await;
+    let name = unique("latch");
+    let latch = client.count_down_latch(name.clone());
+    latch.try_set_count(5).await.unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut waiters = Vec::new();
+    for _ in 0..5 {
+        let waiting = client.count_down_latch(name.clone());
+        let counter = counter.clone();
+        waiters.push(tokio::spawn(async move {
+            if waiting
+                .wait()
+                .timeout(Duration::from_secs(10))
+                .await
+                .unwrap()
+                .is_some()
+            {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    for _ in 0..5 {
+        let counting = client.count_down_latch(name.clone());
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+            counting.count_down().await.unwrap();
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(7);
+    while latch.count().await.unwrap() != 0 {
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(50)).await;
+    }
+    for waiter in waiters {
+        timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn test_count_down() {
+    let client = client().await;
+    let latch = client.count_down_latch(unique("latch"));
+    latch.try_set_count(2).await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 2);
+    latch.count_down().await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 1);
+    latch.count_down().await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 0);
+    latch.wait().await.unwrap();
+    latch.count_down().await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 0);
+    latch.wait().await.unwrap();
+    latch.count_down().await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 0);
+    latch.wait().await.unwrap();
+
+    let latch1 = client.count_down_latch(unique("latch1"));
+    latch1.try_set_count(1).await.unwrap();
+    latch1.count_down().await.unwrap();
+    assert_eq!(latch1.count().await.unwrap(), 0);
+    latch1.count_down().await.unwrap();
+    assert_eq!(latch1.count().await.unwrap(), 0);
+    latch1.wait().await.unwrap();
+
+    let latch2 = client.count_down_latch(unique("latch2"));
+    latch2.try_set_count(1).await.unwrap();
+    latch2.count_down().await.unwrap();
+    latch2.wait().await.unwrap();
+    latch2.wait().await.unwrap();
+
+    let latch3 = client.count_down_latch(unique("latch3"));
+    assert_eq!(latch3.count().await.unwrap(), 0);
+    latch3.wait().await.unwrap();
+
+    let latch4 = client.count_down_latch(unique("latch4"));
+    assert_eq!(latch4.count().await.unwrap(), 0);
+    latch4.count_down().await.unwrap();
+    assert_eq!(latch4.count().await.unwrap(), 0);
+    latch4.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_delete() {
+    let latch = client().await.count_down_latch(unique("latch"));
+    latch.try_set_count(1).await.unwrap();
+    assert!(latch.del().await.unwrap());
+}
+
+#[tokio::test]
+async fn test_delete_failed() {
+    let latch = client().await.count_down_latch(unique("latch"));
+    assert!(!latch.del().await.unwrap());
+}
+
+#[tokio::test]
+async fn test_try_set_count() {
+    let latch = client().await.count_down_latch(unique("latch"));
+    assert!(latch.try_set_count(1).await.unwrap());
+    assert!(!latch.try_set_count(2).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_count() {
+    let latch = client().await.count_down_latch(unique("latch"));
+    assert_eq!(latch.count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_single_count_down_await_single_instance() {
+    let iterations = 12;
+    let client = client().await;
+    let name = unique("latch");
+    let latch = client.count_down_latch(name.clone());
+    latch.try_set_count(iterations as u64).await.unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    let mut waiters = Vec::new();
+    for _ in 0..iterations {
+        let waiting = client.count_down_latch(name.clone());
+        waiters.push(tokio::spawn(async move {
+            waiting.wait().await.unwrap();
+            assert_eq!(waiting.count().await.unwrap(), 0);
+        }));
+    }
+    for _ in 0..iterations {
+        let counting = client.count_down_latch(name.clone());
+        let counter = counter.clone();
+        tokio::spawn(async move {
+            counting.count_down().await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+    for waiter in waiters {
+        timeout(Duration::from_secs(10), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while counter.load(Ordering::SeqCst) != iterations {
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(10)).await;
+    }
 }
