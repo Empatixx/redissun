@@ -309,7 +309,11 @@ async fn a_response_timeout_fails_the_execution_after_the_retries() {
         .response_timeout(Duration::from_nanos(1))
         .retry_attempts(2)
         .retry_interval(Duration::from_millis(150));
-    let handle = batch.atomic_i64(unique("batch")).incr();
+    let name = unique("batch");
+    let handle = batch.atomic_i64(name.clone()).incr();
+    for _ in 0..5000 {
+        let _ = batch.atomic_i64(name.clone()).get();
+    }
     let started = std::time::Instant::now();
     assert!(matches!(batch.execute().await, Err(Error::Timeout)));
     let elapsed = started.elapsed();
@@ -322,7 +326,11 @@ async fn a_response_timeout_fails_the_execution_after_the_retries() {
 async fn by_default_a_batch_is_retried_four_times_with_jitter_like_redisson() {
     let client = client().await;
     let batch = client.batch().response_timeout(Duration::from_nanos(1));
-    let handle = batch.atomic_i64(unique("batch")).incr();
+    let name = unique("batch");
+    let handle = batch.atomic_i64(name.clone()).incr();
+    for _ in 0..5000 {
+        let _ = batch.atomic_i64(name.clone()).get();
+    }
     let started = std::time::Instant::now();
     assert!(matches!(batch.execute().await, Err(Error::Timeout)));
     let elapsed = started.elapsed();

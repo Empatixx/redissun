@@ -324,7 +324,8 @@ async fn multi_lock_never_deadlocks_and_stays_exclusive_under_faults() {
         let names = names.clone();
         let states = states.clone();
         async move {
-            let picked: std::vec::Vec<usize> = (0..3).map(|i| (worker + i * 2) % 5).collect();
+            let mut picked: std::vec::Vec<usize> = (0..3).map(|i| (worker + i * 2) % 5).collect();
+            picked.sort_unstable();
             let multi = client
                 .multi_lock(picked.iter().map(|&i| client.lock(names[i].clone())))
                 .unwrap();

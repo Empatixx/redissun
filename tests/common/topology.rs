@@ -212,7 +212,7 @@ fn field(reply: &str, name: &str) -> Option<String> {
 
 fn free_base(count: u16) -> u16 {
     loop {
-        let base = 20_000 + (uuid::Uuid::new_v4().as_u128() % 30_000) as u16;
+        let base = 20_000 + (uuid::Uuid::new_v4().as_u128() % 12_000) as u16;
         let free = (base..base + count).all(|port| TcpListener::bind(("127.0.0.1", port)).is_ok());
         if free {
             return base;
