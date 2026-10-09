@@ -38,6 +38,23 @@ static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
+static FENCED_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "if redis.call('EXISTS', KEYS[1]) == 0 then
+            redis.call('HSET', KEYS[1], ARGV[2], 1)
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('INCR', KEYS[2])
+            return nil
+        end
+        if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
+            redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            return nil
+        end
+        return redis.call('PTTL', KEYS[1])",
+    )
+});
+
 static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
@@ -202,6 +219,7 @@ pub(crate) enum Mode {
     Read,
     Write,
     Fair,
+    Fenced,
 }
 
 fn write_field(owner: &str) -> String {
@@ -210,6 +228,10 @@ fn write_field(owner: &str) -> String {
 
 fn timeout_prefix(key: &Key, owner: &str) -> String {
     format!("{}:{}:rwlock_timeout", key.redis_key(), owner)
+}
+
+pub(crate) fn token_key(key: &Key) -> String {
+    format!("redissun__lock_token:{}", key.redis_key())
 }
 
 pub(crate) fn channel(name: &str) -> String {
@@ -259,7 +281,7 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode)
                 )
                 .await?
         }
-        Mode::Exclusive => {
+        Mode::Exclusive | Mode::Fenced => {
             key.core
                 .eval(
                     &RELEASE,
@@ -296,7 +318,7 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration, mode: Mode) -
                 )
                 .await?
         }
-        Mode::Exclusive | Mode::Fair => {
+        Mode::Exclusive | Mode::Fair | Mode::Fenced => {
             key.core
                 .eval(
                     &RENEW,
@@ -487,6 +509,11 @@ pub(crate) async fn acquire(
                         vec![key.redis_key()],
                         vec![argument, Bytes::from(write_field(&owner))],
                     ),
+                    Mode::Fenced => (
+                        &FENCED_ACQUIRE,
+                        vec![key.redis_key(), token_key(&key)],
+                        vec![argument, Bytes::from(owner.clone())],
+                    ),
                     Mode::Fair => (
                         &fair::ACQUIRE,
                         fair::keys(&key),
@@ -511,7 +538,14 @@ pub(crate) async fn acquire(
                                 cancel.clone(),
                             );
                         }
-                        Attempt::Acquired(LockGuard::new(key, owner, lease, mode, cancel))
+                        let token = if mode == Mode::Fenced {
+                            Some(key.core.redis().get::<u64, _>(token_key(&key)).await?)
+                        } else {
+                            None
+                        };
+                        Attempt::Acquired(
+                            LockGuard::new(key, owner, lease, mode, cancel).with_token(token),
+                        )
                     }
                 })
             })

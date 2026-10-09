@@ -4,6 +4,7 @@ use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
 use crate::fair_lock::FairLock;
+use crate::fenced_lock::FencedLock;
 use crate::hash_map::HashMap;
 use crate::hash_map_cache::HashMapCache;
 use crate::latch::CountDownLatch;
@@ -100,6 +101,12 @@ impl<C: Codec> Client<C> {
     pub fn fair_lock(&self, name: impl Into<Arc<str>>) -> FairLock {
         let name: Arc<str> = name.into();
         FairLock::new(Key::new(self.core.clone(), tagged(&name)))
+    }
+
+    /// Returns the [`FencedLock`] named `name`.
+    pub fn fenced_lock(&self, name: impl Into<Arc<str>>) -> FencedLock {
+        let name: Arc<str> = name.into();
+        FencedLock::new(Key::new(self.core.clone(), tagged(&name)))
     }
 
     /// Returns the [`RwLock`] named `name`.

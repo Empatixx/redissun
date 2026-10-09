@@ -1,0 +1,34 @@
+---
+title: FencedLock
+description: A lock that gives every new owner a higher number.
+---
+
+A `FencedLock` works like `Lock`. Every time a new owner takes it, the owner gets a higher number, the fencing token.
+
+```rust
+let lock = client.fenced_lock("report");
+
+let guard = lock.lock().await?;
+let token = guard.fencing_token().unwrap();
+storage.write(data, token).await?;
+guard.unlock().await?;
+```
+
+## Why a token
+
+A program can pause for a long time, for example in a garbage collection or a slow network. Its lease can run out, another program takes the lock, and then the first one wakes up and still writes. If the storage remembers the highest token it has seen and refuses older ones, the late write is refused.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `lock()` | waits for the lock. Add `.timeout(wait)` or `.lease(time)`. |
+| `try_lock()` | returns `None` at once when the lock is busy |
+| `current_token()` | the latest token, or 0 |
+| `is_locked()`, `is_held_by_current()`, `hold_count()`, `force_unlock()` | as in `Lock` |
+
+`LockGuard::fencing_token()` returns the token. Reentrant holds of one owner share it.
+
+## Redis keys
+
+The lock is the hash `{name}`. The counter is the string `redissun__lock_token:{name}`. It is not removed by `del`, so tokens never go back.

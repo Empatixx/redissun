@@ -16,6 +16,9 @@ description: How Redisson names and behaviour map to redissun.
 | `RReadWriteLock` | `RwLock` |
 | `RFairLock` | `FairLock` |
 | `RScoredSortedSet` | `SortedSet` |
+| `RPriorityQueue`, `RPriorityBlockingQueue` | `SortedSet` with `pop_first_wait` |
+| `RFencedLock` | `FencedLock` |
+| `RBlockingQueue` | `VecDeque` with `pop_front_wait` |
 | `RMapCache` | `HashMapCache` |
 | `RTopic` | `Topic` |
 | `RAtomicLong` | `AtomicI64` |

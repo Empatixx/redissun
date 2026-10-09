@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0] - unreleased
+
+### Added
+
+- `FencedLock`: a `Lock` whose every new acquisition gets a higher fencing token, read with `LockGuard::fencing_token`. It also has `current_token`.
+- `SortedSet::pop_first_wait` and `pop_last_wait` block until a value arrives (`BZPOPMIN`, `BZPOPMAX`), so a `SortedSet` works as a priority queue. Add `.timeout(duration)` to limit the wait.
+
 ## [0.7.0] - unreleased
 
 ### Added

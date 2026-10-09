@@ -27,6 +27,7 @@ Values with the same score are ordered by their encoded bytes. Values are equal 
 | `len()`, `is_empty()`, `clear()` | |
 | `first()`, `last()` | read without removing |
 | `pop_first()`, `pop_last()` | remove and return, one owner gets each value |
+| `pop_first_wait()`, `pop_last_wait()` | wait for a value. Add `.timeout(wait)` to get `None` when `wait` runs out. |
 | `range(a..b)`, `rev_range(a..b)` | by position. The end is exclusive, like a slice. |
 | `range_by_score(min, max)` | both ends included. Use `f64::NEG_INFINITY` and `f64::INFINITY` for open ends. |
 | `count_by_score(min, max)`, `remove_by_score(min, max)` | |
@@ -36,4 +37,6 @@ Values come back with their score as `(V, f64)`. `SortedSet` also has the `Objec
 
 ## Priority queue
 
-`pop_first()` is atomic, so many workers can take the lowest score without getting the same value twice. It does not wait. When the set is empty it returns `None`.
+`pop_first()` is atomic, so many workers can take the lowest score without getting the same value twice. When the set is empty it returns `None`. `pop_first_wait()` waits for a value instead. A waiting call uses its own short-lived connection, like the blocking pops of `VecDeque`.
+
+A value is in the set once. Pushing it again only changes its priority.

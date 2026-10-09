@@ -61,7 +61,8 @@ async fn main() -> redissun::Result<()> {
 | `Lock` | `RLock` | hash and pub/sub |
 | `RwLock` | `RReadWriteLock` | hash, set, strings and pub/sub |
 | `FairLock` | `RFairLock` | hash, list, sorted set and pub/sub |
-| `SortedSet` | `RScoredSortedSet` | sorted set |
+| `SortedSet` | `RScoredSortedSet`, `RPriorityQueue` | sorted set |
+| `FencedLock` | `RFencedLock` | hash, string and pub/sub |
 | `HashMapCache` | `RMapCache` | hash and sorted set |
 | `Topic` | `RTopic` | pub/sub |
 | `AtomicI64` | `RAtomicLong` | string |
@@ -186,6 +187,16 @@ A lock that serves waiters in the order they arrived.
 let lock = client.fair_lock("jobs");
 let guard = lock.lock().await?;
 guard.unlock().await?;
+```
+
+### FencedLock
+
+A lock that gives every new owner a higher number. A resource can refuse a write with an older number.
+
+```rust
+let lock = client.fenced_lock("report");
+let guard = lock.lock().await?;
+let token = guard.fencing_token();
 ```
 
 ### SortedSet

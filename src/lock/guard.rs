@@ -19,6 +19,7 @@ struct Held {
 #[must_use = "dropping the guard releases the lock in the background; call unlock().await to release it deterministically"]
 pub struct LockGuard {
     held: Option<Held>,
+    token: Option<u64>,
 }
 
 impl LockGuard {
@@ -38,7 +39,18 @@ impl LockGuard {
                 cancel,
                 runtime: Handle::try_current().ok(),
             }),
+            token: None,
         }
+    }
+
+    pub(crate) fn with_token(mut self, token: Option<u64>) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// The fencing token of a [`FencedLock`](crate::FencedLock) hold, which grows with every new acquisition; `None` for other locks. Reentrant holds share the token.
+    pub fn fencing_token(&self) -> Option<u64> {
+        self.token
     }
 
     /// Releases one hold and stops the watchdog. Fails with `Error::LockNotHeld` when the lease already expired.

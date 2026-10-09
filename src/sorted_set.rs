@@ -1,6 +1,7 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
+use crate::pending::Pending;
 use bytes::Bytes;
 use fred::interfaces::SortedSetsInterface;
 use futures::{stream, Stream, TryStreamExt};
@@ -10,6 +11,7 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Range;
+use std::time::Duration;
 
 const PAGE: i64 = 100;
 
@@ -240,6 +242,48 @@ where
             .zpopmax(self.key.redis_key(), None)
             .await?;
         self.decode_one(raw)
+    }
+
+    /// Removes and returns the value with the lowest score, waiting for one to arrive (`BZPOPMIN`). Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out.
+    ///
+    /// Use `.timeout` for a time limit and not `tokio::time::timeout`: dropping a pending pop can lose a value that Redis has just handed over.
+    pub fn pop_first_wait(&self) -> Pending<'_, (V, f64)> {
+        Pending::new(move |wait| self.pop_blocking(true, wait))
+    }
+
+    /// Removes and returns the value with the highest score, waiting for one to arrive (`BZPOPMAX`). Add `.timeout(duration)` to wait at most that long.
+    pub fn pop_last_wait(&self) -> Pending<'_, (V, f64)> {
+        Pending::new(move |wait| self.pop_blocking(false, wait))
+    }
+
+    async fn pop_blocking(
+        &self,
+        first: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Option<(V, f64)>> {
+        let immediate = if first {
+            self.pop_first().await?
+        } else {
+            self.pop_last().await?
+        };
+        if immediate.is_some() || timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Ok(immediate);
+        }
+        let seconds = timeout.map_or(0.0, |timeout| timeout.as_secs_f64());
+        let connection = self.key.core.blocking_client().await?;
+        let reply: std::result::Result<Option<(String, Bytes, f64)>, fred::error::Error> = if first
+        {
+            connection.bzpopmin(self.key.redis_key(), seconds).await
+        } else {
+            connection.bzpopmax(self.key.redis_key(), seconds).await
+        };
+        match reply {
+            Ok(reply) => reply
+                .map(|(_, bytes, score)| Ok((self.codec.decode(&bytes)?, score)))
+                .transpose(),
+            Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn ranked(&self, range: Range<usize>, rev: bool) -> Result<Vec<(V, f64)>> {
