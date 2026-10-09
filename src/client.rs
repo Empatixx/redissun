@@ -22,6 +22,7 @@ use crate::rate_limiter::RateLimiter;
 use crate::rw_lock::RwLock;
 use crate::semaphore::Semaphore;
 use crate::sorted_set::SortedSet;
+use crate::stream::Stream;
 use crate::topic::Topic;
 use std::fmt;
 use std::sync::Arc;
@@ -128,6 +129,11 @@ impl<C: Codec> Client<C> {
         name: impl Into<Arc<str>>,
     ) -> LocalCachedMapBuilder<K, V, C> {
         LocalCachedMapBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`Stream`] stored under `name`.
+    pub fn stream<K, V>(&self, name: impl Into<Arc<str>>) -> Stream<K, V, C> {
+        Stream::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Topic`] named `name`.

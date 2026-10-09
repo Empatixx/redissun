@@ -72,6 +72,7 @@ async fn main() -> redissun::Result<()> {
 | `HashMapCache` | `RMapCache` | hash and sorted set |
 | `HashSetCache` | `RSetCache` | sorted set |
 | `Topic` | `RTopic` | pub/sub |
+| `Stream` | `RStream` | stream |
 | `AtomicI64` | `RAtomicLong` | string |
 | `Semaphore` | `RSemaphore` | string and pub/sub |
 | `CountDownLatch` | `RCountDownLatch` | string and pub/sub |
@@ -197,6 +198,19 @@ let news = client.topic::<String>("news");
 let mut subscriber = news.subscribe().await?;
 news.publish("hello").await?;
 let message = subscriber.recv().await?;
+```
+
+### Stream
+
+An append-only log with consumer groups, for messages that must not get lost.
+
+```rust
+let log = client.stream::<String, String>("orders");
+log.create_group("workers", &redissun::StreamId::zero()).await?;
+log.add([("id", "42")]).await?;
+for entry in log.read_group_wait("workers", "w1", None).await? {
+    log.ack("workers", &[entry.id]).await?;
+}
 ```
 
 ### RwLock

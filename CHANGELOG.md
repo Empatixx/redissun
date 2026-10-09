@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.0] - unreleased
+
+### Added
+
+- `Stream`: Redis Streams with consumer groups, as in Redisson's `RStream`. Entries: `add` (with `.max_len(n)`), `len`, `range`, `rev_range`, `remove`, `trim`, `read`, `read_wait`. Groups: `create_group`, `destroy_group`, `read_group`, `read_group_wait`, `ack`, `pending`, `pending_entries`, `claim`, `auto_claim`. Also `StreamId`, `StreamEntry`, `PendingSummary` and `PendingEntry`.
+
 ## [0.12.0] - unreleased
 
 ### Fixed

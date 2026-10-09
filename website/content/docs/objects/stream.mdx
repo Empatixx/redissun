@@ -1,0 +1,47 @@
+---
+title: Stream
+description: A log of entries with consumer groups.
+---
+
+A `Stream` is an append-only log. Programs add entries, and consumer groups hand every entry to one consumer, remember what was not acknowledged, and let other consumers take over the entries of a crashed one. Use it when a message must not get lost, which a `Topic` cannot promise.
+
+```rust
+let log = client.stream::<String, String>("orders");
+log.create_group("workers", &StreamId::zero()).await?;
+
+log.add([("id", "42"), ("item", "book")]).await?;
+
+for entry in log.read_group_wait("workers", "worker-1", Some(10)).await? {
+    // handle the entry
+    log.ack("workers", &[entry.id]).await?;
+}
+```
+
+An entry has an id (`StreamId`) and fields in the order you gave them. Fields are borrowed like every other argument.
+
+## Writing and reading
+
+| Method | Notes |
+|---|---|
+| `add(fields)` | returns the id. Add `.max_len(n)` to keep the stream at `n` entries. |
+| `len()`, `is_empty()` | |
+| `range(from, to, count)`, `rev_range(from, to, count)` | both ends included. `StreamId::min()` and `StreamId::max()` are the open ends. `count` is `Option<usize>`. |
+| `read(after, count)` | entries after an id, without waiting. `StreamId::zero()` returns everything. |
+| `read_wait(after, count)` | waits for new entries. Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `remove(ids)`, `trim(max_len)` | return how many were deleted |
+
+## Consumer groups
+
+| Method | Notes |
+|---|---|
+| `create_group(name, start)` | `StreamId::zero()` starts at the first entry, `StreamId::latest()` at new ones. Returns `false` when the group exists. It creates the stream if needed. |
+| `destroy_group(name)` | |
+| `read_group(group, consumer, count)` | takes entries nobody has received. They stay pending for the consumer. |
+| `read_group_wait(group, consumer, count)` | the same, waiting for new entries. Add `.timeout(wait)`. |
+| `ack(group, ids)` | removes entries from the pending list |
+| `pending(group)` | count, smallest and largest id, and the count for each consumer |
+| `pending_entries(group, count)` | id, consumer, idle time and delivery count |
+| `claim(group, consumer, min_idle, ids)` | takes over entries that were idle long enough |
+| `auto_claim(group, consumer, min_idle, start, count)` | the same without knowing the ids. Needs Redis 6.2. |
+
+A waiting call uses its own short-lived connection, like the blocking pops of `VecDeque`. Use `.timeout` for a time limit and not `tokio::time::timeout`, because dropping a pending call can lose entries that Redis has just handed over.

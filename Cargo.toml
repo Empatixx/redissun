@@ -1,6 +1,6 @@
 [package]
 name = "redissun"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Empatixx/redissun"
@@ -12,7 +12,7 @@ categories = ["asynchronous", "concurrency", "database"]
 
 [dependencies]
 bytes = "1"
-fred = { version = "10.1", default-features = false, features = ["i-std", "i-hashes", "i-lists", "i-sets", "i-sorted-sets", "i-client", "i-keys", "i-scripts", "i-pubsub", "i-cluster", "sentinel-client", "subscriber-client", "sha-1"] }
+fred = { version = "10.1", default-features = false, features = ["i-std", "i-hashes", "i-lists", "i-sets", "i-sorted-sets", "i-streams", "i-client", "i-keys", "i-scripts", "i-pubsub", "i-cluster", "sentinel-client", "subscriber-client", "sha-1"] }
 futures = "0.3"
 serde = "1"
 serde_json = "1"
