@@ -524,7 +524,7 @@ Every call returns `redissun::Result`. The error is `redissun::Error`. It can gr
 
 ## Requirements
 
-- Redis or Valkey 6.2 or newer.
+- Redis or Valkey 6.2 or newer. `Function` needs 7.0.
 - Rust 2021 edition.
 
 ## Documentation
@@ -538,14 +538,20 @@ Every call returns `redissun::Result`. The error is `redissun::Error`. It can gr
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
 ```
 
 Slower tests are marked `#[ignore]`. They need Docker and start their own Redis, a Sentinel setup and a Cluster:
 
 ```bash
 cargo test --test chaos --test sentinel --test cluster -- --ignored
+```
+
+The TLS tests need a TLS feature. They make their own certificates and start Redis with TLS, also as Sentinel and Cluster:
+
+```bash
+cargo test --features tls-rustls --test tls -- --include-ignored
 ```
 
 The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, which is faster, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
