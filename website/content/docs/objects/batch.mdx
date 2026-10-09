@@ -23,13 +23,25 @@ Objects from a batch do not talk to Redis. Their methods queue a command and ret
 
 ## Modes
 
+| Call | Redisson | Meaning |
+|---|---|---|
+| (default) | `IN_MEMORY` | the commands are held in memory and pipelined. Other clients' commands can run between them, and a failing command only fails its own handle. |
+| `.atomic()` | `IN_MEMORY_ATOMIC` | held in memory and run in `MULTI`/`EXEC`, so nothing runs between them |
+| `.stored_in_redis()` | `REDIS_WRITE_ATOMIC` | each command is sent to Redis when you queue it and waits in a `MULTI` transaction on a dedicated connection. `execute()` runs `EXEC`. Nothing is held in memory, and nothing is applied if you drop the batch. |
+
+Redis does not roll back a transaction. A command that fails at run time fails only its own handle, and the others are applied. `REDIS_READ_ATOMIC` is the same as `stored_in_redis` but reads from a replica. redissun does not route reads to replicas, so there is no separate read mode.
+
+## Options
+
 | Call | Meaning |
 |---|---|
-| (default) | the commands are pipelined. Other clients' commands can run between them, and one failing command only fails its own handle. |
-| `.atomic()` | the commands run in `MULTI`/`EXEC`, so nothing runs between them |
-| `.skip_result()` | the replies are dropped, which saves bandwidth for writes. The handles then give `Error::Config`. |
+| `.skip_result()` | the handles do not get the replies and resolve to `Error::Config`. If a command failed, `execute()` still returns that error. |
+| `.response_timeout(time)` | `execute()` fails with `Error::Timeout` when Redis does not answer in time |
+| `.retry_attempts(n)`, `.retry_interval(time)` | send the batch again when the connection fails or the response times out. A retried write can be applied twice. Default is 0 retries and 1.5 seconds. Not available with `stored_in_redis`. |
+| `.sync(slaves, timeout)` | after the commands, wait until `slaves` replicas have them (`WAIT`). `BatchResult::synced_slaves` says how many did. |
+| `.sync_aof(local, slaves, timeout)` | the same with `WAITAOF`, which also waits for fsync. Needs Redis 7.2. |
 
-`execute()` returns how many commands were sent. If you drop a batch without executing it, its handles give `Error::Config`. If you do not need a reply, `drop` the handle.
+`execute()` returns a `BatchResult` with the number of `commands` and `synced_slaves`. `discard()` throws the queued commands away, and their handles resolve to `Error::Config`. If you drop a batch without executing it, the handles do the same. If you do not need a reply, `drop` the handle.
 
 ## What can be queued
 

@@ -58,8 +58,8 @@ mod wait;
 
 pub use atomic_i64::AtomicI64;
 pub use batch::{
-    Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchSortedSet,
-    BatchTopic, BatchVec, BatchVecDeque,
+    Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchResult,
+    BatchSortedSet, BatchTopic, BatchVec, BatchVecDeque,
 };
 pub use bit_set::BitSet;
 pub use bloom_filter::BloomFilter;
