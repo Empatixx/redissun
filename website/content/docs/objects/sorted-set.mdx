@@ -29,9 +29,9 @@ Values with the same score are ordered by their encoded bytes. Values are equal 
 | `pop_first()`, `pop_last()` | remove and return, one owner gets each value |
 | `pop_first_wait()`, `pop_last_wait()` | wait for a value. Add `.timeout(wait)` to get `None` when `wait` runs out. |
 | `range(a..b)`, `rev_range(a..b)` | by position. The end is exclusive, like a slice. |
-| `range_by_score(min, max)` | both ends included. Use `f64::NEG_INFINITY` and `f64::INFINITY` for open ends. |
-| `count_by_score(min, max)`, `remove_by_score(min, max)` | |
-| `iter()` | a stream of `(value, score)`, one page at a time |
+| `range_by_score(a..=b)` | any `f64` range: `1.0..`, `..=3.0`, `..`, or `(Bound::Excluded(a), Bound::Included(b))` |
+| `count_by_score(range)`, `remove_by_score(range)` | |
+| `iter()` | a stream of `(value, score)` read with `ZSCAN`; the order is not guaranteed |
 
 Values come back with their score as `(V, f64)`. `SortedSet` also has the `Object` methods.
 

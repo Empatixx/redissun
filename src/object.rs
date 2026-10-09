@@ -1,10 +1,50 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
+use bytes::Bytes;
 use fred::interfaces::KeysInterface;
+use fred::types::scripts::Script;
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+
+static EXPIRE_ALL: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local result = 0
+        for j = 1, #KEYS, 1 do
+            if redis.call('PEXPIRE', KEYS[j], ARGV[1]) == 1 then
+                result = 1
+            end
+        end
+        return result",
+    )
+});
+
+static PERSIST_ALL: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local result = 0
+        for j = 1, #KEYS, 1 do
+            if redis.call('PERSIST', KEYS[j]) == 1 then
+                result = 1
+            end
+        end
+        return result",
+    )
+});
+
+static RENAME_ALL: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local half = #KEYS / 2
+        for j = 1, half, 1 do
+            if redis.call('EXISTS', KEYS[j]) == 1 then
+                redis.call('RENAME', KEYS[j], KEYS[half + j])
+            else
+                redis.call('DEL', KEYS[half + j])
+            end
+        end
+        return 1",
+    )
+});
 
 /// Operations on the Redis key behind a distributed object.
 pub trait Object {
@@ -14,13 +54,14 @@ pub trait Object {
     fn del(&self) -> impl Future<Output = Result<bool>> + Send;
     /// Returns whether the key exists.
     fn exists(&self) -> impl Future<Output = Result<bool>> + Send;
-    /// Renames the key.
+    /// Renames the key, and any companion keys with it, in one atomic step.
+    /// Fails when a key without companions does not exist. This handle keeps its old name: get a new handle for `new_name`.
     fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send;
-    /// Sets a time to live; returns whether it was applied.
+    /// Sets a time to live on the key and its companion keys atomically; returns whether any of them got it.
     fn expire(&self, ttl: Duration) -> impl Future<Output = Result<bool>> + Send;
     /// Remaining time to live, or `None` when the key has no expiry or does not exist.
     fn ttl(&self) -> impl Future<Output = Result<Option<Duration>>> + Send;
-    /// Removes the expiry; returns whether one was removed.
+    /// Removes the expiry from the key and its companion keys atomically; returns whether any was removed.
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send;
 }
 
@@ -33,6 +74,14 @@ pub(crate) fn tagged(name: &str) -> String {
         name.to_string()
     } else {
         format!("{{{name}}}")
+    }
+}
+
+pub(crate) fn block_seconds(timeout: Duration) -> f64 {
+    if timeout.is_zero() {
+        0.0
+    } else {
+        timeout.as_secs().max(1) as f64
     }
 }
 
@@ -92,22 +141,54 @@ impl Key {
     }
 
     pub(crate) async fn expire_all(&self, ttl: Duration, companions: Vec<String>) -> Result<bool> {
-        let applied = self.expire(ttl).await?;
-        for companion in companions {
-            self.core
-                .redis()
-                .pexpire::<bool, _>(companion, millis(ttl)?, None)
-                .await?;
+        if companions.is_empty() {
+            return self.expire(ttl).await;
         }
-        Ok(applied)
+        let applied: i64 = self
+            .core
+            .eval(
+                &EXPIRE_ALL,
+                self.with(companions),
+                vec![Bytes::from(millis(ttl)?.to_string())],
+            )
+            .await?;
+        Ok(applied == 1)
     }
 
     pub(crate) async fn persist_all(&self, companions: Vec<String>) -> Result<bool> {
-        let cleared = self.persist().await?;
-        for companion in companions {
-            self.core.redis().persist::<bool, _>(companion).await?;
+        if companions.is_empty() {
+            return self.persist().await;
         }
-        Ok(cleared)
+        let cleared: i64 = self
+            .core
+            .eval(&PERSIST_ALL, self.with(companions), Vec::new())
+            .await?;
+        Ok(cleared == 1)
+    }
+
+    pub(crate) async fn rename_all(
+        &self,
+        new_name: &str,
+        companions: Vec<String>,
+        renamed: Vec<String>,
+    ) -> Result<()> {
+        if companions.is_empty() {
+            return self.rename(new_name).await;
+        }
+        let keys = self
+            .with(companions)
+            .into_iter()
+            .chain(std::iter::once(new_name.to_string()))
+            .chain(renamed)
+            .collect();
+        self.core.eval::<i64>(&RENAME_ALL, keys, Vec::new()).await?;
+        Ok(())
+    }
+
+    fn with(&self, companions: Vec<String>) -> Vec<String> {
+        std::iter::once(self.redis_key())
+            .chain(companions)
+            .collect()
     }
 
     pub(crate) async fn command(
@@ -166,6 +247,10 @@ mod sealed {
         fn companions(&self) -> Vec<String> {
             Vec::new()
         }
+
+        fn renamed_companions(&self, _new_name: &str) -> Option<Vec<String>> {
+            self.companions().is_empty().then(Vec::new)
+        }
     }
 }
 
@@ -186,11 +271,13 @@ impl<T: HasKey + Sync> Object for T {
 
     fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send {
         let companions = self.companions();
+        let renamed = self.renamed_companions(new_name);
         async move {
-            if companions.is_empty() {
-                self.key().rename(new_name).await
-            } else {
-                Err(Error::Unsupported("rename".into()))
+            match renamed {
+                Some(renamed) if renamed.len() == companions.len() => {
+                    self.key().rename_all(new_name, companions, renamed).await
+                }
+                _ => Err(Error::Unsupported("rename".into())),
             }
         }
     }

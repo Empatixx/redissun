@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
 use bytes::Bytes;
-use fred::clients::{Client as RedisClient, Pool};
+use fred::clients::{Client as RedisClient, Pool, WithOptions};
 use fred::interfaces::{ClientInterface, ClientLike, LuaInterface};
 use fred::prelude::{Builder, Config, FromValue, Options, ReconnectPolicy};
 use fred::types::client::ClientKillFilter;
@@ -86,6 +86,10 @@ impl Core {
         })
     }
 
+    pub(crate) fn redis_no_retry(&self) -> WithOptions<RedisClient> {
+        no_retry(self.redis())
+    }
+
     pub(crate) fn client_id(&self) -> &str {
         &self.id
     }
@@ -113,10 +117,7 @@ impl Core {
         args: Vec<Bytes>,
     ) -> Result<R> {
         let client = self.redis();
-        let once = client.with_options(&Options {
-            max_attempts: Some(1),
-            ..Default::default()
-        });
+        let once = no_retry(client);
         let sha = script.sha1().clone();
         match once.evalsha(sha.clone(), keys.clone(), args.clone()).await {
             Err(error) if error.details().starts_with("NOSCRIPT") => {
@@ -126,6 +127,13 @@ impl Core {
             result => Ok(result?),
         }
     }
+}
+
+pub(crate) fn no_retry<C: ClientLike>(client: &C) -> WithOptions<C> {
+    client.with_options(&Options {
+        max_attempts: Some(1),
+        ..Default::default()
+    })
 }
 
 pub(crate) struct BlockingClient {

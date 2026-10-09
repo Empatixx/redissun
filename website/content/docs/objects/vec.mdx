@@ -22,11 +22,11 @@ Everything you send to Redis is borrowed: `names.push("jirka")` takes a `&str`. 
 | `extend(values)` | `RPUSH` | one request. An empty list does nothing. |
 | `pop()` | `RPOP` | returns `None` when empty |
 | `get(i)` | `LINDEX` | `None` when `i` is past the end |
-| `set(i, &v)` | `LSET` | `Error::OutOfRange` when `i` is past the end |
+| `set(i, &v)` | Lua script | the old value. `Error::OutOfRange` when `i` is past the end |
 | `insert(i, &v)` | Lua script | atomic, O(n). `Error::OutOfRange` when `i` is past the length. |
-| `remove(i)` | Lua script | atomic, O(n). Returns the removed value. |
-| `range(a..b)` | `LRANGE` | the end is not included, like a slice |
-| `trim(a..b)` | `LTRIM` | keeps only that range |
+| `remove(i)` | Lua script | atomic, O(n). Returns the removed value, `Error::OutOfRange` past the end. |
+| `range(a..b)` | `LRANGE` | any range: `a..b`, `a..=b`, `..` |
+| `trim(a..=b)` | `LTRIM` | keeps only that range |
 | `position(&v)` and `contains(&v)` | `LPOS` | first equal value |
 | `remove_value(&v)` | `LREM` | removes the first equal value |
 | `remove_all(&v)` | `LREM` | removes every equal value and returns how many |
