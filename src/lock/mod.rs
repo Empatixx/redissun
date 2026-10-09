@@ -5,7 +5,7 @@ mod watchdog;
 pub use guard::LockGuard;
 
 use crate::error::{Error, Result};
-use crate::object::{millis as to_millis, HasKey, Key};
+use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pending::{Pending, PendingTimeout};
 use crate::shield::shielded;
 use bytes::Bytes;
@@ -19,19 +19,27 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 const NO_EXPIRY_POLL: Duration = Duration::from_secs(1);
+const UNLOCK_RETRY_WINDOW: Duration = Duration::from_secs(10);
+pub(crate) const REQUEST_LATCH_TTL: Duration = Duration::from_secs(30);
 
 static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 0 then
+        "if redis.call('EXISTS', KEYS[2]) == 1 then
+            return nil
+        end
+        if redis.call('EXISTS', KEYS[1]) == 0 then
             redis.call('HSET', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], 1, 'PX', ARGV[3])
             return nil
         end
         if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
             redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], 1, 'PX', ARGV[3])
             return nil
         end
         return redis.call('PTTL', KEYS[1])",
@@ -40,15 +48,20 @@ static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 
 static FENCED_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('EXISTS', KEYS[1]) == 0 then
+        "if redis.call('EXISTS', KEYS[3]) == 1 then
+            return nil
+        end
+        if redis.call('EXISTS', KEYS[1]) == 0 then
             redis.call('HSET', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
             redis.call('INCR', KEYS[2])
+            redis.call('SET', KEYS[3], 1, 'PX', ARGV[3])
             return nil
         end
         if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
             redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[3], 1, 'PX', ARGV[3])
             return nil
         end
         return redis.call('PTTL', KEYS[1])",
@@ -57,16 +70,22 @@ static FENCED_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 
 static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
+        "local done = redis.call('GET', KEYS[2])
+        if done ~= false then
+            return tonumber(done)
+        end
+        if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
             return nil
         end
         local count = redis.call('HINCRBY', KEYS[1], ARGV[2], -1)
         if count > 0 then
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], 0, 'PX', ARGV[4])
             return 0
         end
         redis.call('DEL', KEYS[1])
         redis.call('PUBLISH', ARGV[3], 'unlocked')
+        redis.call('SET', KEYS[2], 1, 'PX', ARGV[4])
         return 1",
     )
 });
@@ -93,13 +112,17 @@ pub(crate) static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
 
 static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        "if redis.call('EXISTS', KEYS[3]) == 1 then
+            return nil
+        end
+        local mode = redis.call('HGET', KEYS[1], 'mode')
         if mode == false then
             redis.call('HSET', KEYS[1], 'mode', 'read')
             redis.call('HSET', KEYS[1], ARGV[2], 1)
             redis.call('SET', KEYS[2] .. ':1', 1)
             redis.call('PEXPIRE', KEYS[2] .. ':1', ARGV[1])
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[3], 1, 'PX', ARGV[4])
             return nil
         end
         if mode == 'read' or (mode == 'write' and redis.call('HEXISTS', KEYS[1], ARGV[3]) == 1) then
@@ -109,6 +132,7 @@ static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
             redis.call('PEXPIRE', hold, ARGV[1])
             local remain = redis.call('PTTL', KEYS[1])
             redis.call('PEXPIRE', KEYS[1], math.max(remain, ARGV[1]))
+            redis.call('SET', KEYS[3], 1, 'PX', ARGV[4])
             return nil
         end
         return redis.call('PTTL', KEYS[1])",
@@ -117,16 +141,21 @@ static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 
 static WRITE_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        "if redis.call('EXISTS', KEYS[2]) == 1 then
+            return nil
+        end
+        local mode = redis.call('HGET', KEYS[1], 'mode')
         if mode == false then
             redis.call('HSET', KEYS[1], 'mode', 'write')
             redis.call('HSET', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], 1, 'PX', ARGV[3])
             return nil
         end
         if mode == 'write' and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
             redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], 1, 'PX', ARGV[3])
             return nil
         end
         return redis.call('PTTL', KEYS[1])",
@@ -135,7 +164,11 @@ static WRITE_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 
 static READ_RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        "local done = redis.call('GET', KEYS[5])
+        if done ~= false then
+            return tonumber(done)
+        end
+        local mode = redis.call('HGET', KEYS[1], 'mode')
         if mode == false then
             redis.call('PUBLISH', KEYS[2], ARGV[1])
             return nil
@@ -161,21 +194,28 @@ static READ_RELEASE: LazyLock<Script> = LazyLock::new(|| {
             end
             if maxRemain > 0 then
                 redis.call('PEXPIRE', KEYS[1], maxRemain)
-                return 0
+                redis.call('SET', KEYS[5], 0, 'PX', ARGV[3])
+            return 0
             end
             if mode == 'write' then
-                return 0
+                redis.call('SET', KEYS[5], 0, 'PX', ARGV[3])
+            return 0
             end
         end
         redis.call('DEL', KEYS[1])
         redis.call('PUBLISH', KEYS[2], ARGV[1])
+        redis.call('SET', KEYS[5], 1, 'PX', ARGV[3])
         return 1",
     )
 });
 
 static WRITE_RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local mode = redis.call('HGET', KEYS[1], 'mode')
+        "local done = redis.call('GET', KEYS[3])
+        if done ~= false then
+            return tonumber(done)
+        end
+        local mode = redis.call('HGET', KEYS[1], 'mode')
         if mode == false then
             redis.call('PUBLISH', KEYS[2], ARGV[1])
             return nil
@@ -186,6 +226,7 @@ static WRITE_RELEASE: LazyLock<Script> = LazyLock::new(|| {
         local counter = redis.call('HINCRBY', KEYS[1], ARGV[3], -1)
         if counter > 0 then
             redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            redis.call('SET', KEYS[3], 0, 'PX', ARGV[4])
             return 0
         end
         redis.call('HDEL', KEYS[1], ARGV[3])
@@ -195,6 +236,7 @@ static WRITE_RELEASE: LazyLock<Script> = LazyLock::new(|| {
             redis.call('HSET', KEYS[1], 'mode', 'read')
         end
         redis.call('PUBLISH', KEYS[2], ARGV[1])
+        redis.call('SET', KEYS[3], 1, 'PX', ARGV[4])
         return 1",
     )
 });
@@ -242,7 +284,34 @@ fn lease_arg(duration: Duration) -> Result<Bytes> {
     Ok(Bytes::from(to_millis(duration)?.to_string()))
 }
 
+pub(crate) fn request_latch(key: &Key, request: &str) -> String {
+    format!("redissun__request_latch:{}:{request}", tagged(key.name()))
+}
+
 pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode) -> Result<()> {
+    let request = Uuid::new_v4().to_string();
+    let deadline = Instant::now() + UNLOCK_RETRY_WINDOW;
+    let mut pause = Duration::from_millis(50);
+    loop {
+        match release_once(key, owner, lease, mode, &request).await {
+            Err(Error::Redis(_)) if Instant::now() + pause < deadline => {
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(Duration::from_secs(1));
+            }
+            released => return released,
+        }
+    }
+}
+
+async fn release_once(
+    key: &Key,
+    owner: &str,
+    lease: Duration,
+    mode: Mode,
+    request: &str,
+) -> Result<()> {
+    let latch = request_latch(key, request);
+    let latch_ttl = Bytes::from(REQUEST_LATCH_TTL.as_millis().to_string());
     let message = Bytes::from_static(b"unlocked");
     let outcome: Option<i64> = match mode {
         Mode::Read => {
@@ -254,8 +323,9 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode)
                         channel(key.name()),
                         timeout_prefix(key, owner),
                         key.redis_key(),
+                        latch,
                     ],
-                    vec![message, Bytes::from(owner.to_string())],
+                    vec![message, Bytes::from(owner.to_string()), latch_ttl],
                 )
                 .await?
         }
@@ -263,8 +333,13 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode)
             key.core
                 .eval(
                     &WRITE_RELEASE,
-                    vec![key.redis_key(), channel(key.name())],
-                    vec![message, lease_arg(lease)?, Bytes::from(write_field(owner))],
+                    vec![key.redis_key(), channel(key.name()), latch],
+                    vec![
+                        message,
+                        lease_arg(lease)?,
+                        Bytes::from(write_field(owner)),
+                        latch_ttl,
+                    ],
                 )
                 .await?
         }
@@ -272,11 +347,12 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode)
             key.core
                 .eval(
                     &fair::RELEASE,
-                    fair::keys(key),
+                    [fair::keys(key), vec![latch]].concat(),
                     vec![
                         lease_arg(lease)?,
                         Bytes::from(owner.to_string()),
                         Bytes::from(fair::channel_prefix(key.name())),
+                        latch_ttl,
                     ],
                 )
                 .await?
@@ -285,11 +361,12 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode)
             key.core
                 .eval(
                     &RELEASE,
-                    vec![key.redis_key()],
+                    vec![key.redis_key(), latch],
                     vec![
                         lease_arg(lease)?,
                         Bytes::from(owner.to_string()),
                         Bytes::from(channel(key.name())),
+                        latch_ttl,
                     ],
                 )
                 .await?
@@ -530,6 +607,13 @@ pub(crate) async fn acquire(
                         ],
                     ),
                 };
+                let request = Uuid::new_v4().to_string();
+                let keys = [keys, vec![request_latch(&key, &request)]].concat();
+                let args = [
+                    args,
+                    vec![Bytes::from(REQUEST_LATCH_TTL.as_millis().to_string())],
+                ]
+                .concat();
                 let pttl: Option<i64> = key.core.eval(script, keys, args).await?;
                 Ok(match pttl {
                     Some(pttl) => Attempt::Busy(pttl),
@@ -544,14 +628,13 @@ pub(crate) async fn acquire(
                                 cancel.clone(),
                             );
                         }
+                        let guard = LockGuard::new(key.clone(), owner, lease, mode, cancel);
                         let token = if mode == Mode::Fenced {
                             Some(key.core.redis().get::<u64, _>(token_key(&key)).await?)
                         } else {
                             None
                         };
-                        Attempt::Acquired(
-                            LockGuard::new(key, owner, lease, mode, cancel).with_token(token),
-                        )
+                        Attempt::Acquired(guard.with_token(token))
                     }
                 })
             })

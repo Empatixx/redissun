@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod topology;
+
 use redissun::{Client, ClientBuilder};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -17,7 +19,7 @@ static CONTAINER_ID: OnceLock<String> = OnceLock::new();
 extern "C" fn remove_container() {
     if let Some(id) = CONTAINER_ID.get() {
         let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", id])
+            .args(["rm", "-f", "-v", id])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

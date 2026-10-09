@@ -25,7 +25,7 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = "0.2"
+redissun = "0.15"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -55,33 +55,36 @@ async fn main() -> redissun::Result<()> {
 
 ## Objects
 
-| redissun | Redisson | Stored in Redis as |
+| Object | Stored in Redis as | Status |
 |---|---|---|
-| `Bucket` | `RBucket` | string |
-| `HashMap` | `RMap` | hash |
-| `Vec` | `RList` | list |
-| `VecDeque` | `RDeque` | list |
-| `HashSet` | `RSet` | set |
-| `LocalCachedMap` | `RLocalCachedMap` | hash and pub/sub |
-| `Lock` | `RLock` | hash and pub/sub |
-| `RwLock` | `RReadWriteLock` | hash, set, strings and pub/sub |
-| `FairLock` | `RFairLock` | hash, list, sorted set and pub/sub |
-| `SortedSet` | `RScoredSortedSet`, `RPriorityQueue` | sorted set |
-| `FencedLock` | `RFencedLock` | hash, string and pub/sub |
-| `MultiLock` | `RedissonMultiLock` | the locks it holds |
-| `DelayedQueue` | `RDelayedQueue` | list, sorted set and pub/sub |
-| `BitSet` | `RBitSet` | string |
-| `HyperLogLog` | `RHyperLogLog` | HyperLogLog |
-| `BloomFilter` | `RBloomFilter` | string and hash |
-| `HashMapCache` | `RMapCache` | hash and sorted set |
-| `HashSetCache` | `RSetCache` | sorted set |
-| `Topic` | `RTopic` | pub/sub |
-| `Stream` | `RStream` | stream |
-| `Geo` | `RGeo` | sorted set |
-| `AtomicI64` | `RAtomicLong` | string |
-| `Semaphore` | `RSemaphore` | string and pub/sub |
-| `CountDownLatch` | `RCountDownLatch` | string and pub/sub |
-| `RateLimiter` | `RRateLimiter` | hash, string and sorted set |
+| `Bucket` | string | stable |
+| `HashMap` | hash | stable |
+| `Vec` | list | stable |
+| `VecDeque` | list | stable |
+| `HashSet` | set | stable |
+| `LocalCachedMap` | hash and pub/sub | experimental |
+| `Lock` | hash and pub/sub | stable |
+| `RwLock` | hash, set, strings and pub/sub | stable |
+| `FairLock` | hash, list, sorted set and pub/sub | stable |
+| `SortedSet` | sorted set | stable |
+| `FencedLock` | hash, string and pub/sub | stable |
+| `MultiLock` | the locks it holds | stable |
+| `DelayedQueue` | list, sorted set and pub/sub | experimental |
+| `BitSet` | string | stable |
+| `HyperLogLog` | HyperLogLog | stable |
+| `BloomFilter` | string and hash | experimental |
+| `HashMapCache` | hash and sorted set | experimental |
+| `HashSetCache` | sorted set | experimental |
+| `Topic` | pub/sub | stable |
+| `Stream` | stream | experimental |
+| `Geo` | sorted set | stable |
+| `AtomicI64` | string | stable |
+| `Semaphore` | string and pub/sub | stable |
+| `CountDownLatch` | string and pub/sub | experimental |
+| `RateLimiter` | hash, string and sorted set | stable |
+| `Batch` | the commands it holds | experimental |
+
+**Stable** objects are either thin wrappers over Redis commands, or coordination objects that pass the fault-injection tests (`tests/chaos.rs`) and the Sentinel and Cluster failover tests. **Experimental** objects pass their integration tests and the Cluster tests, but are not yet tested under faults, and their API may still change.
 
 ### Bucket
 
@@ -382,6 +385,13 @@ limiter.acquire(1).await?; // or wait until it is allowed
 
 Every object has the `Object` methods: `name`, `del`, `exists`, `rename`, `expire`, `ttl`, `persist`. Add `use redissun::Object;` to call them.
 
+## Limits
+
+- A lock lives on one Redis master. Redis copies data to replicas asynchronously, so after a Sentinel or Cluster failover a lock that had not reached the replica is gone and another owner can take it. Use `FencedLock` and check the token where correctness matters.
+- When a connection drops while a command is running, the command is sent again, up to 3 attempts in all, like Redisson's `retryAttempts`. Taking and releasing locks and semaphore permits is safe to repeat: each call carries a request id, and Redis remembers the result for 30 seconds, so a repeated call changes nothing. Other writes are not protected this way. A repeated `incr` or `push_back` can be applied twice.
+- When all attempts fail, the call returns an error and nobody knows whether Redis ran it. A semaphore `acquire` that fails this way can lose permits, and a lock `acquire` that fails this way leaves a hold until its lease ends.
+- `VecDeque` pops and `Topic` messages are delivered at most once. A value popped at the moment its connection drops can be lost.
+
 ## Settings
 
 ```rust
@@ -426,6 +436,12 @@ Every call returns `redissun::Result`. The error is `redissun::Error`. It can gr
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+```
+
+Slower tests are marked `#[ignore]`. They need Docker and start their own Redis, a Sentinel setup and a Cluster:
+
+```bash
+cargo test --test chaos --test sentinel --test cluster -- --ignored
 ```
 
 The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, which is faster, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.

@@ -43,7 +43,10 @@ fn script(body: &str, prefix: &str, message: &str) -> Script {
 
 pub(crate) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(format!(
-        "{NOW}{PURGE_STALE}
+        "if redis.call('EXISTS', KEYS[4]) == 1 then
+            return nil
+        end
+        {NOW}{PURGE_STALE}
         if redis.call('EXISTS', KEYS[1]) == 0
             and (redis.call('EXISTS', KEYS[2]) == 0 or redis.call('LINDEX', KEYS[2], 0) == ARGV[2]) then
             redis.call('LPOP', KEYS[2])
@@ -53,11 +56,13 @@ pub(crate) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
             end
             redis.call('HSET', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[4], 1, 'PX', ARGV[4])
             return nil
         end
         if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
             redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[4], 1, 'PX', ARGV[4])
             return nil
         end
         local head = redis.call('LINDEX', KEYS[2], 0)
@@ -79,7 +84,11 @@ pub(crate) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 });
 
 pub(crate) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    let body = "--NOW----PURGE--
+    let body = "local done = redis.call('GET', KEYS[4])
+        if done ~= false then
+            return tonumber(done)
+        end
+        --NOW----PURGE--
         if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
             --NOTIFY--
             return nil
@@ -87,10 +96,12 @@ pub(crate) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
         local count = redis.call('HINCRBY', KEYS[1], ARGV[2], -1)
         if count > 0 then
             redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[4], 0, 'PX', ARGV[4])
             return 0
         end
         redis.call('DEL', KEYS[1])
         --NOTIFY--
+        redis.call('SET', KEYS[4], 1, 'PX', ARGV[4])
         return 1";
     script(body, "ARGV[3]", "'unlocked'")
 });

@@ -24,12 +24,13 @@ impl LockTarget {
 
 /// Several locks that are taken and released together.
 ///
-/// The locks are tried in the order given. When one of them cannot be taken in time, every lock taken so far is released and the whole round starts again. [`lock`](MultiLock::lock) uses a round of 1.5 seconds for each lock and a short random pause between rounds, so owners that take the same locks in opposite order do not wait for each other forever. This is the scheme of Redisson's `RedissonMultiLock`.
+/// The locks are always taken in the order of their key names, whatever order you give, so two owners that want overlapping locks never wait for each other in a circle. When one of them cannot be taken in time, every lock taken so far is released. [`lock`](MultiLock::lock) uses a round of 1.5 seconds for each lock and starts a new round after a short random pause until it succeeds.
 ///
 /// The watchdog keeps every lock alive while the guard exists. In Redis Cluster the locks may live on different nodes.
 #[derive(Clone, Debug)]
 pub struct MultiLock {
     targets: Vec<LockTarget>,
+    order: Vec<usize>,
 }
 
 impl MultiLock {
@@ -37,7 +38,9 @@ impl MultiLock {
         if targets.is_empty() {
             return Err(Error::Config("a multi lock needs at least one lock".into()));
         }
-        Ok(Self { targets })
+        let mut order: Vec<usize> = (0..targets.len()).collect();
+        order.sort_by(|a, b| targets[*a].key.name().cmp(targets[*b].key.name()));
+        Ok(Self { targets, order })
     }
 
     /// Waits until every lock is taken. Add `.timeout(duration)` to wait at most that long; the call then resolves to `None` and holds nothing.
@@ -65,25 +68,29 @@ impl MultiLock {
     async fn round(&self, wait: Duration) -> Result<Option<MultiLockGuard>> {
         let started = Instant::now();
         let mut taken = Vec::with_capacity(self.targets.len());
-        for target in &self.targets {
+        for &index in &self.order {
+            let target = &self.targets[index];
             let remaining = wait.saturating_sub(started.elapsed());
             match acquire(&target.key, None, Some(remaining), target.mode).await {
-                Ok(Some(guard)) => taken.push(guard),
+                Ok(Some(guard)) => taken.push((index, guard)),
                 Ok(None) => {
-                    let _ = release_all(taken).await;
+                    let _ = release_all(taken.into_iter().map(|(_, guard)| guard)).await;
                     return Ok(None);
                 }
                 Err(error) => {
-                    let _ = release_all(taken).await;
+                    let _ = release_all(taken.into_iter().map(|(_, guard)| guard)).await;
                     return Err(error);
                 }
             }
         }
-        Ok(Some(MultiLockGuard { guards: taken }))
+        taken.sort_by_key(|(index, _)| *index);
+        Ok(Some(MultiLockGuard {
+            guards: taken.into_iter().map(|(_, guard)| guard).collect(),
+        }))
     }
 }
 
-async fn release_all(guards: Vec<LockGuard>) -> Result<()> {
+async fn release_all(guards: impl IntoIterator<Item = LockGuard>) -> Result<()> {
     let mut first_error = None;
     for guard in guards {
         if let Err(error) = guard.unlock().await {

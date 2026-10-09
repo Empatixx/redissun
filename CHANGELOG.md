@@ -1,6 +1,23 @@
 # Changelog
 
-## [0.15.0] - unreleased
+## [Unreleased]
+
+### Fixed
+
+- Pub/sub subscriptions are restored after a reconnect, including a Sentinel failover, and waiters are woken once they are back. Before, a dropped pub/sub connection silently stopped every `Topic` subscriber, `HashMapCache::events`, and the invalidation messages of `LocalCachedMap`, which then served stale values from its local cache forever.
+- Taking and releasing a lock (`Lock`, `FairLock`, `FencedLock`, `RwLock`) and taking and releasing semaphore permits are safe to repeat. Each call carries a request id, and its script remembers the result under `redissun__request_latch:{name}:<id>` for 30 seconds, as Redisson does for unlocking. A failed unlock is also retried for up to 10 seconds. Before, a command repeated after a dropped connection could take a lock twice, or the reply of an unlock could get lost. In both cases one hold stayed behind, and a task that took the same lock again in a loop kept it forever while every other owner waited. A repeated semaphore call could also take or return its permits twice.
+- `MultiLock` takes its locks in the order of their key names. Before, owners that listed the same locks in a different order and used `.timeout()` could block each other until both timed out, again and again.
+- `HashMapCache::events` receives events in Redis Cluster. Before, the cache published an event only when the node that holds the key had a subscriber of its own, so a listener connected to another node missed them.
+- `FencedLock` no longer leaves its watchdog running when reading the fencing token fails after the lock was taken.
+- The test containers are removed together with their volumes.
+
+### Added
+
+- Sentinel and Cluster tests, including a master failover (`tests/sentinel.rs`, `tests/cluster.rs`).
+- Fault-injection tests in the style of Jepsen (`tests/chaos.rs`). Several clients work on one object while connections are killed and Redis is paused, and the results are checked for overlapping lock holders, fencing tokens that go backwards, an overbooked semaphore, a rate limiter that grants too much, lost acknowledged increments, and queue values that nobody pushed.
+- Git tags and GitHub releases for every published version. The publish workflow uses the version's section of this changelog as the release notes.
+
+## [0.15.0] - 2026-10-09
 
 ### Added
 
@@ -14,19 +31,19 @@
 - `FairLock` gives a waiter one more second before it drops it from the queue. Before, a waiter could lose its place when another waiter woke up at the very moment its time ended.
 - `Geo` searches with a count of zero return an empty list instead of a Redis error.
 
-## [0.14.0] - unreleased
+## [0.14.0] - 2026-10-09
 
 ### Added
 
 - `Geo`: members with a position on Earth, as in Redisson's `RGeo`. It has `add`, `remove`, `pos`, `hash`, `dist`, `len`, `is_empty`, `clear`, and the searches `radius`, `radius_of` and `within_box`, with `GeoPoint`, `GeoUnit` and `GeoMatch`. Needs Redis 6.2 or newer.
 
-## [0.13.0] - unreleased
+## [0.13.0] - 2026-10-09
 
 ### Added
 
 - `Stream`: Redis Streams with consumer groups, as in Redisson's `RStream`. Entries: `add` (with `.max_len(n)`), `len`, `range`, `rev_range`, `remove`, `trim`, `read`, `read_wait`. Groups: `create_group`, `destroy_group`, `read_group`, `read_group_wait`, `ack`, `pending`, `pending_entries`, `claim`, `auto_claim`. Also `StreamId`, `StreamEntry`, `PendingSummary` and `PendingEntry`.
 
-## [0.12.0] - unreleased
+## [0.12.0] - 2026-10-09
 
 ### Fixed
 
@@ -37,7 +54,7 @@
 
 - `LocalCachedMap`: a `HashMap` with a cache inside the program (`get`, `insert`, `remove`, `contains_key`, `len`, `clear`, `local_len`, `clear_local`, `iter`). Options: `cache_size` (LRU), `ttl` and `SyncStrategy::{Invalidate, Update, None}`. Writes and their messages run in one Lua script. The local cache is cleared when the pub/sub connection is restored.
 
-## [0.11.0] - unreleased
+## [0.11.0] - 2026-10-09
 
 ### Added
 
@@ -48,14 +65,14 @@
 
 - `DelayedQueue` no longer sleeps for up to an hour when its pub/sub subscription failed. Its idle sleep is now one minute.
 
-## [0.10.0] - unreleased
+## [0.10.0] - 2026-10-09
 
 ### Added
 
 - `MultiLock`: takes several locks (`Lock`, `FairLock`, `FencedLock`) as one, with `lock`, `try_lock` and `MultiLockGuard`. It follows Redisson's `RedissonMultiLock`: rounds that release everything and start again, so opposite lock orders do not deadlock.
 - `DelayedQueue`: values that reach a destination `VecDeque` after a delay, with `push`, `remove`, `len`, `is_empty`, `clear` and `values`. It uses the same Lua scripts and keys as Redisson's `RedissonDelayedQueue`, and a background task moves due values.
 
-## [0.9.0] - unreleased
+## [0.9.0] - 2026-10-09
 
 ### Added
 
@@ -63,28 +80,28 @@
 - `HyperLogLog`: `insert`, `extend`, `count`, `count_with`, `merge_from`.
 - `BloomFilter`: `try_init`, `insert`, `contains`, `count`, `expected_insertions`, `false_probability`, `size_bits`, `hash_iterations`. The settings are stored in Redis like in Redisson's `RBloomFilter`.
 
-## [0.8.0] - unreleased
+## [0.8.0] - 2026-10-09
 
 ### Added
 
 - `FencedLock`: a `Lock` whose every new acquisition gets a higher fencing token, read with `LockGuard::fencing_token`. It also has `current_token`.
 - `SortedSet::pop_first_wait` and `pop_last_wait` block until a value arrives (`BZPOPMIN`, `BZPOPMAX`), so a `SortedSet` works as a priority queue. Add `.timeout(duration)` to limit the wait.
 
-## [0.7.0] - unreleased
+## [0.7.0] - 2026-10-09
 
 ### Added
 
 - `FairLock`: a reentrant lock that hands itself to waiters in arrival order, taken from Redisson's `RedissonFairLock`. It has `lock`, `try_lock`, `is_locked`, `is_held_by_current`, `hold_count`, `queue_len` and `force_unlock`. A waiter that crashes loses its place after a few seconds.
 - `SortedSet`: values with a score, stored in a Redis sorted set. It has `insert`, `add_score`, `score`, `remove`, `contains`, `rank`, `rev_rank`, `len`, `is_empty`, `clear`, `first`, `last`, `pop_first`, `pop_last`, `range`, `rev_range`, `range_by_score`, `count_by_score`, `remove_by_score` and `iter`.
 
-## [0.6.0] - unreleased
+## [0.6.0] - 2026-10-09
 
 ### Added
 
 - `HashMapCache::set_max_size` and `try_set_max_size` limit the number of entries, with `EvictionMode::{Lru, Lfu}`.
 - `HashMapCache::events` returns `Events`, which receives `Event::{Created, Updated, Removed, Expired}` for the changes of every client.
 
-## [0.5.0] - unreleased
+## [0.5.0] - 2026-10-09
 
 ### Added
 
@@ -98,7 +115,7 @@
 - `HashMapCache` stores its data like Redisson's `RMapCache`: a hash plus a timeout set and an idle set.
 - Breaking: every waiting call is now one method that you can `await` directly or limit with `.timeout(duration)`. This replaces `Lock::lock_for`, `Lock::lock_with`, `LockOptions`, `RwLock::read_for`, `RwLock::write_for`, `Semaphore::acquire_for`, `RateLimiter::try_acquire_for`, `CountDownLatch::wait_for`, `VecDeque::pop_front_for` and `VecDeque::pop_back_for`. A call with `.timeout` resolves to `Option`. `Lock::lock` also takes `.lease(duration)`.
 
-## [0.4.0] - unreleased
+## [0.4.0] - 2026-10-09
 
 ### Added
 
@@ -117,7 +134,7 @@
 
 - `subscribe` now waits until Redis has registered the subscription. Before, a message published right after could be missed.
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-10-09
 
 ### Added
 
@@ -130,7 +147,7 @@
 
 - Breaking: `Map` is now `HashMap` (`client.hash_map`) and `AtomicLong` is now `AtomicI64` (`client.atomic_i64`), so the names follow Rust.
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-10-09
 
 ### Added
 
@@ -155,7 +172,7 @@
 - Pub/sub subscriptions are now released when the last waiter on a channel leaves. Before, a process that waited on many different lock names kept every subscription until it exited.
 
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-08
 
 ### Added
 

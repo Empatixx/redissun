@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::lock::{request_latch, REQUEST_LATCH_TTL};
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;
 use crate::shield::shielded;
@@ -10,12 +11,17 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::time::Instant;
+use uuid::Uuid;
 
 static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local value = redis.call('GET', KEYS[1])
+        "if redis.call('EXISTS', KEYS[2]) == 1 then
+            return 1
+        end
+        local value = redis.call('GET', KEYS[1])
         if value ~= false and tonumber(value) >= tonumber(ARGV[1]) then
             redis.call('DECRBY', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], 1, 'PX', ARGV[2])
             return 1
         end
         return 0",
@@ -24,7 +30,12 @@ static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
 
 static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "local value = redis.call('INCRBY', KEYS[1], ARGV[1])
+        "local done = redis.call('GET', KEYS[2])
+        if done ~= false then
+            return tonumber(done)
+        end
+        local value = redis.call('INCRBY', KEYS[1], ARGV[1])
+        redis.call('SET', KEYS[2], value, 'PX', ARGV[3])
         redis.call('PUBLISH', ARGV[2], value)
         return value",
     )
@@ -85,12 +96,20 @@ impl HasKey for Semaphore {
     }
 }
 
+fn latched(key: &Key) -> (String, Bytes) {
+    (
+        request_latch(key, &Uuid::new_v4().to_string()),
+        Bytes::from(REQUEST_LATCH_TTL.as_millis().to_string()),
+    )
+}
+
 async fn release_permits(key: &Key, permits: Bytes) -> Result<i64> {
+    let (latch, ttl) = latched(key);
     key.core
         .eval(
             &RELEASE,
-            vec![key.redis_key()],
-            vec![permits, Bytes::from(channel(key.name()))],
+            vec![key.redis_key(), latch],
+            vec![permits, Bytes::from(channel(key.name())), ttl],
         )
         .await
 }
@@ -165,9 +184,14 @@ impl Semaphore {
         let key = self.key.clone();
         let argument = argument.clone();
         shielded(async move {
+            let (latch, ttl) = latched(&key);
             let taken: i64 = key
                 .core
-                .eval(&TRY_ACQUIRE, vec![key.redis_key()], vec![argument])
+                .eval(
+                    &TRY_ACQUIRE,
+                    vec![key.redis_key(), latch],
+                    vec![argument, ttl],
+                )
                 .await?;
             Ok((taken == 1).then(|| Permits::new(key, permits)))
         })

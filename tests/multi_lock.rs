@@ -162,3 +162,51 @@ async fn different_lock_kinds_can_be_mixed() {
     assert_eq!(client.fenced_lock(c).current_token().await.unwrap(), 1);
     guard.unlock().await.unwrap();
 }
+
+#[tokio::test]
+async fn owners_with_opposite_orders_and_a_timeout_both_get_through() {
+    let first_client = client().await;
+    let second_client = client().await;
+    let (a, b) = (unique("m"), unique("m"));
+    let forward = first_client
+        .multi_lock(locks(&first_client, &[&a, &b]))
+        .unwrap();
+    let backward = second_client
+        .multi_lock(locks(&second_client, &[&b, &a]))
+        .unwrap();
+
+    let run = |multi: MultiLock| async move {
+        let mut taken = 0;
+        for _ in 0..20 {
+            if let Some(guard) = multi.lock().timeout(Duration::from_secs(2)).await.unwrap() {
+                sleep(Duration::from_millis(5)).await;
+                guard.unlock().await.unwrap();
+                taken += 1;
+            }
+        }
+        taken
+    };
+    let (forward_taken, backward_taken) = timeout(
+        Duration::from_secs(30),
+        futures::future::join(tokio::spawn(run(forward)), tokio::spawn(run(backward))),
+    )
+    .await
+    .expect("opposite orders deadlocked");
+    assert_eq!(forward_taken.unwrap(), 20);
+    assert_eq!(backward_taken.unwrap(), 20);
+}
+
+#[tokio::test]
+async fn guards_keep_the_order_the_locks_were_given_in() {
+    let client = client().await;
+    let names = [unique("z"), unique("a"), unique("m")];
+    let multi = client
+        .multi_lock(names.iter().map(|name| client.lock(name.clone())))
+        .unwrap();
+    let guard = multi.lock().await.unwrap();
+    assert_eq!(guard.guards().len(), 3);
+    for (part, name) in guard.guards().iter().zip(&names) {
+        assert!(format!("{part:?}").contains(name.as_str()));
+    }
+    guard.unlock().await.unwrap();
+}

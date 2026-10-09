@@ -2,6 +2,7 @@ use crate::error::Result;
 use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
+use fred::types::config::Server;
 use fred::types::Message;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,18 +57,13 @@ impl PubSub {
         client.init().await?;
         let receiver = client.message_rx();
         let reconnects = broadcast::channel(16).0;
-        let mut reconnected = client.reconnect_rx();
-        let announce = reconnects.clone();
-        tokio::spawn(async move {
-            while !matches!(reconnected.recv().await, Err(RecvError::Closed)) {
-                let _ = announce.send(());
-            }
-        });
+        let reconnected = client.reconnect_rx();
         let pubsub = Arc::new(Self {
             client,
             channels: Mutex::new(HashMap::new()),
             reconnects,
         });
+        tokio::spawn(resubscribe(Arc::downgrade(&pubsub), reconnected));
         tokio::spawn(dispatch(Arc::downgrade(&pubsub), receiver));
         Ok(pubsub)
     }
@@ -126,6 +122,26 @@ impl PubSub {
             channels.remove(&channel);
             let _ = self.client.unsubscribe(channel).await;
         }
+    }
+}
+
+async fn resubscribe(pubsub: Weak<PubSub>, mut reconnected: broadcast::Receiver<Server>) {
+    while !matches!(reconnected.recv().await, Err(RecvError::Closed)) {
+        let Some(pubsub) = pubsub.upgrade() else {
+            break;
+        };
+        {
+            let channels = pubsub.channels.lock().await;
+            let names: std::vec::Vec<String> = channels.keys().cloned().collect();
+            if !names.is_empty() {
+                let _ = pubsub.client.subscribe(names).await;
+                let _ = pubsub.client.ping::<()>(None).await;
+            }
+            channels
+                .values()
+                .for_each(|entry| entry.notify.notify_waiters());
+        }
+        let _ = pubsub.reconnects.send(());
     }
 }
 

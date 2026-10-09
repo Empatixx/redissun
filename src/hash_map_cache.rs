@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::object::{millis, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
+use fred::interfaces::HashesInterface;
 use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
 use futures::{stream, Stream, StreamExt};
@@ -29,7 +30,7 @@ local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local MAIN, TIMEOUT, IDLE, ACCESS, OPTIONS, CHANNEL = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local maxSize = tonumber(redis.call('HGET', OPTIONS, 'max-size')) or 0
 local lfu = redis.call('HGET', OPTIONS, 'mode') == 'LFU'
-local listening = redis.call('PUBSUB', 'NUMSUB', CHANNEL)[2] > 0
+local listening = redis.call('HEXISTS', OPTIONS, 'listeners') == 1 or redis.call('PUBSUB', 'NUMSUB', CHANNEL)[2] > 0
 local function emit(kind, field, value, previous)
     if listening then
         previous = previous or ''
@@ -772,8 +773,14 @@ where
         Ok(set == 1)
     }
 
-    /// Starts listening to the changes of the cache, made by any client. Nothing is published to Redis while nobody listens.
+    /// Starts listening to the changes of the cache, made by any client. Nothing is published to Redis until somebody listens for the first time.
     pub async fn events(&self) -> Result<Events<K, V, C>> {
+        let _: i64 = self
+            .key
+            .core
+            .redis()
+            .hset(self.options_key(), ("listeners", 1))
+            .await?;
         let (subscription, receiver) = self
             .key
             .core
