@@ -15,6 +15,7 @@ description: Things to know about this version.
 - **Blocking pops** use their own short-lived connection. A pop that is dropped while an element is on its way can lose that element. Use `.timeout(wait)` for time limits.
 - **Topic** does not store messages. A slow subscriber that falls more than 256 messages behind gets `Error::Lagged`.
 - **RwLock** does not prefer writers, and a reader cannot be upgraded to a writer.
+- **FairLock** keeps a place in the queue for about 5 seconds per waiter ahead of it. A waiter that crashed is skipped after that. A waiter that is cancelled at the very moment its first attempt runs can leave a stale place that also ends after that time.
 - **HashMapCache** background clean-up runs on the runtime that first created the cache.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error.
 - **Before 1.0**, the API can change between minor versions.

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0] - unreleased
+
+### Added
+
+- `FairLock`: a reentrant lock that hands itself to waiters in arrival order, taken from Redisson's `RedissonFairLock`. It has `lock`, `try_lock`, `is_locked`, `is_held_by_current`, `hold_count`, `queue_len` and `force_unlock`. A waiter that crashes loses its place after a few seconds.
+- `SortedSet`: values with a score, stored in a Redis sorted set. It has `insert`, `add_score`, `score`, `remove`, `contains`, `rank`, `rev_rank`, `len`, `is_empty`, `clear`, `first`, `last`, `pop_first`, `pop_last`, `range`, `rev_range`, `range_by_score`, `count_by_score`, `remove_by_score` and `iter`.
+
 ## [0.6.0] - unreleased
 
 ### Added

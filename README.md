@@ -60,6 +60,8 @@ async fn main() -> redissun::Result<()> {
 | `HashSet` | `RSet` | set |
 | `Lock` | `RLock` | hash and pub/sub |
 | `RwLock` | `RReadWriteLock` | hash, set, strings and pub/sub |
+| `FairLock` | `RFairLock` | hash, list, sorted set and pub/sub |
+| `SortedSet` | `RScoredSortedSet` | sorted set |
 | `HashMapCache` | `RMapCache` | hash and sorted set |
 | `Topic` | `RTopic` | pub/sub |
 | `AtomicI64` | `RAtomicLong` | string |
@@ -174,6 +176,27 @@ Many readers or one writer.
 let lock = client.rw_lock("config");
 let read = lock.read().await?;
 read.unlock().await?;
+```
+
+### FairLock
+
+A lock that serves waiters in the order they arrived.
+
+```rust
+let lock = client.fair_lock("jobs");
+let guard = lock.lock().await?;
+guard.unlock().await?;
+```
+
+### SortedSet
+
+Values ordered by a score, for example a leaderboard.
+
+```rust
+let board = client.sorted_set::<String>("scores");
+board.insert("ann", 12.0).await?;
+board.add_score("ann", 3.0).await?;
+let top = board.rev_range(0..3).await?;
 ```
 
 ### AtomicI64

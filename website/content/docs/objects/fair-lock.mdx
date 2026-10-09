@@ -1,0 +1,40 @@
+---
+title: FairLock
+description: A lock that serves waiters in the order they arrived.
+---
+
+A `FairLock` works like `Lock`, but waiting programs get the lock in the order they asked. A busy lock cannot starve anyone. It can be taken again by its owner, a watchdog keeps it alive, and waiting programs wake up without polling.
+
+```rust
+let lock = client.fair_lock("jobs");
+
+let guard = lock.lock().await?;
+// work alone
+guard.unlock().await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `lock()` | waits for its turn. Add `.timeout(wait)` to get `None` when `wait` runs out, or `.lease(time)` to set a lease instead of using the watchdog. |
+| `try_lock()` | returns `None` at once unless the lock is free and nobody waits |
+| `is_locked()`, `is_held_by_current()`, `hold_count()` | |
+| `queue_len()` | how many owners wait |
+| `force_unlock()` | releases the lock of any owner and wakes the first waiter |
+
+The guard is the same `LockGuard` as for `Lock`. `FairLock` also has the `Object` methods.
+
+## Rules
+
+- The owner is the client together with the tokio task, as in `Lock`.
+- `try_lock` does not jump the queue.
+- A waiter that times out or is cancelled leaves the queue.
+
+## Crashed waiters
+
+Each waiter has a time until which it keeps its place. If the program crashes, the others skip it after that time (about 5 seconds for every waiter ahead of it).
+
+## Redis keys
+
+The lock is the hash `{name}`. Waiters are in the list `redissun__lock_queue:{name}` and in the sorted set `redissun__lock_timeout:{name}`. Every waiter listens on its own channel, so a release wakes only the next one. This is the same scheme that Redisson uses.

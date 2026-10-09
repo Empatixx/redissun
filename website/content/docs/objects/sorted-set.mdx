@@ -1,0 +1,39 @@
+---
+title: SortedSet
+description: Values ordered by a score, shared across programs.
+---
+
+A `SortedSet` keeps values ordered by a score. Use it for leaderboards, priority queues and time lines.
+
+```rust
+let board = client.sorted_set::<String>("scores");
+
+board.insert("ann", 12.0).await?;
+board.add_score("ann", 3.0).await?;
+let best = board.last().await?;
+let top3 = board.rev_range(0..3).await?;
+```
+
+Values with the same score are ordered by their encoded bytes. Values are equal when their encoded bytes are equal.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(&v, score)` | returns `true` when the value is new. An old value gets the new score. |
+| `add_score(&v, delta)` | returns the new score. A missing value starts from 0. |
+| `score(&v)`, `rank(&v)`, `rev_rank(&v)` | rank 0 is the lowest score, or the highest for `rev_rank` |
+| `remove(&v)`, `contains(&v)` | |
+| `len()`, `is_empty()`, `clear()` | |
+| `first()`, `last()` | read without removing |
+| `pop_first()`, `pop_last()` | remove and return, one owner gets each value |
+| `range(a..b)`, `rev_range(a..b)` | by position. The end is exclusive, like a slice. |
+| `range_by_score(min, max)` | both ends included. Use `f64::NEG_INFINITY` and `f64::INFINITY` for open ends. |
+| `count_by_score(min, max)`, `remove_by_score(min, max)` | |
+| `iter()` | a stream of `(value, score)`, one page at a time |
+
+Values come back with their score as `(V, f64)`. `SortedSet` also has the `Object` methods.
+
+## Priority queue
+
+`pop_first()` is atomic, so many workers can take the lowest score without getting the same value twice. It does not wait. When the set is empty it returns `None`.
