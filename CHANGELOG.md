@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0] - unreleased
+
+### Added
+
+- `MultiLock`: takes several locks (`Lock`, `FairLock`, `FencedLock`) as one, with `lock`, `try_lock` and `MultiLockGuard`. It follows Redisson's `RedissonMultiLock`: rounds that release everything and start again, so opposite lock orders do not deadlock.
+- `DelayedQueue`: values that reach a destination `VecDeque` after a delay, with `push`, `remove`, `len`, `is_empty`, `clear` and `values`. It uses the same Lua scripts and keys as Redisson's `RedissonDelayedQueue`, and a background task moves due values.
+
 ## [0.9.0] - unreleased
 
 ### Added

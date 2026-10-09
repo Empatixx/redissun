@@ -1,0 +1,33 @@
+---
+title: DelayedQueue
+description: Values that arrive in a queue after a delay.
+---
+
+A `DelayedQueue` holds values back and releases them into a destination `VecDeque` after a delay. Consumers read from the destination.
+
+```rust
+let jobs = client.vec_deque::<String>("jobs");
+let delayed = client.delayed_queue(&jobs);
+
+delayed.push("send-email", Duration::from_secs(60)).await?;
+
+let job = jobs.pop_front_wait().await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `push(&v, delay)` | the value reaches the destination after `delay` |
+| `remove(&v)` | takes the first waiting equal value out |
+| `len()`, `is_empty()` | waiting values only |
+| `values()` | the waiting values in push order |
+| `clear()` | drops the waiting values |
+
+Equal values are kept as separate entries. `DelayedQueue` also has the `Object` methods, which apply to the waiting values.
+
+## How it works
+
+Waiting values live in a list and in a sorted set by due time. They are stored in the same format as in Redisson, with an 8 byte random id in front. A background task in each client that holds a `DelayedQueue` for the destination moves due values to the end of the destination. A value that is due before all others wakes the tasks of every client through pub/sub, and an idle task sleeps until then. Time comes from the Redis server.
+
+The task stops when the client is dropped. Keep a client alive in at least one program, or the values will stay until one is.

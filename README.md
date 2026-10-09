@@ -63,6 +63,8 @@ async fn main() -> redissun::Result<()> {
 | `FairLock` | `RFairLock` | hash, list, sorted set and pub/sub |
 | `SortedSet` | `RScoredSortedSet`, `RPriorityQueue` | sorted set |
 | `FencedLock` | `RFencedLock` | hash, string and pub/sub |
+| `MultiLock` | `RedissonMultiLock` | the locks it holds |
+| `DelayedQueue` | `RDelayedQueue` | list, sorted set and pub/sub |
 | `BitSet` | `RBitSet` | string |
 | `HyperLogLog` | `RHyperLogLog` | HyperLogLog |
 | `BloomFilter` | `RBloomFilter` | string and hash |
@@ -200,6 +202,27 @@ A lock that gives every new owner a higher number. A resource can refuse a write
 let lock = client.fenced_lock("report");
 let guard = lock.lock().await?;
 let token = guard.fencing_token();
+```
+
+### MultiLock
+
+Several locks as one.
+
+```rust
+let multi = client.multi_lock([client.lock("a"), client.lock("b")])?;
+let guard = multi.lock().await?;
+guard.unlock().await?;
+```
+
+### DelayedQueue
+
+Values that show up in a queue after a delay.
+
+```rust
+let jobs = client.vec_deque::<String>("jobs");
+let delayed = client.delayed_queue(&jobs);
+delayed.push("send-email", std::time::Duration::from_secs(60)).await?;
+let job = jobs.pop_front_wait().await?;
 ```
 
 ### BitSet, HyperLogLog and BloomFilter

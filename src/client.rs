@@ -5,6 +5,7 @@ use crate::bucket::Bucket;
 use crate::codec::{Codec, JsonCodec};
 use crate::config::ClientBuilder;
 use crate::core::Core;
+use crate::delayed_queue::DelayedQueue;
 use crate::error::Result;
 use crate::fair_lock::FairLock;
 use crate::fenced_lock::FencedLock;
@@ -90,6 +91,14 @@ impl<C: Codec> Client<C> {
     /// Returns the [`VecDeque`](crate::VecDeque) stored under `name`.
     pub fn vec_deque<V>(&self, name: impl Into<Arc<str>>) -> crate::vec_deque::VecDeque<V, C> {
         crate::vec_deque::VecDeque::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns a [`DelayedQueue`] that delivers its values to `destination` after a delay.
+    pub fn delayed_queue<V>(
+        &self,
+        destination: &crate::vec_deque::VecDeque<V, C>,
+    ) -> DelayedQueue<V, C> {
+        DelayedQueue::new(destination, self.codec.clone())
     }
 
     /// Returns the [`HashSet`](crate::HashSet) stored under `name`.

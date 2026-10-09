@@ -1,0 +1,31 @@
+---
+title: MultiLock
+description: Take several locks as one.
+---
+
+A `MultiLock` takes several locks together and releases them together. It accepts `Lock`, `FairLock` and `FencedLock`, and they can be mixed.
+
+```rust
+let multi = client.multi_lock([client.lock("account:1"), client.lock("account:2")])?;
+
+let guard = multi.lock().await?;
+// both accounts are locked
+guard.unlock().await?;
+```
+
+`multi_lock` returns `Error::Config` when you give it no locks.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `lock()` | waits until all locks are taken. Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `try_lock()` | returns `None` at once unless all locks are free |
+
+When a call returns `None`, it holds nothing. The guard has `unlock()` and releases all locks in the background when dropped. `guards()` gives the single guards, for example to read a fencing token.
+
+## How it avoids deadlocks
+
+The locks are tried in the given order. If one cannot be taken in time, all locks taken so far are released and the round starts again. `lock()` uses a round of 1.5 seconds for each lock and a short random pause between rounds. Two owners that take the same locks in opposite order may wait up to one round, but never forever. This is the scheme of Redisson's `RedissonMultiLock`.
+
+The watchdog keeps every lock alive while the guard exists. A custom lease is not supported yet.
