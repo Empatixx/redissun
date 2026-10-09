@@ -18,17 +18,18 @@ static INIT: LazyLock<Script> = LazyLock::new(|| {
             return 0
         end
         redis.call('HSET', KEYS[1], 'size', ARGV[1], 'hashIterations', ARGV[2], 'expectedInsertions', ARGV[3], 'falseProbability', ARGV[4])
+        redis.call('SETBIT', KEYS[2], 0, 0)
         return 1",
     )
 });
 
 static INSERT: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('HGET', KEYS[2], 'size') ~= ARGV[1] then
+        "if redis.call('HGET', KEYS[2], 'size') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'hashIterations') ~= ARGV[2] then
             return redis.error_reply('bloom filter config changed')
         end
         local changed = 0
-        for i = 2, #ARGV do
+        for i = 3, #ARGV do
             if redis.call('SETBIT', KEYS[1], ARGV[i], 1) == 0 then
                 changed = 1
             end
@@ -39,10 +40,10 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
 
 static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
-        "if redis.call('HGET', KEYS[2], 'size') ~= ARGV[1] then
+        "if redis.call('HGET', KEYS[2], 'size') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'hashIterations') ~= ARGV[2] then
             return redis.error_reply('bloom filter config changed')
         end
-        for i = 2, #ARGV do
+        for i = 3, #ARGV do
             if redis.call('GETBIT', KEYS[1], ARGV[i]) == 0 then
                 return 0
             end
@@ -218,7 +219,7 @@ impl<V, C: Codec> BloomFilter<V, C> {
             .core
             .eval(
                 &INIT,
-                vec![self.config_key()],
+                vec![self.config_key(), self.key.redis_key()],
                 vec![
                     Bytes::from(size.to_string()),
                     Bytes::from(hashes.to_string()),
@@ -263,7 +264,10 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let config = self.config().await?;
-        let mut args = vec![Bytes::from(config.size.to_string())];
+        let mut args = vec![
+            Bytes::from(config.size.to_string()),
+            Bytes::from(config.hash_iterations.to_string()),
+        ];
         args.extend(indexes(&self.codec.encode(v)?, config));
         let outcome = self
             .key

@@ -9,8 +9,20 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
-static ADD: LazyLock<Script> =
-    LazyLock::new(|| Script::from_lua("return redis.call('PFADD', KEYS[1], unpack(ARGV))"));
+static ADD: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local changed = 0
+        local first = 1
+        while first <= #ARGV do
+            local last = math.min(first + 999, #ARGV)
+            if redis.call('PFADD', KEYS[1], unpack(ARGV, first, last)) == 1 then
+                changed = 1
+            end
+            first = last + 1
+        end
+        return changed",
+    )
+});
 
 static COUNT: LazyLock<Script> =
     LazyLock::new(|| Script::from_lua("return redis.call('PFCOUNT', unpack(KEYS))"));

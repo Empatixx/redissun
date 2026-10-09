@@ -107,3 +107,40 @@ async fn object_methods_cover_the_config() {
     assert!(filter.del().await.unwrap());
     assert!(filter.try_init(100, 0.01).await.unwrap());
 }
+
+#[tokio::test]
+async fn an_expiry_set_before_the_first_insert_covers_the_bits() {
+    let filter = client().await.bloom_filter::<String>(unique("bloom"));
+    filter.try_init(100, 0.01).await.unwrap();
+    assert!(filter
+        .expire(std::time::Duration::from_secs(3600))
+        .await
+        .unwrap());
+    filter.insert("a").await.unwrap();
+    assert!(filter.ttl().await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_filter_set_up_again_with_the_same_size_but_other_hashes_is_detected() {
+    let name = unique("bloom");
+    let first = client().await.bloom_filter::<u32>(name.clone());
+    first.try_init(1000, 0.01).await.unwrap();
+    first.insert(&1).await.unwrap();
+    let k = first.hash_iterations().await.unwrap();
+    first.del().await.unwrap();
+    common::raw_command(&[
+        "HSET",
+        &format!("{{{name}}}:config"),
+        "size",
+        &first.size_bits().await.unwrap().to_string(),
+        "hashIterations",
+        &(k + 1).to_string(),
+        "expectedInsertions",
+        "1000",
+        "falseProbability",
+        "0.01",
+    ])
+    .await;
+    assert!(matches!(first.insert(&2).await, Err(Error::Config(_))));
+    assert_eq!(first.hash_iterations().await.unwrap(), k + 1);
+}

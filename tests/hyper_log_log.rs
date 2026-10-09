@@ -51,3 +51,15 @@ async fn object_methods_apply_to_the_key() {
     assert!(log.del().await.unwrap());
     assert_eq!(log.count().await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn extend_accepts_a_very_large_batch() {
+    let log = client().await.hyper_log_log::<u32>(unique("hll"));
+    let values: Vec<u32> = (0..30_000).collect();
+    assert!(log.extend(values.iter()).await.unwrap());
+    let estimate = log.count().await.unwrap() as f64;
+    assert!(
+        (estimate - 30_000.0).abs() / 30_000.0 < 0.05,
+        "estimate {estimate}"
+    );
+}
