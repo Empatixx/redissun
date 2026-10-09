@@ -20,6 +20,7 @@ pub(crate) struct Core {
     pool: Pool,
     id: String,
     pub(crate) lock_lease: Duration,
+    pub(crate) lock_settings: crate::lock::LockSettings,
     pub(crate) eviction_interval: Duration,
     pub(crate) pubsub: Arc<PubSub>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
@@ -32,6 +33,7 @@ impl Core {
         lock_lease: Duration,
         connect_timeout: Duration,
         eviction_interval: Duration,
+        lock_settings: crate::lock::LockSettings,
     ) -> Result<Arc<Self>> {
         let config = Config::from_url(url).map_err(|e| Error::Config(e.to_string()))?;
         let mut builder = Builder::from_config(config);
@@ -59,6 +61,7 @@ impl Core {
             pool,
             id: Uuid::new_v4().to_string(),
             lock_lease,
+            lock_settings,
             eviction_interval,
             pubsub,
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),

@@ -1,16 +1,17 @@
 use crate::error::Result;
-use crate::lock::{acquire, fair, Lock, LockGuard, LockRequest, Mode};
+use crate::lock::{
+    acquire, fair, force_unlock, unlock_message, Lock, LockGuard, LockRequest, Mode, Wait,
+};
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::ListInterface;
 use std::fmt;
-use std::time::Duration;
 
 /// A reentrant distributed lock that hands itself to waiters in the order they arrived.
 ///
 /// Owners work as in [`Lock`]: the client together with the current tokio task. A caller that asks while others already wait goes to the back of the queue, so a busy lock cannot starve anybody and [`try_lock`](FairLock::try_lock) never jumps the queue.
 ///
-/// The scheme is taken from Redisson's `RedissonFairLock`. The lock is the hash `{name}`. Waiters sit in the list `redissun__lock_queue:{name}` and in the sorted set `redissun__lock_timeout:{name}`, which stores when each waiter gives up its place. A waiter that crashed loses its place after that time, so it cannot block the others. Each waiter listens on its own channel, and a release wakes only the next one.
+/// The scripts are Redisson's `RedissonFairLock` scripts. The lock is the hash `{name}`. Waiters sit in the list `redissun__lock_queue:{name}` and in the sorted set `redissun__lock_timeout:{name}`, which stores, in client clock milliseconds, when each waiter loses its place: the time the waiter ahead of it is due plus the wait timeout of the call, or [`fair_lock_wait_timeout`](crate::ClientBuilder::fair_lock_wait_timeout) when the call waits without a limit. A crashed waiter is dropped from the head of the queue once that time has passed. Each waiter listens on its own channel, and a release wakes only the next one. Like in Redisson, the clocks of the clients should be in sync.
 #[derive(Clone)]
 pub struct FairLock {
     lock: Lock,
@@ -54,7 +55,7 @@ impl FairLock {
 
     /// Acquires the lock when it is free and nobody waits; returns `None` immediately otherwise.
     pub async fn try_lock(&self) -> Result<Option<LockGuard>> {
-        acquire(&self.key, None, Some(Duration::ZERO), Mode::Fair).await
+        acquire(&self.key, None, Wait::Once, Mode::Fair).await
     }
 
     /// Returns whether any owner holds the lock.
@@ -85,15 +86,16 @@ impl FairLock {
 
     /// Releases the lock regardless of its owner and wakes the first waiter; returns whether it was held.
     pub async fn force_unlock(&self) -> Result<bool> {
-        let removed: i64 = self
-            .key
-            .core
-            .eval(
-                &fair::FORCE_UNLOCK,
-                fair::keys(&self.key),
-                vec![Bytes::from(fair::channel_prefix(self.key.name()))],
-            )
-            .await?;
-        Ok(removed == 1)
+        force_unlock(
+            &self.key,
+            &fair::FORCE_UNLOCK,
+            fair::keys(&self.key),
+            vec![
+                unlock_message(),
+                fair::now_millis(),
+                Bytes::from(fair::channel_prefix(self.key.name())),
+            ],
+        )
+        .await
     }
 }

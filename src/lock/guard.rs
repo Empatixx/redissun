@@ -44,12 +44,16 @@ impl LockGuard {
         }
     }
 
+    pub(crate) fn key(&self) -> Option<&Key> {
+        self.held.as_ref().map(|held| &held.key)
+    }
+
     pub(crate) fn with_token(mut self, token: Option<u64>) -> Self {
         self.token = token;
         self
     }
 
-    /// The fencing token of a [`FencedLock`](crate::FencedLock) hold, which grows with every new acquisition; `None` for other locks. Reentrant holds share the token.
+    /// The fencing token of a [`FencedLock`](crate::FencedLock) hold; `None` for other locks. Every acquisition, a reentrant one included, gets a new, higher token.
     pub fn fencing_token(&self) -> Option<u64> {
         self.token
     }
