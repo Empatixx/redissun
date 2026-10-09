@@ -156,3 +156,21 @@ async fn clear_and_object_methods() {
     set.insert("b").await.unwrap();
     assert!(set.del().await.unwrap());
 }
+
+#[tokio::test]
+async fn steady_inserts_do_not_postpone_the_cleanup() {
+    let client =
+        connect_with(|builder| builder.eviction_interval(Duration::from_millis(300))).await;
+    let name = unique("sc");
+    let set = client.hash_set_cache::<u32>(name.clone());
+    for value in 0..30u32 {
+        set.insert(&value)
+            .ttl(Duration::from_millis(50))
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(100)).await;
+    }
+    let raw = raw_command(&["ZCARD", &format!("{{{name}}}")]).await;
+    let left: i64 = raw.trim().trim_start_matches(':').parse().unwrap();
+    assert!(left < 10, "{left} expired values were never deleted");
+}

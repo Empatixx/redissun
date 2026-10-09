@@ -2,6 +2,11 @@
 
 ## [0.12.0] - unreleased
 
+### Fixed
+
+- The background cleanup of `HashMapCache` and `HashSetCache` is no longer postponed by steady inserts with a TTL. Before, it could wait until the inserts paused.
+- `LocalCachedMap` no longer caches a stale value when a change message arrives while a read or write is in progress. It also clears its cache when the pub/sub client falls behind.
+
 ### Added
 
 - `LocalCachedMap`: a `HashMap` with a cache inside the program (`get`, `insert`, `remove`, `contains_key`, `len`, `clear`, `local_len`, `clear_local`, `iter`). Options: `cache_size` (LRU), `ttl` and `SyncStrategy::{Invalidate, Update, None}`. Writes and their messages run in one Lua script. The local cache is cleared when the pub/sub connection is restored.

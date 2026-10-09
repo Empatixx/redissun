@@ -145,9 +145,12 @@ async fn dispatch(pubsub: Weak<PubSub>, mut receiver: broadcast::Receiver<Messag
                     }
                 }
             }
-            Err(RecvError::Lagged(_)) => channels
-                .values()
-                .for_each(|entry| entry.notify.notify_waiters()),
+            Err(RecvError::Lagged(_)) => {
+                channels
+                    .values()
+                    .for_each(|entry| entry.notify.notify_waiters());
+                let _ = pubsub.reconnects.send(());
+            }
             Err(RecvError::Closed) => break,
         }
     }

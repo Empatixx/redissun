@@ -280,11 +280,13 @@ async fn evict(core: &Core, keys: Vec<String>) -> Result<usize> {
 
 async fn evict_loop(core: Weak<Core>, keys: Vec<String>, minimum: Duration, wake: Arc<Notify>) {
     let mut pause = minimum;
+    let mut deadline = tokio::time::Instant::now() + pause;
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(pause) => {}
+            _ = tokio::time::sleep_until(deadline) => {}
             _ = wake.notified() => {
                 pause = minimum;
+                deadline = deadline.min(tokio::time::Instant::now() + minimum);
                 continue;
             }
         }
@@ -299,6 +301,7 @@ async fn evict_loop(core: Weak<Core>, keys: Vec<String>, minimum: Duration, wake
         } else {
             pause
         };
+        deadline = tokio::time::Instant::now() + pause;
     }
 }
 

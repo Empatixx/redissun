@@ -94,6 +94,15 @@ impl Local {
         cache.put(key, (value, Instant::now()));
     }
 
+    fn store_if_unchanged(&self, key: Bytes, value: Bytes, epoch: u64) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if self.epoch.load(Ordering::Acquire) == epoch {
+            cache.put(key, (value, Instant::now()));
+        } else {
+            cache.pop(&key);
+        }
+    }
+
     fn forget(&self, key: &Bytes) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -321,9 +330,7 @@ where
             return Ok(None);
         };
         let value = self.codec.decode(&raw)?;
-        if self.local.epoch.load(Ordering::Acquire) == epoch {
-            self.local.store(field, raw);
-        }
+        self.local.store_if_unchanged(field, raw, epoch);
         Ok(Some(value))
     }
 
@@ -345,6 +352,7 @@ where
             ),
             _ => message(&self.local.id, INVALIDATE, &[&field]),
         };
+        let epoch = self.local.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         let previous: Option<Bytes> = self
             .key
             .core
@@ -360,8 +368,7 @@ where
                 ],
             )
             .await?;
-        self.local.forget(&field);
-        self.local.store(field, value);
+        self.local.store_if_unchanged(field, value, epoch);
         previous.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
