@@ -14,10 +14,12 @@ visits.add_and_get(10).await?;
 
 ## Methods
 
+Every method is `async` and returns `redissun::Result<T>`. The **Returns** column shows `T`, the value inside `Ok`. `()` means the call has no value to give back, only success or an error, so `?` passes the error on and drops the `()`.
+
 | Method | Redis command | Returns |
 |---|---|---|
 | `get()` | `GET` | the value, 0 if missing |
-| `set(v)` | `SET` | nothing |
+| `set(v)` | `SET` | `()` |
 | `get_and_set(v)` | `SET GET` | the old value |
 | `get_and_delete()` | `GETDEL` | the old value |
 | `compare_and_set(expected, update)` | Lua script | `true` if the value was changed |
