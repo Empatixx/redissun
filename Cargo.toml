@@ -11,8 +11,9 @@ keywords = ["redis", "distributed-lock", "redisson", "tokio", "async"]
 categories = ["asynchronous", "concurrency", "database"]
 
 [dependencies]
+async-trait = "0.1"
 bytes = "1"
-fred = { version = "10.1", default-features = false, features = ["i-std", "i-hashes", "i-lists", "i-sets", "i-sorted-sets", "i-streams", "transactions", "i-client", "i-keys", "i-scripts", "i-pubsub", "i-cluster", "sentinel-client", "subscriber-client", "sha-1"] }
+fred = { version = "10.1", default-features = false, features = ["i-std", "i-hashes", "i-lists", "i-sets", "i-sorted-sets", "i-streams", "transactions", "i-client", "i-keys", "i-scripts", "i-pubsub", "i-cluster", "sentinel-client", "subscriber-client", "sha-1", "credential-provider"] }
 futures = "0.3"
 highway = "1.3"
 serde = "1"

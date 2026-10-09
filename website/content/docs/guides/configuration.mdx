@@ -33,6 +33,9 @@ let client = Client::builder()
 | `pool_size` | 4 | `connectionPoolSize` | number of connections |
 | `database` | from the URL, else 0 | `database` | database number |
 | `client_name` | none | `clientName` | name of every connection, shown by `CLIENT LIST` |
+| `username`, `password` | from the URL | `username`, `password` | credentials for `AUTH` |
+| `credentials_resolver` | none | `credentialsResolver` | async function that gives the credentials of each new connection |
+| `credentials_refresh_interval` | none | `nextRenewal` | how often open connections ask the resolver again |
 | `timeout` | 3 s | `timeout` | how long a command waits for its reply |
 | `connect_timeout` | 10 s | `connectTimeout` | how long `build` and one connection attempt may take |
 | `retry_attempts` | 4 | `retryAttempts` | how often a command is sent again after its connection failed |
@@ -49,6 +52,37 @@ let client = Client::builder()
 | `fair_lock_wait_timeout` | 5 min | `fairLockWaitTimeout` | how long a `FairLock` waiter keeps its place |
 | `eviction_interval` | 5 s | `minCleanUpDelay` | first pause of the cache clean-up task |
 | `codec` | JSON | `codec` | how values are turned into bytes, see [Codecs](/docs/guides/codecs) |
+
+## Credentials
+
+A password in the URL works: `redis://user:password@host:6379`. `username` and `password` on the builder replace the ones in the URL, so the secret can stay out of the URL:
+
+```rust
+let client = Client::builder()
+    .url("redis://redis.example.com:6379")
+    .username("orders")
+    .password(std::env::var("REDIS_PASSWORD")?)
+    .build()
+    .await?;
+```
+
+For passwords or tokens that change, give a resolver, like Redisson's `CredentialsResolver`. It gets the node's `host:port` and is asked for every new connection. With `credentials_refresh_interval` the open connections ask it again and send a new `AUTH`.
+
+```rust
+use redissun::Credentials;
+
+let client = Client::builder()
+    .url("redis://redis.example.com:6379")
+    .credentials_resolver(|address| async move {
+        let token = fetch_token_for(&address).await?;
+        Ok(Credentials::new("orders", token))
+    })
+    .credentials_refresh_interval(Duration::from_secs(600))
+    .build()
+    .await?;
+```
+
+An error from the resolver fails the connection. `Debug` output never shows a password.
 
 ## Timeouts
 

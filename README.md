@@ -424,6 +424,9 @@ The names and defaults follow Redisson's config.
 | `pool_size` | 4 | `connectionPoolSize` | number of connections |
 | `database` | from the URL, else 0 | `database` | database number |
 | `client_name` | none | `clientName` | name of every connection in `CLIENT LIST` |
+| `username`, `password` | from the URL | `username`, `password` | credentials for `AUTH`. They replace the ones in the URL. |
+| `credentials_resolver` | none | `credentialsResolver` | async function that returns the `Credentials` for each new connection |
+| `credentials_refresh_interval` | none | `CredentialsResolver.nextRenewal` | how often open connections ask the resolver again and send a new `AUTH` |
 | `timeout` | 3 s | `timeout` | how long a command waits for its reply. Blocking pops and reads are not limited. 0 waits forever. |
 | `connect_timeout` | 10 s | `connectTimeout` | how long `build` and one connection attempt may take |
 | `retry_attempts` | 4 | `retryAttempts` | how often a command is sent again after its connection failed |

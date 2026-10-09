@@ -29,6 +29,10 @@ struct Settings {
     tcp_no_delay: bool,
     client_name: Option<String>,
     database: Option<u8>,
+    username: Option<String>,
+    password: Option<String>,
+    resolver: Option<crate::credentials::Resolver>,
+    credentials_refresh: Option<Duration>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
     tls: crate::tls::TlsSettings,
 }
@@ -75,6 +79,9 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             .field("tcp_no_delay", &settings.tcp_no_delay)
             .field("client_name", &settings.client_name)
             .field("database", &settings.database)
+            .field("username", &settings.username)
+            .field("password_set", &settings.password.is_some())
+            .field("credentials_resolver", &settings.resolver)
             .finish()
     }
 }
@@ -108,6 +115,10 @@ impl ClientBuilder<JsonCodec> {
                 tcp_no_delay: true,
                 client_name: None,
                 database: None,
+                username: None,
+                password: None,
+                resolver: None,
+                credentials_refresh: None,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
                 tls: Default::default(),
             },
@@ -280,6 +291,49 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
+    /// The ACL user for `AUTH`, like Redisson's `username`. It replaces a user given in the URL.
+    pub fn username(mut self, username: impl Into<String>) -> Self {
+        self.settings.username = Some(username.into());
+        self
+    }
+
+    /// The password for `AUTH`, like Redisson's `password`. It replaces a password given in the URL. `Debug` never prints it.
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.settings.password = Some(password.into());
+        self
+    }
+
+    /// Asks `resolve` for the credentials of every new connection, like Redisson's `credentialsResolver`. It gets the node's `host:port` and replaces [`username`](ClientBuilder::username) and [`password`](ClientBuilder::password). An error from it fails the connection.
+    ///
+    /// ```no_run
+    /// # async fn run() -> redissun::Result<()> {
+    /// use redissun::{Client, Credentials};
+    ///
+    /// let client = Client::builder()
+    ///     .url("redis://127.0.0.1:6379")
+    ///     .credentials_resolver(|_address| async {
+    ///         Ok(Credentials::new("app", std::env::var("REDIS_TOKEN").unwrap_or_default()))
+    ///     })
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn credentials_resolver<F, Fut>(mut self, resolve: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<crate::Credentials>> + Send + 'static,
+    {
+        self.settings.resolver = Some(crate::credentials::Resolver::new(resolve));
+        self
+    }
+
+    /// How often open connections ask the [`credentials_resolver`](ClientBuilder::credentials_resolver) again and send a new `AUTH`, like Redisson's `CredentialsResolver::nextRenewal`. Use it for passwords or tokens that expire. Not set by default.
+    pub fn credentials_refresh_interval(mut self, interval: Duration) -> Self {
+        self.settings.credentials_refresh = Some(interval);
+        self
+    }
+
     /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
@@ -320,6 +374,17 @@ impl<C: Codec> ClientBuilder<C> {
         self.secure(&mut config, tls)?;
         if settings.database.is_some() {
             config.database = settings.database;
+        }
+        if settings.username.is_some() {
+            config.username = settings.username.clone();
+        }
+        if settings.password.is_some() {
+            config.password = settings.password.clone();
+        }
+        if let Some(resolver) = &settings.resolver {
+            let mut resolver = resolver.clone();
+            resolver.refresh = settings.credentials_refresh;
+            config.credential_provider = Some(std::sync::Arc::new(resolver));
         }
         let mut builder = Builder::from_config(config);
         builder.set_policy(settings.reconnection_delay.reconnect_policy());
@@ -481,6 +546,42 @@ mod tests {
     fn the_url_database_is_kept_without_an_override() {
         let built = fred(ClientBuilder::new().url("redis://127.0.0.1:6379/3"));
         assert_eq!(built.get_config().unwrap().database, Some(3));
+    }
+
+    #[test]
+    fn builder_credentials_replace_the_url_credentials() {
+        let built = fred(
+            ClientBuilder::new()
+                .url("redis://old:secret@127.0.0.1:6379")
+                .username("new")
+                .password("better"),
+        );
+        let config = built.get_config().unwrap();
+        assert_eq!(config.username.as_deref(), Some("new"));
+        assert_eq!(config.password.as_deref(), Some("better"));
+        assert!(config.credential_provider.is_none());
+    }
+
+    #[test]
+    fn the_resolver_becomes_the_credential_provider() {
+        let built = fred(
+            ClientBuilder::new()
+                .url("redis://127.0.0.1:6379")
+                .credentials_refresh_interval(Duration::from_secs(60))
+                .credentials_resolver(|_| async { Ok(crate::Credentials::default()) }),
+        );
+        let provider = built.get_config().unwrap().credential_provider.clone();
+        assert_eq!(
+            provider.unwrap().refresh_interval(),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_password() {
+        let text = format!("{:?}", ClientBuilder::new().password("hunter2"));
+        assert!(!text.contains("hunter2"));
+        assert!(text.contains("password_set: true"));
     }
 
     #[test]
