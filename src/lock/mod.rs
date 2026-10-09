@@ -1,3 +1,4 @@
+pub(crate) mod fair;
 mod guard;
 mod watchdog;
 
@@ -200,6 +201,7 @@ pub(crate) enum Mode {
     Exclusive,
     Read,
     Write,
+    Fair,
 }
 
 fn write_field(owner: &str) -> String {
@@ -244,6 +246,19 @@ pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode)
                 )
                 .await?
         }
+        Mode::Fair => {
+            key.core
+                .eval(
+                    &fair::RELEASE,
+                    fair::keys(key),
+                    vec![
+                        lease_arg(lease)?,
+                        Bytes::from(owner.to_string()),
+                        Bytes::from(fair::channel_prefix(key.name())),
+                    ],
+                )
+                .await?
+        }
         Mode::Exclusive => {
             key.core
                 .eval(
@@ -281,7 +296,7 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration, mode: Mode) -
                 )
                 .await?
         }
-        Mode::Exclusive => {
+        Mode::Exclusive | Mode::Fair => {
             key.core
                 .eval(
                     &RENEW,
@@ -302,11 +317,20 @@ enum Attempt {
 /// A pending [`Lock::lock`]. Await it to wait for the lock without a limit. Set `.lease(duration)` or `.timeout(duration)` first to change that.
 #[must_use = "a pending lock does nothing until it is awaited"]
 pub struct LockRequest<'a> {
-    lock: &'a Lock,
+    key: &'a Key,
+    mode: Mode,
     lease: Option<Duration>,
 }
 
 impl<'a> LockRequest<'a> {
+    pub(crate) fn new(key: &'a Key, mode: Mode) -> Self {
+        Self {
+            key,
+            mode,
+            lease: None,
+        }
+    }
+
     /// Sets an explicit lease, which disables the watchdog. Without it the watchdog renews the lock.
     pub fn lease(mut self, lease: Duration) -> Self {
         self.lease = Some(lease);
@@ -315,8 +339,8 @@ impl<'a> LockRequest<'a> {
 
     /// Waits at most `timeout` for the lock. The call then resolves to `None` when the time runs out.
     pub fn timeout(self, timeout: Duration) -> PendingTimeout<'a, LockGuard> {
-        let (lock, lease) = (self.lock, self.lease);
-        Pending::new(move |wait| acquire(&lock.key, lease, wait, Mode::Exclusive)).timeout(timeout)
+        let (key, mode, lease) = (self.key, self.mode, self.lease);
+        Pending::new(move |wait| acquire(key, lease, wait, mode)).timeout(timeout)
     }
 }
 
@@ -325,12 +349,8 @@ impl<'a> IntoFuture for LockRequest<'a> {
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let (lock, lease) = (self.lock, self.lease);
-        Box::pin(async move {
-            acquire(&lock.key, lease, None, Mode::Exclusive)
-                .await?
-                .ok_or(Error::Timeout)
-        })
+        let (key, mode, lease) = (self.key, self.mode, self.lease);
+        Box::pin(async move { acquire(key, lease, None, mode).await?.ok_or(Error::Timeout) })
     }
 }
 
@@ -363,10 +383,7 @@ impl Lock {
 
     /// Waits until the lock is acquired. Add `.timeout(duration)` to wait at most that long, or `.lease(duration)` to set a lease instead of using the watchdog.
     pub fn lock(&self) -> LockRequest<'_> {
-        LockRequest {
-            lock: self,
-            lease: None,
-        }
+        LockRequest::new(&self.key, Mode::Exclusive)
     }
 
     /// Acquires the lock when it is free; returns `None` immediately otherwise.
@@ -428,10 +445,15 @@ pub(crate) async fn acquire(
     let watchdog = lease.is_none();
     let lease = lease.unwrap_or(core.lock_lease);
     let deadline = wait.map(|wait| Instant::now() + wait);
+    let wake_channel = match mode {
+        Mode::Fair => fair::channel(key.name(), &owner),
+        _ => channel(key.name()),
+    };
     let subscription = match wait {
         Some(wait) if wait.is_zero() => None,
-        _ => Some(core.pubsub.subscribe(&channel(key.name())).await?),
+        _ => Some(core.pubsub.subscribe(&wake_channel).await?),
     };
+    let mut queued = (mode == Mode::Fair).then(|| fair::Queued::new(key.clone(), owner.clone()));
     let local = Notify::new();
     let notify: &Notify = subscription.as_ref().map_or(&local, |s| s.notify());
 
@@ -465,6 +487,15 @@ pub(crate) async fn acquire(
                         vec![key.redis_key()],
                         vec![argument, Bytes::from(write_field(&owner))],
                     ),
+                    Mode::Fair => (
+                        &fair::ACQUIRE,
+                        fair::keys(&key),
+                        vec![
+                            argument,
+                            Bytes::from(owner.clone()),
+                            Bytes::from(fair::SLOT_MILLIS.to_string()),
+                        ],
+                    ),
                 };
                 let pttl: Option<i64> = key.core.eval(script, keys, args).await?;
                 Ok(match pttl {
@@ -487,7 +518,12 @@ pub(crate) async fn acquire(
             .await?
         };
         let pttl = match attempt {
-            Attempt::Acquired(guard) => return Ok(Some(guard)),
+            Attempt::Acquired(guard) => {
+                if let Some(queued) = queued.as_mut() {
+                    queued.disarm();
+                }
+                return Ok(Some(guard));
+            }
             Attempt::Busy(pttl) => pttl,
         };
 
@@ -495,6 +531,9 @@ pub(crate) async fn acquire(
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
+                    if let Some(queued) = queued.as_mut() {
+                        queued.cancel().await;
+                    }
                     return Ok(None);
                 }
                 Some(remaining)
