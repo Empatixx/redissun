@@ -243,3 +243,42 @@ async fn object_methods_cover_the_queue_keys() {
     let _ = waiting.await;
     drop(holder);
 }
+
+#[tokio::test]
+async fn a_waiter_keeps_its_place_while_the_holder_is_slow() {
+    let client = client().await;
+    let name = unique("fair");
+    let lock = lock_of(&client, &name);
+    let order = Arc::new(Mutex::new(Vec::new()));
+
+    let holder = lock.clone();
+    let first = tokio::spawn(async move {
+        let guard = holder.lock().lease(Duration::from_secs(3)).await.unwrap();
+        sleep(Duration::from_secs(1)).await;
+        guard.unlock().await.unwrap();
+    });
+    sleep(Duration::from_millis(100)).await;
+
+    let mut tasks = Vec::new();
+    for (index, hold) in [(0usize, 9u64), (1, 0), (2, 0)] {
+        let waiter = lock.clone();
+        let order = order.clone();
+        tasks.push(tokio::spawn(async move {
+            if index == 2 {
+                sleep(Duration::from_secs(5)).await;
+            }
+            let guard = waiter.lock().await.unwrap();
+            order.lock().await.push(index);
+            sleep(Duration::from_secs(hold)).await;
+            guard.unlock().await.unwrap();
+        }));
+        if index < 2 {
+            queued(&lock, index + 1).await;
+        }
+    }
+    first.await.unwrap();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(*order.lock().await, vec![0, 1, 2]);
+}

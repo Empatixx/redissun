@@ -13,8 +13,9 @@ local now = t[1] * 1000 + math.floor(t[2] / 1000)
 const PURGE_STALE: &str = "while true do
     local head = redis.call('LINDEX', KEYS[2], 0)
     if head == false then break end
+    if head == ARGV[2] then break end
     local due = redis.call('ZSCORE', KEYS[3], head)
-    if due ~= false and tonumber(due) <= now then
+    if due == false or tonumber(due) <= now then
         redis.call('ZREM', KEYS[3], head)
         redis.call('LPOP', KEYS[2])
     else
