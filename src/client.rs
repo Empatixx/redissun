@@ -12,6 +12,7 @@ use crate::object::{tagged, Key};
 use crate::rate_limiter::RateLimiter;
 use crate::rw_lock::RwLock;
 use crate::semaphore::Semaphore;
+use crate::sorted_set::SortedSet;
 use crate::topic::Topic;
 use std::fmt;
 use std::sync::Arc;
@@ -69,6 +70,11 @@ impl<C: Codec> Client<C> {
     /// Returns the [`HashSet`](crate::HashSet) stored under `name`.
     pub fn hash_set<V>(&self, name: impl Into<Arc<str>>) -> crate::hash_set::HashSet<V, C> {
         crate::hash_set::HashSet::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`SortedSet`] stored under `name`.
+    pub fn sorted_set<V>(&self, name: impl Into<Arc<str>>) -> SortedSet<V, C> {
+        SortedSet::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Topic`] named `name`.
