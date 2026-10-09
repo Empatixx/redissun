@@ -236,7 +236,7 @@ impl Drop for Queued {
 }
 
 async fn acquire_failed(key: &Key, owner: &str, wait: Duration) -> Result<()> {
-    with_sync_retry(|| async {
+    with_sync_retry(&key.core.retry, || async {
         let _: i64 = synced_eval(
             key,
             &ACQUIRE_FAILED,

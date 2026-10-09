@@ -3,8 +3,9 @@ use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::object::millis as to_millis;
 use crate::reply::{bytes, int, malformed, number, text};
+use crate::retry::DelayStrategy;
 use bytes::Bytes;
-use fred::clients::Client as RedisClient;
+use fred::clients::{Client as RedisClient, Pipeline};
 use fred::interfaces::{ClientLike, ClusterInterface};
 use fred::prelude::Options;
 use fred::types::cluster::ClusterRouting;
@@ -23,7 +24,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
-use uuid::Uuid;
 
 type Complete = Box<dyn FnOnce(Result<Value>) + Send>;
 type FredResult<T> = std::result::Result<T, fred::error::Error>;
@@ -33,8 +33,6 @@ type Sending = Pin<Box<dyn Future<Output = FredResult<Resp3Frame>> + Send>>;
 type Replication = Option<(&'static str, Vec<Value>)>;
 
 const IDLE_CONNECTIONS: usize = 8;
-const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
-const DEFAULT_RETRY_ATTEMPTS: u32 = 4;
 
 struct Op {
     name: &'static str,
@@ -85,31 +83,6 @@ struct Replicas {
     slaves: u64,
     timeout: Duration,
     local_aof: Option<u64>,
-}
-
-#[derive(Clone, Copy)]
-enum RetryDelay {
-    Constant(Duration),
-    EqualJitter,
-}
-
-impl RetryDelay {
-    fn after(self, attempt: u32) -> Duration {
-        match self {
-            RetryDelay::Constant(delay) => delay,
-            RetryDelay::EqualJitter => {
-                let (base, max) = (1000u64, 2000u64);
-                let exponential = if attempt >= 63 {
-                    max
-                } else {
-                    base.saturating_mul(1u64 << attempt).min(max)
-                };
-                let half = exponential / 2;
-                let random = (Uuid::new_v4().as_u128() % u128::from(half + 1)) as u64;
-                Duration::from_millis(half + random)
-            }
-        }
-    }
 }
 
 fn frame_value(frame: Resp3Frame) -> Result<Value> {
@@ -336,6 +309,7 @@ impl Session {
     fn enqueue(&mut self, role: Role, name: &'static str, args: Vec<Value>, hash: ClusterHash) {
         let client = self.lease.client.with_options(&Options {
             max_attempts: Some(1),
+            timeout: Some(Duration::ZERO),
             ..Default::default()
         });
         let command = CustomCommand::new_static(name, hash, false);
@@ -505,7 +479,7 @@ pub struct Batch<C: Codec> {
     skip_result: bool,
     response_timeout: Duration,
     retry_attempts: u32,
-    retry_delay: RetryDelay,
+    retry_delay: DelayStrategy,
     sync: Option<Replicas>,
 }
 
@@ -519,6 +493,7 @@ impl<C: Codec> fmt::Debug for Batch<C> {
 
 impl<C: Codec> Batch<C> {
     pub(crate) fn new(core: Arc<Core>, codec: C) -> Self {
+        let retry = core.retry;
         Self {
             core,
             codec,
@@ -526,9 +501,9 @@ impl<C: Codec> Batch<C> {
             stored: Mutex::new(None),
             mode: Mode::Pipeline,
             skip_result: false,
-            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
-            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
-            retry_delay: RetryDelay::EqualJitter,
+            response_timeout: retry.timeout,
+            retry_attempts: retry.attempts,
+            retry_delay: retry.delay,
             sync: None,
         }
     }
@@ -551,21 +526,27 @@ impl<C: Codec> Batch<C> {
         self
     }
 
-    /// How long one attempt may wait for Redis before it fails with `Error::Timeout` or is retried. With [`sync`](Batch::sync) the sync timeout is added. The default is 3 seconds, Redisson's default `timeout`.
+    /// How long one attempt may wait for Redis before it fails with `Error::Timeout` or is retried. With [`sync`](Batch::sync) the sync timeout is added. The default is the client's [`timeout`](crate::ClientBuilder::timeout), 3 seconds unless changed, as in Redisson; zero waits forever.
     pub fn response_timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
         self
     }
 
-    /// Sends the batch again up to this many times when the connection fails or the response times out. A retried write can be applied twice. The default is 4, as in Redisson. Not used by [`stored_in_redis`](Batch::stored_in_redis).
+    /// Sends the batch again up to this many times when the connection fails or the response times out. A retried write can be applied twice. The default is the client's [`retry_attempts`](crate::ClientBuilder::retry_attempts), 4 unless changed, as in Redisson. Not used by [`stored_in_redis`](Batch::stored_in_redis).
     pub fn retry_attempts(mut self, attempts: u32) -> Self {
         self.retry_attempts = attempts;
         self
     }
 
-    /// A fixed pause between retries. By default the pause grows from about 0.5 to 2 seconds with random jitter, like Redisson's `EqualJitterDelay(1s, 2s)`.
+    /// A fixed pause between retries, the same as `retry_delay(DelayStrategy::Constant(interval))`.
     pub fn retry_interval(mut self, interval: Duration) -> Self {
-        self.retry_delay = RetryDelay::Constant(interval);
+        self.retry_delay = DelayStrategy::Constant(interval);
+        self
+    }
+
+    /// The pause between retries, like Redisson's `retryDelay`. The default is the client's [`retry_delay`](crate::ClientBuilder::retry_delay): unless changed, it grows from about 0.5 to 2 seconds with random jitter, like Redisson's `EqualJitterDelay(1s, 2s)`.
+    pub fn retry_delay(mut self, delay: DelayStrategy) -> Self {
+        self.retry_delay = delay;
         self
     }
 
@@ -733,6 +714,9 @@ impl<C: Codec> Batch<C> {
         &self,
         work: impl Future<Output = std::result::Result<T, Failure>>,
     ) -> std::result::Result<T, Failure> {
+        if self.response_timeout.is_zero() {
+            return work.await;
+        }
         tokio::time::timeout(self.attempt_timeout(), work)
             .await
             .unwrap_or(Err(Failure::Timeout))
@@ -740,11 +724,13 @@ impl<C: Codec> Batch<C> {
 
     async fn run_with_retries(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
         let mut attempt = 0;
+        let mut pause = Duration::ZERO;
         loop {
             let outcome = self.with_timeout(self.run_once(ops)).await;
             match outcome {
                 Err(failure) if failure.retryable() && attempt < self.retry_attempts => {
-                    tokio::time::sleep(self.retry_delay.after(attempt)).await;
+                    pause = self.retry_delay.delay(attempt, pause);
+                    tokio::time::sleep(pause).await;
                     attempt += 1;
                 }
                 other => return other,
@@ -769,7 +755,10 @@ impl<C: Codec> Batch<C> {
     async fn run_pipeline(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
         let client = self.core.redis();
         let routing = routing(client);
-        let pipeline = client.pipeline();
+        let pipeline = Pipeline::from(client.with_options(&Options {
+            timeout: Some(Duration::ZERO),
+            ..Default::default()
+        }));
         let mut nodes: Vec<(Option<Server>, Option<u16>)> = Vec::new();
         for op in ops {
             let (server, slot) = locate(routing.as_ref(), &op.args, op.key_offset);

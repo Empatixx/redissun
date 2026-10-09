@@ -19,7 +19,7 @@ use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
-use sync::{synced_eval, with_sync_retry, UNLOCK_LATCH_TTL};
+use sync::{synced_eval, with_sync_retry};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -326,7 +326,10 @@ pub(crate) fn held_field(owner: &str, mode: Mode) -> String {
 
 pub(crate) async fn release(key: &Key, owner: &str, lease: Duration, mode: Mode) -> Result<()> {
     let request = Uuid::new_v4().to_string();
-    with_sync_retry(|| release_inner(key, owner, lease, mode, &request)).await
+    with_sync_retry(&key.core.retry, || {
+        release_inner(key, owner, lease, mode, &request)
+    })
+    .await
 }
 
 async fn release_inner(
@@ -337,7 +340,7 @@ async fn release_inner(
     request: &str,
 ) -> Result<()> {
     let latch = unlock_latch(key, request);
-    let latch_ttl = Bytes::from(UNLOCK_LATCH_TTL.as_millis().to_string());
+    let latch_ttl = Bytes::from(key.core.retry.unlock_latch_ttl().as_millis().to_string());
     let (script, keys, args): (&Script, Vec<String>, Vec<Bytes>) = match mode {
         Mode::Read => (
             &READ_RELEASE,
@@ -419,7 +422,7 @@ pub(crate) async fn force_unlock(
     keys: Vec<String>,
     args: Vec<Bytes>,
 ) -> Result<bool> {
-    with_sync_retry(|| async {
+    with_sync_retry(&key.core.retry, || async {
         let removed: i64 = synced_eval(key, script, keys.clone(), args.clone(), true).await?;
         Ok(removed == 1)
     })
@@ -651,7 +654,7 @@ async fn try_acquire(
     wait: Wait,
     fair_wait: Duration,
 ) -> Result<Outcome> {
-    with_sync_retry(|| async {
+    with_sync_retry(&key.core.retry, || async {
         let (script, keys, args) = acquire_call(key, owner, lease, mode, wait, fair_wait)?;
         match synced_eval::<Value>(key, script, keys, args, false).await {
             Err(Error::NoSyncedReplicas) => {

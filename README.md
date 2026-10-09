@@ -392,7 +392,7 @@ redissun follows Redisson's business logic, so it shares Redisson's limits.
 
 - A lock lives on one Redis master. On Sentinel and Cluster, taking or releasing a lock waits until a replica has it (`WAIT`, like Redisson's `checkLockSyncedSlaves`), but a failover can still lose a lock in rare cases. Use `FencedLock` and check the token where correctness matters.
 - Commands that Redisson never repeats are sent once, for example taking a lock or a permit. When the connection drops during such a call, it returns an error and nobody knows whether Redis ran it. A lock then holds until its lease ends; semaphore permits can be lost.
-- Other commands are retried up to 3 times, so a write such as `incr` can be applied twice.
+- Other commands are sent again up to `retry_attempts` times (4 by default) when their connection fails, so a write such as `incr` can be applied twice.
 - `RateLimiter` counts its window with the clients' clocks, like Redisson. Clocks that differ, or requests delayed by the network, can let more permits through within one second, although the long-run rate holds.
 - `MultiLock` owners that list the same locks in different orders can block each other until their timeout. List the locks in the same order everywhere.
 - `VecDeque` pops and `Topic` messages are delivered at most once.
@@ -400,22 +400,48 @@ redissun follows Redisson's business logic, so it shares Redisson's limits.
 ## Settings
 
 ```rust
+use redissun::DelayStrategy;
+
 let client = Client::builder()
     .url("redis://127.0.0.1:6379")
     .pool_size(8)
-    .lock_lease(Duration::from_secs(30))
-    .connect_timeout(Duration::from_secs(10))
+    .timeout(Duration::from_secs(3))
+    .retry_attempts(4)
+    .retry_delay(DelayStrategy::EqualJitter {
+        base: Duration::from_secs(1),
+        max: Duration::from_secs(2),
+    })
+    .client_name("orders")
     .build()
     .await?;
 ```
 
-| Setting | Default | Meaning |
-|---|---|---|
-| `url` | none, required | Redis address |
-| `pool_size` | 4 | number of connections |
-| `lock_lease` | 30 s | lease for locks without their own lease |
-| `connect_timeout` | 10 s | how long `build` waits for the first connection |
-| `codec` | JSON | how values are turned into bytes |
+The names and defaults follow Redisson's config.
+
+| Setting | Default | Redisson | Meaning |
+|---|---|---|---|
+| `url` | none, required | `address` | Redis address. `redis-sentinel://` and `redis-cluster://` URLs work too. |
+| `pool_size` | 4 | `connectionPoolSize` | number of connections |
+| `database` | from the URL, else 0 | `database` | database number |
+| `client_name` | none | `clientName` | name of every connection in `CLIENT LIST` |
+| `timeout` | 3 s | `timeout` | how long a command waits for its reply. Blocking pops and reads are not limited. 0 waits forever. |
+| `connect_timeout` | 10 s | `connectTimeout` | how long `build` and one connection attempt may take |
+| `retry_attempts` | 4 | `retryAttempts` | how often a command is sent again after its connection failed |
+| `retry_delay` | `EqualJitter` 1 s to 2 s | `retryDelay` | pause between two retries of a batch or a lock write |
+| `reconnection_delay` | `EqualJitter` 100 ms to 10 s | `reconnectionDelay` | pause between two reconnection attempts |
+| `ping_connection_interval` | 30 s | `pingConnectionInterval` | how often each connection is checked with `PING`; 0 turns it off |
+| `keep_alive` | false | `keepAlive` | TCP keep-alive, with `tcp_keep_alive_idle` and `tcp_keep_alive_interval` |
+| `tcp_no_delay` | true | `tcpNoDelay` | `TCP_NODELAY` |
+| `lock_lease` | 30 s | `lockWatchdogTimeout` | lease for locks without their own lease |
+| `check_lock_synced_replicas` | true | `checkLockSyncedSlaves` | fail a lock call when no replica got the write |
+| `replicas_sync_timeout` | 1 s | `slavesSyncTimeout` | how long a lock write waits for replicas |
+| `fair_lock_wait_timeout` | 5 min | `fairLockWaitTimeout` | how long a `FairLock` waiter keeps its place |
+| `eviction_interval` | 5 s | `minCleanUpDelay` | first pause of the cache clean-up task |
+| `codec` | JSON | `codec` | how values are turned into bytes |
+
+`DelayStrategy` has Redisson's four strategies: `Constant`, `EqualJitter`, `FullJitter` and `DecorrelatedJitter`.
+
+Commands that Redisson sends only once, such as taking a lock, are never retried, whatever `retry_attempts` says.
 
 The client reconnects by itself after a lost connection. The connection for pub/sub is opened only when an object first needs it, for example a lock that has to wait or a `Topic` subscriber. When the last clone of the client is dropped, its connections are closed.
 

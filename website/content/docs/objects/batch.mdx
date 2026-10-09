@@ -36,8 +36,8 @@ As in Redisson, a command that Redis rejects fails its own handle and makes `exe
 | Call | Meaning |
 |---|---|
 | `.skip_result()` | the handles do not get the replies and resolve to `Error::Config`. If a command failed, `execute()` still returns that error. |
-| `.response_timeout(time)` | how long one attempt waits for Redis before it is retried or fails with `Error::Timeout`. With `sync` the sync timeout is added. Default is 3 seconds, Redisson's `timeout`. |
-| `.retry_attempts(n)`, `.retry_interval(time)` | send the batch again when the connection fails or the response times out. A retried write can be applied twice. Default is 4 retries with a pause that grows from about 0.5 to 2 seconds with random jitter, as in Redisson. `retry_interval` sets a fixed pause. Not used by `stored_in_redis`. |
+| `.response_timeout(time)` | how long one attempt waits for Redis before it is retried or fails with `Error::Timeout`. With `sync` the sync timeout is added. Default is the client's `timeout`, 3 seconds unless changed, as in Redisson. |
+| `.retry_attempts(n)`, `.retry_delay(strategy)`, `.retry_interval(time)` | send the batch again when the connection fails or the response times out. A retried write can be applied twice. Defaults are the client's `retry_attempts` and `retry_delay`: 4 retries with a pause that grows from about 0.5 to 2 seconds with random jitter, as in Redisson. `retry_interval` sets a fixed pause. Not used by `stored_in_redis`. |
 | `.sync(slaves, timeout)` | after the commands, wait on every node the batch wrote to until `slaves` replicas have them (`WAIT`). `BatchResult::synced_slaves` is the sum over the nodes. |
 | `.sync_aof(local, slaves, timeout)` | the same with `WAITAOF`, which also waits for fsync. Needs Redis 7.2. |
 

@@ -6,9 +6,16 @@
 
 - `StringCodec` (plain UTF-8 text, like Redisson's `StringCodec`) and `BytesCodec` (raw bytes, like Redisson's `ByteArrayCodec`).
 - `Client::with_codec(codec)`: a client with another codec that shares the connections, like Redisson's `getStream(name, codec)`. For example `client.with_codec(StringCodec).stream("s")` writes `XADD s * payload <json>` without JSON quotes.
+- Redisson's connection settings on `ClientBuilder`: `timeout` (3 s), `retry_attempts` (4), `retry_delay` and `reconnection_delay` with `DelayStrategy` (`Constant`, `EqualJitter`, `FullJitter`, `DecorrelatedJitter`), `ping_connection_interval` (30 s), `keep_alive` with `tcp_keep_alive_idle` and `tcp_keep_alive_interval`, `tcp_no_delay` (true), `client_name` and `database`.
+- `Batch::retry_delay`. A batch now takes its `response_timeout`, `retry_attempts` and retry delay from the client settings.
 
 ### Changed
 
+- Commands now time out after 3 seconds by default, like Redisson's `timeout`. Before, a command waited forever. Blocking pops and reads are not limited. Set `.timeout(Duration::ZERO)` for the old behaviour.
+- A command whose connection failed is now sent again up to 4 times (`retry_attempts`, Redisson's default) instead of 2. Commands that Redisson sends once are still sent once.
+- Reconnection pauses follow Redisson's `EqualJitterDelay(100 ms, 10 s)` instead of growing from 100 ms to 30 s.
+- `TCP_NODELAY` is on by default, as in Redisson.
+- Every connection is checked with `PING` every 30 seconds and reconnected when it does not answer, like Redisson's `pingConnectionInterval`.
 - The pub/sub connection is opened when an object first needs it (a lock or semaphore that waits, a `Topic` subscriber, cache events, `LocalCachedMap`, `DelayedQueue`), like Redisson's on-demand pub/sub connections. A client that never waits or subscribes keeps only its pool connections.
 
 ## [0.16.0] - 2026-10-09

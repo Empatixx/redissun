@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::object::Key;
+use crate::retry::Retry;
 use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, ClusterInterface};
@@ -12,16 +13,6 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-
-const RETRY_ATTEMPTS: u32 = 4;
-const RETRY_BASE_DELAY: Duration = Duration::from_millis(1000);
-const RETRY_MAX_DELAY: Duration = Duration::from_millis(2000);
-const RESPONSE_TIMEOUT: Duration = Duration::from_millis(3000);
-
-pub(crate) const UNLOCK_LATCH_TTL: Duration = Duration::from_millis(
-    (RESPONSE_TIMEOUT.as_millis() as u64 + RETRY_MAX_DELAY.as_millis() as u64)
-        * RETRY_ATTEMPTS as u64,
-);
 
 const WAIT_UNKNOWN: u8 = 0;
 const WAIT_SUPPORTED: u8 = 1;
@@ -75,39 +66,19 @@ impl LockSettings {
     }
 }
 
-pub(crate) fn retry_delay(attempt: u32) -> Duration {
-    let base = RETRY_BASE_DELAY.as_millis() as u64;
-    let max = RETRY_MAX_DELAY.as_millis() as u64;
-    let exponential = if attempt >= 63 || base >= max {
-        max
-    } else {
-        let shifted = 1u64 << attempt;
-        if shifted > max / base {
-            max
-        } else {
-            (base * shifted).min(max)
-        }
-    };
-    let half = exponential / 2;
-    let random = if half == 0 {
-        0
-    } else {
-        (uuid::Uuid::new_v4().as_u128() % (half as u128 + 1)) as u64
-    };
-    Duration::from_millis(half + random)
-}
-
-pub(crate) async fn with_sync_retry<T, F, Fut>(mut call: F) -> Result<T>
+pub(crate) async fn with_sync_retry<T, F, Fut>(retry: &Retry, mut call: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let mut attempts = 0;
+    let mut pause = Duration::ZERO;
     loop {
         match call().await {
-            Err(Error::NoSyncedReplicas) if attempts < RETRY_ATTEMPTS => {
+            Err(Error::NoSyncedReplicas) if attempts < retry.attempts => {
+                pause = retry.delay.delay(attempts, pause);
                 attempts += 1;
-                tokio::time::sleep(retry_delay(attempts)).await;
+                tokio::time::sleep(pause).await;
             }
             result => return result,
         }
@@ -127,9 +98,10 @@ fn eval_args(script: &Script, keys: &[String], args: &[Bytes]) -> Vec<Value> {
     values
 }
 
-fn options(retry: bool) -> Options {
+fn options(retry: bool, timeout: Option<Duration>) -> Options {
     Options {
         max_attempts: (!retry).then_some(1),
+        timeout,
         ..Default::default()
     }
 }
@@ -229,10 +201,13 @@ pub(crate) async fn synced_eval<R: FromValue>(
     }
 
     let timeout = settings.replicas_sync_timeout.as_millis() as i64;
+    let command_timeout = key.core.retry.timeout;
+    let wait_timeout =
+        (!command_timeout.is_zero()).then(|| command_timeout + settings.replicas_sync_timeout);
     let mut reloaded = false;
     loop {
         let pipeline = client.pipeline();
-        let queued = pipeline.with_options(&options(retry));
+        let queued = pipeline.with_options(&options(retry, wait_timeout));
         let _: Value = queued
             .custom(custom("EVALSHA", slot), eval_args(script, &keys, &args))
             .await?;

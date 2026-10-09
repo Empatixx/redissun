@@ -189,6 +189,10 @@ impl PubSub {
         Ok(pubsub)
     }
 
+    pub(crate) fn client(&self) -> &RedisClient {
+        &self.client
+    }
+
     pub(crate) fn reconnects(&self) -> broadcast::Receiver<()> {
         self.reconnects.subscribe()
     }

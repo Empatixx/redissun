@@ -1,0 +1,78 @@
+---
+title: Configuration
+description: Connection settings, timeouts and retries, with Redisson's names and defaults.
+---
+
+```rust
+use redissun::{Client, DelayStrategy};
+use std::time::Duration;
+
+let client = Client::builder()
+    .url("redis://127.0.0.1:6379")
+    .pool_size(8)
+    .timeout(Duration::from_secs(3))
+    .retry_attempts(4)
+    .retry_delay(DelayStrategy::EqualJitter {
+        base: Duration::from_secs(1),
+        max: Duration::from_secs(2),
+    })
+    .reconnection_delay(DelayStrategy::EqualJitter {
+        base: Duration::from_millis(100),
+        max: Duration::from_secs(10),
+    })
+    .client_name("orders")
+    .build()
+    .await?;
+```
+
+## Settings
+
+| Setting | Default | Redisson | Meaning |
+|---|---|---|---|
+| `url` | none, required | `address` | Redis address. Use `redis-sentinel://host:26379?sentinelServiceName=mymaster` for Sentinel and `redis-cluster://host:7000?node=host:7001` for Cluster. |
+| `pool_size` | 4 | `connectionPoolSize` | number of connections |
+| `database` | from the URL, else 0 | `database` | database number |
+| `client_name` | none | `clientName` | name of every connection, shown by `CLIENT LIST` |
+| `timeout` | 3 s | `timeout` | how long a command waits for its reply |
+| `connect_timeout` | 10 s | `connectTimeout` | how long `build` and one connection attempt may take |
+| `retry_attempts` | 4 | `retryAttempts` | how often a command is sent again after its connection failed |
+| `retry_delay` | `EqualJitter` 1 s to 2 s | `retryDelay` | pause between two retries of a batch or a lock write |
+| `reconnection_delay` | `EqualJitter` 100 ms to 10 s | `reconnectionDelay` | pause between two reconnection attempts |
+| `ping_connection_interval` | 30 s | `pingConnectionInterval` | how often each connection is checked with `PING` |
+| `keep_alive` | false | `keepAlive` | TCP keep-alive |
+| `tcp_keep_alive_idle` | system | `tcpKeepAliveIdle` | idle time before the first keep-alive probe |
+| `tcp_keep_alive_interval` | system | `tcpKeepAliveInterval` | pause between keep-alive probes |
+| `tcp_no_delay` | true | `tcpNoDelay` | `TCP_NODELAY` |
+| `lock_lease` | 30 s | `lockWatchdogTimeout` | lease for locks without their own lease |
+| `check_lock_synced_replicas` | true | `checkLockSyncedSlaves` | fail a lock call when no replica got the write |
+| `replicas_sync_timeout` | 1 s | `slavesSyncTimeout` | how long a lock write waits for replicas |
+| `fair_lock_wait_timeout` | 5 min | `fairLockWaitTimeout` | how long a `FairLock` waiter keeps its place |
+| `eviction_interval` | 5 s | `minCleanUpDelay` | first pause of the cache clean-up task |
+| `codec` | JSON | `codec` | how values are turned into bytes, see [Codecs](/docs/guides/codecs) |
+
+## Timeouts
+
+`timeout` limits how long a command waits for its reply. The call then fails with an error. Blocking calls such as `pop_front_wait` or `read_group_wait` are not limited, because they wait on purpose. A lock write that waits for replicas gets `replicas_sync_timeout` on top. `Duration::ZERO` turns the limit off.
+
+## Retries
+
+When a connection fails while a command waits for its reply, the client reconnects and sends the command again, up to `retry_attempts` times. A write such as `incr` can then be applied twice. Commands that Redisson sends only once are never sent again: taking and releasing locks and permits, pushes and pops, `SETNX`-like writes, `HINCRBY`, `ZINCRBY`, `GEOADD`, `XADD` and the like.
+
+A command is sent again as soon as its connection is back, so the pause before it is the `reconnection_delay`. `retry_delay` is the pause between two retries of a [Batch](/docs/objects/batch) and of a lock write that no replica confirmed.
+
+## Delay strategies
+
+| `DelayStrategy` | Redisson | Pause before retry `n` (from 0) |
+|---|---|---|
+| `Constant(d)` | `ConstantDelay` | always `d` |
+| `EqualJitter { base, max }` | `EqualJitterDelay` | `e = min(base × 2ⁿ, max)`, then a random value between `e / 2` and `e` |
+| `FullJitter { base, max }` | `FullJitterDelay` | `e = min(base × 2ⁿ, max)`, then a random value between 0 and `e` |
+| `DecorrelatedJitter { min, max }` | `DecorrelatedJitterDelay` | a random value between `min` and `min + 3 × previous pause`, at most `max` |
+
+For `reconnection_delay` the jitter is fixed by the underlying client, so the jitter strategies become an exponential pause from about the base to `max`.
+
+## Connection checks
+
+Every `ping_connection_interval` each pooled connection and the pub/sub connection get a `PING`. A connection that does not answer within `timeout` is closed and opened again. This finds connections that a firewall or a load balancer dropped without a word.
+
+The pub/sub connection is opened when an object first needs it: a lock or semaphore that waits, a `Topic` subscriber, cache events, a `LocalCachedMap` or a `DelayedQueue`.
