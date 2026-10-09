@@ -1,8 +1,10 @@
 use crate::codec::Codec;
-use crate::core::{Core, Evictor};
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::eviction::{self, KEYS_LIMIT};
 use crate::object::{millis as to_millis, HasKey, Key};
+use crate::pubsub::Subscription;
 use bytes::Bytes;
+use fred::interfaces::SortedSetsInterface;
 use fred::types::scripts::Script;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
@@ -12,18 +14,15 @@ use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::LazyLock;
 use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio::sync::Notify;
+use tokio::sync::broadcast::{self, error::RecvError};
 
-const NO_EXPIRY: &str = "92233720368547758";
-const EVICT_BATCH: usize = 100;
 const SCAN_PAGE: u32 = 100;
-const MAX_EVICT_PAUSE: Duration = Duration::from_secs(2 * 60 * 60);
 
 const NOW: &str = "local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local NEVER = 92233720368547758
 ";
 
 fn script(body: &str) -> Script {
@@ -32,13 +31,13 @@ fn script(body: &str) -> Script {
 
 static INSERT: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "local score = ARGV[1]
-        if score ~= ARGV[3] then
+        "local score = NEVER - now
+        if tonumber(ARGV[1]) > 0 then
             score = now + tonumber(ARGV[1])
         end
         local old = redis.call('ZSCORE', KEYS[1], ARGV[2])
         local live = old ~= false and tonumber(old) > now
-        if ARGV[4] == '1' and live then
+        if ARGV[3] == '1' and live then
             return 0
         end
         redis.call('ZADD', KEYS[1], score, ARGV[2])
@@ -59,22 +58,8 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    script(
-        "local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
-        if score == false then
-            return 0
-        end
-        redis.call('ZREM', KEYS[1], ARGV[1])
-        if tonumber(score) > now then
-            return 1
-        end
-        return 0",
-    )
-});
-
 static LEN: LazyLock<Script> =
-    LazyLock::new(|| script("return redis.call('ZCOUNT', KEYS[1], '(' .. now, '+inf')"));
+    LazyLock::new(|| script("return redis.call('ZCOUNT', KEYS[1], now, NEVER)"));
 
 static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
     script(
@@ -91,9 +76,17 @@ static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
 
 static EVICT: LazyLock<Script> = LazyLock::new(|| {
     script(
-        "local expired = redis.call('ZRANGEBYSCORE', KEYS[1], 0, now, 'LIMIT', 0, ARGV[1])
-        if #expired > 0 then
-            redis.call('ZREM', KEYS[1], unpack(expired))
+        "if ARGV[3] == '1' and not redis.call('SET', KEYS[3], 1, 'NX', 'PX', ARGV[2]) then
+            return -1
+        end
+        local expired = redis.call('ZRANGEBYSCORE', KEYS[1], 0, now, 'LIMIT', 0, ARGV[1])
+        for _, value in ipairs(expired) do
+            if redis.call('PUBLISH', KEYS[2], value) == 0 then
+                break
+            end
+        end
+        for i = 1, #expired, 5000 do
+            redis.call('ZREM', KEYS[1], unpack(expired, i, math.min(i + 4999, #expired)))
         end
         return #expired",
     )
@@ -122,7 +115,7 @@ pub struct SetInsert<'a, V, C: Codec, Q: ?Sized> {
 }
 
 impl<'a, V, C: Codec, Q: ?Sized> SetInsert<'a, V, C, Q> {
-    /// Makes the value expire after `ttl`.
+    /// Makes the value expire after `ttl`. Zero means it never expires.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
@@ -141,7 +134,10 @@ where
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let set = self.set;
-            let ttl = self.ttl.map(to_millis).transpose()?;
+            let ttl = match self.ttl {
+                Some(ttl) if !ttl.is_zero() => to_millis(ttl)?,
+                _ => 0,
+            };
             let added: i64 = set
                 .key
                 .core
@@ -149,24 +145,56 @@ where
                     &INSERT,
                     vec![set.key.redis_key()],
                     vec![
-                        Bytes::from(ttl.map_or(NO_EXPIRY.to_string(), |ttl| ttl.to_string())),
+                        Bytes::from(ttl.to_string()),
                         set.codec.encode(self.v)?,
-                        Bytes::from(NO_EXPIRY),
                         Bytes::from(if self.only_if_absent { "1" } else { "0" }),
                     ],
                 )
                 .await?;
-            if ttl.is_some() {
-                wake_evictor(&set.key.core, &set.key.redis_key());
-            }
             Ok(added == 1)
         })
     }
 }
 
-/// A distributed set in which every value can expire, stored in a Redis sorted set whose score is the expiry time, as in Redisson's `RedissonSetCache`. Values are equal when their encoded bytes are equal.
+/// Receives the values that the clean-up of a [`HashSetCache`] deleted, from [`HashSetCache::expired`].
+pub struct Expirations<V, C: Codec> {
+    _subscription: Subscription,
+    receiver: broadcast::Receiver<Bytes>,
+    codec: C,
+    _marker: PhantomData<fn() -> V>,
+}
+
+impl<V, C: Codec> fmt::Debug for Expirations<V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Expirations").finish_non_exhaustive()
+    }
+}
+
+impl<V, C> Expirations<V, C>
+where
+    V: DeserializeOwned + Send,
+    C: Codec,
+{
+    /// Waits for the next expired value. A listener that falls more than 256 values behind gets [`Error::Lagged`] once and then continues with the newest ones.
+    pub async fn recv(&mut self) -> Result<V> {
+        match self.receiver.recv().await {
+            Ok(payload) => self.codec.decode(&payload),
+            Err(RecvError::Lagged(missed)) => Err(Error::Lagged(missed as usize)),
+            Err(RecvError::Closed) => Err(Error::Redis("the subscription was closed".into())),
+        }
+    }
+
+    /// Turns the listener into a stream of expired values. The stream never ends.
+    pub fn into_stream(self) -> impl Stream<Item = Result<V>> {
+        stream::unfold(self, |mut expirations| async move {
+            Some((expirations.recv().await, expirations))
+        })
+    }
+}
+
+/// A distributed set in which every value can expire, modelled on Redisson's `RSetCache`. It is a Redis sorted set whose score is the expiry time; a value without a time limit gets the score `92233720368547758 - now`, as in Redisson. Values are equal when their encoded bytes are equal.
 ///
-/// Time is taken from the Redis server. Expired values are hidden at once, and a background task deletes them: it wakes up every [`ClientBuilder::eviction_interval`](crate::ClientBuilder::eviction_interval) when there is work and less often when there is none. [`HashSetCache::evict_expired`] does the same immediately.
+/// Time is taken from the Redis server. Reads skip expired values at once but leave them in Redis; a background task deletes them, as Redisson's eviction task does. It first runs [`ClientBuilder::eviction_interval`](crate::ClientBuilder::eviction_interval) after the set is first used in this client, deletes up to 100 values per run, and adapts its pause between that interval and 30 minutes. A short-lived lock in Redis lets only one client clean a set per run. [`HashSetCache::evict_expired`] cleans at once.
 pub struct HashSetCache<V, C: Codec> {
     key: Key,
     codec: C,
@@ -197,12 +225,30 @@ impl<V, C: Codec> HasKey for HashSetCache<V, C> {
 
 impl<V, C: Codec> HashSetCache<V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
-        start_evictor(&key.core, key.redis_key());
-        Self {
+        let set = Self {
             key,
             codec,
             _marker: PhantomData,
-        }
+        };
+        eviction::schedule(
+            &set.key.core,
+            format!("redissun__set_cache_eviction:{}", set.key.redis_key()),
+            &EVICT,
+            set.eviction_keys(),
+        );
+        set
+    }
+
+    fn expired_channel(&self) -> String {
+        format!("redissun_set_cache_expired:{}", self.key.redis_key())
+    }
+
+    fn eviction_keys(&self) -> std::vec::Vec<String> {
+        vec![
+            self.key.redis_key(),
+            self.expired_channel(),
+            eviction::latch_key(&self.key.redis_key()),
+        ]
     }
 }
 
@@ -211,7 +257,7 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    /// Adds a value, or replaces its time limit; returns whether it was new. Without [`SetInsert::ttl`] the value never expires. The value is borrowed: `set.insert("a").ttl(ttl)`.
+    /// Adds a value, or replaces its time limit; returns whether it was new or expired. Without [`SetInsert::ttl`] the value never expires. The value is borrowed: `set.insert("a").ttl(ttl)`.
     pub fn insert<'a, Q>(&'a self, v: &'a Q) -> SetInsert<'a, V, C, Q>
     where
         V: Borrow<Q>,
@@ -225,7 +271,7 @@ where
         }
     }
 
-    /// Adds a value only when there is no live one, and keeps the time limit of a live one; returns whether it was added.
+    /// Adds a value only when there is no live one, and keeps the time limit of a live one, like Redisson's `tryAdd`; returns whether it was added.
     pub fn insert_nx<'a, Q>(&'a self, v: &'a Q) -> SetInsert<'a, V, C, Q>
     where
         V: Borrow<Q>,
@@ -239,7 +285,7 @@ where
         }
     }
 
-    /// Removes a value; returns whether a live one was removed.
+    /// Removes a value; returns whether it was stored, even if it had already expired, as Redisson's `remove` does.
     pub async fn remove<Q>(&self, v: &Q) -> Result<bool>
     where
         V: Borrow<Q>,
@@ -248,11 +294,8 @@ where
         let removed: i64 = self
             .key
             .core
-            .eval(
-                &REMOVE,
-                vec![self.key.redis_key()],
-                vec![self.codec.encode(v)?],
-            )
+            .redis()
+            .zrem(self.key.redis_key(), self.codec.encode(v)?)
             .await?;
         Ok(removed == 1)
     }
@@ -314,13 +357,33 @@ where
         Ok(())
     }
 
-    /// Deletes the expired values now and returns how many.
+    /// Starts listening to the values that the clean-up deletes because they expired, from any client, as Redisson's `SetExpiredListener`.
+    pub async fn expired(&self) -> Result<Expirations<V, C>> {
+        let (subscription, receiver) = self
+            .key
+            .core
+            .pubsub
+            .subscribe_with_messages(&self.expired_channel())
+            .await?;
+        Ok(Expirations {
+            _subscription: subscription,
+            receiver,
+            codec: self.codec.clone(),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Deletes the expired values now, publishes them to [`HashSetCache::expired`] listeners and returns how many there were.
     pub async fn evict_expired(&self) -> Result<usize> {
         let mut total = 0;
         loop {
-            let evicted = evict(&self.key.core, self.key.redis_key()).await?;
-            total += evicted;
-            if evicted < EVICT_BATCH {
+            let evicted: i64 = self
+                .key
+                .core
+                .eval(&EVICT, self.eviction_keys(), eviction::arguments(None))
+                .await?;
+            total += evicted.max(0) as usize;
+            if evicted < KEYS_LIMIT {
                 return Ok(total);
             }
         }
@@ -330,7 +393,7 @@ where
     pub fn iter(&self) -> impl Stream<Item = Result<V>> + '_ {
         stream::try_unfold(Some("0".to_string()), move |cursor| async move {
             let Some(cursor) = cursor else {
-                return Ok::<_, crate::error::Error>(None);
+                return Ok::<_, Error>(None);
             };
             let (next, raw): (String, Vec<Bytes>) = self
                 .key
@@ -349,74 +412,5 @@ where
             Ok(Some((stream::iter(items.into_iter().map(Ok)), next)))
         })
         .try_flatten()
-    }
-}
-
-async fn evict(core: &Core, key: String) -> Result<usize> {
-    core.eval(
-        &EVICT,
-        vec![key],
-        vec![Bytes::from(EVICT_BATCH.to_string())],
-    )
-    .await
-}
-
-async fn evict_loop(core: Weak<Core>, key: String, minimum: Duration, wake: Arc<Notify>) {
-    let mut pause = minimum;
-    let mut deadline = tokio::time::Instant::now() + pause;
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {}
-            _ = wake.notified() => {
-                pause = minimum;
-                deadline = deadline.min(tokio::time::Instant::now() + minimum);
-                continue;
-            }
-        }
-        let Some(core) = core.upgrade() else {
-            return;
-        };
-        let evicted = evict(&core, key.clone()).await.unwrap_or(0);
-        pause = if evicted >= EVICT_BATCH {
-            (pause / 4).max(minimum)
-        } else if evicted == 0 {
-            (pause * 2).min(MAX_EVICT_PAUSE)
-        } else {
-            pause
-        };
-        deadline = tokio::time::Instant::now() + pause;
-    }
-}
-
-fn registry_name(key: &str) -> String {
-    format!("redissun__set_cache_evictor:{key}")
-}
-
-fn start_evictor(core: &Arc<Core>, key: String) {
-    let Ok(runtime) = Handle::try_current() else {
-        return;
-    };
-    let name = registry_name(&key);
-    let mut evictors = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
-    if evictors
-        .get(&name)
-        .is_some_and(|evictor| !evictor.handle.is_finished())
-    {
-        return;
-    }
-    let wake = Arc::new(Notify::new());
-    let handle = runtime.spawn(evict_loop(
-        Arc::downgrade(core),
-        key,
-        core.eviction_interval,
-        wake.clone(),
-    ));
-    evictors.insert(name, Evictor { handle, wake });
-}
-
-fn wake_evictor(core: &Core, key: &str) {
-    let evictors = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(evictor) = evictors.get(&registry_name(key)) {
-        evictor.wake.notify_one();
     }
 }

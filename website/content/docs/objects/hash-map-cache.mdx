@@ -19,25 +19,26 @@ let found = sessions.get("abc").await?;
 | Method | Notes |
 |---|---|
 | `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
-| `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl` |
-| `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` starts the time again. |
-| `insert_nx(&k, &v)` | inserts only when there is no live entry. It takes `.ttl(..)` and `.max_idle(..)` too. |
-| `get(&k)`, `remove(&k)`, `contains_key(&k)` | never show an expired entry. Only `get` starts the idle time again. |
+| `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl`. Zero means no limit. |
+| `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` and `contains_key` starts the time again. |
+| `insert_nx(&k, &v)` | inserts only when there is no live entry, like Redisson's `fastPutIfAbsent`. It takes `.ttl(..)` and `.max_idle(..)` too. |
+| `get(&k)`, `contains_key(&k)` | never show an expired entry. Both start the idle time again and count as a use for the size limit. |
+| `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
-| `len()`, `is_empty()`, `clear()` | `len` counts live entries only and deletes nothing |
-| `iter()`, `keys()`, `values()` | streams of live entries. They are `async`, because they delete expired entries first. |
+| `len()`, `is_empty()`, `clear()` | `len` is the number of entries in Redis; as in Redisson it counts expired entries until the clean-up deletes them |
+| `iter()`, `keys()`, `values()` | streams of live entries, 100 per page. Expired entries are skipped page by page, and returned entries start their idle time again. |
 | `evict_expired()` | deletes expired entries now and returns how many |
 | `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
 | `try_set_max_size(n, mode)` | the same, but only when no limit was set before |
-| `events()` | starts listening to changes. See below. |
+| `events()`, `events_of(kinds)` | start listening to changes. See below. |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
 
 ## How expiry works
 
-- Time comes from the Redis server, so programs with different clocks agree.
-- An expired entry is hidden at once. Every call also deletes the expired entries it touches.
-- A background task deletes the rest, like the eviction task in Redisson. It starts when you get the cache from the client, and runs once per cache name and client. It wakes up every `eviction_interval` (5 seconds by default) while there is work, and waits longer and longer (up to two hours) while there is none. It cleans up to 100 entries from each set per run. You can set the interval with `Client::builder().eviction_interval(..)`.
+- Time comes from the Redis server, so programs with different clocks agree. (Redisson uses the clock of the client.)
+- An expired entry is hidden at once, but reads do not delete it.
+- A background task deletes expired entries, like Redisson's eviction task. It starts when you get the cache from the client and runs once per cache name and client. It first runs after `eviction_interval` (5 seconds by default) and cleans up to 100 entries from each set per run. As in Redisson, the pause grows by half (up to 30 minutes) after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. A lock key `redissun__execute_task_once_latch:{name}` that lives as long as the pause (at most 30 seconds) makes sure only one client cleans a cache per run.
 - The task stops when the client is dropped.
 
 ## Maximum size
@@ -48,7 +49,7 @@ use redissun::EvictionMode;
 cache.set_max_size(1000, EvictionMode::Lru).await?;
 ```
 
-When the cache is full, an insert drops one entry: with `Lru` the one that was used longest ago, with `Lfu` the one that was used least often. Reads (`get`) and inserts count as use. The limit is stored in Redis, so every client of the cache follows it. Entries that were added before the limit was set are taken into account the first time the cache is over the limit. Expired entries do not count against the limit. Changing the mode starts the counting again.
+When the cache is full, inserts drop entries: with `Lru` the one that was used longest ago, with `Lfu` the one that was used least often. Reads, `contains_key` and inserts count as use. The rules are Redisson's: an insert without a time limit adds the entry and then drops the entries above the limit; an insert with a time limit first makes room, even when it replaces a live entry. The limit is stored in Redis, so every client of the cache follows it. Only entries written or read while a limit is set are tracked, so entries that were added before are never dropped for space. Changing the mode keeps the scores that were collected.
 
 ## Listening to changes
 
@@ -67,15 +68,16 @@ while let Ok(event) = events.recv().await {
 }
 ```
 
-- You get the changes made by every client, not only yours.
-- `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries whose time ended.
-- Nothing is published to Redis while nobody listens. The scripts check `PUBSUB NUMSUB` on the events channel, so listeners keep working after `del` and publishing stops after the last listener is gone.
-- A listener has a buffer of 256 events. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
+- You get the changes made by every client, not only yours. `events_of(&[EventKind::Removed])` listens to some kinds only.
+- `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries the clean-up deleted.
+- As in Redisson, each kind has its own channel, and the first listener sets `has-listeners` in the options hash. From then on every write publishes its changes, until the cache is deleted with `del`. Expired entries are always published by the clean-up.
+- Events of one kind arrive in order. When events of several kinds are waiting, `recv` returns removals first, then creations, updates and expirations.
+- A listener has a buffer of 256 events per kind. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
 - `into_stream()` turns the listener into a `Stream`.
 
 ## How it is stored
 
-This is the scheme of Redisson's `RMapCache`:
+The keys follow Redisson's `RMapCache`; the values are stored in redissun's own format.
 
 | Key | Type | Content |
 |---|---|---|
@@ -83,9 +85,9 @@ This is the scheme of Redisson's `RMapCache`:
 | `redissun__timeout__set:{name}` | sorted set | entry and the time when its time to live ends |
 | `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends |
 | `redissun__map_cache_last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
-| `redissun__map_cache_options:{name}` | hash | `max-size` and `mode` |
+| `redissun__map_cache_options:{name}` | hash | `max-size`, `mode` and `has-listeners` |
 
-Events are published on the channel `redissun__map_cache_events:{name}`.
+Events are published on the channels `redissun_map_cache_created:{name}`, `redissun_map_cache_updated:{name}`, `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`.
 
 ## Object methods
 
