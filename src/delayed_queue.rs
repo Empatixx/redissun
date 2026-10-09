@@ -18,7 +18,8 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 const TRANSFER_BATCH: u32 = 100;
-const IDLE_PAUSE: Duration = Duration::from_secs(3600);
+const IDLE_PAUSE: Duration = Duration::from_secs(60);
+const UNSUBSCRIBED_PAUSE: Duration = Duration::from_secs(1);
 
 static PUSH: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
@@ -237,7 +238,7 @@ fn start_transfer(destination: &Key) {
         return;
     };
     let core = &destination.core;
-    let name = format!("delay:{}", destination.redis_key());
+    let name = format!("redissun__delay_transfer:{}", destination.redis_key());
     let mut tasks = core.evictors.lock().unwrap_or_else(|e| e.into_inner());
     if tasks
         .get(&name)
@@ -292,6 +293,11 @@ async fn transfer_loop(core: Weak<Core>, channel: String, keys: Vec<String>) {
             Ok(0) => continue,
             Ok(remaining) => Duration::from_millis(remaining as u64),
             Err(_) => Duration::from_secs(1),
+        };
+        let pause = if subscription.is_some() {
+            pause
+        } else {
+            pause.min(UNSUBSCRIBED_PAUSE)
         };
         let _ = tokio::time::timeout(pause, notified).await;
     }

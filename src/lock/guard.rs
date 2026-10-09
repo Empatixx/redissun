@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::lock::{release, Mode};
 use crate::object::Key;
+use crate::shield::shielded;
 use std::fmt;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -59,7 +60,7 @@ impl LockGuard {
             return Ok(());
         };
         held.cancel.cancel();
-        release(&held.key, &held.owner, held.lease, held.mode).await
+        shielded(async move { release(&held.key, &held.owner, held.lease, held.mode).await }).await
     }
 }
 

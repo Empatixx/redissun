@@ -215,3 +215,15 @@ async fn cancelling_a_lock_at_any_moment_does_not_leave_it_held() {
         sleep(Duration::from_millis(20)).await;
     }
 }
+
+#[tokio::test]
+async fn a_cancelled_unlock_still_releases_the_lock() {
+    let lock = client().await.lock(unique("lock"));
+    let guard = lock.lock().await.unwrap();
+    let _ = timeout(Duration::from_nanos(1), guard.unlock()).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while lock.is_locked().await.unwrap() {
+        assert!(Instant::now() < deadline, "the lock stayed held");
+        sleep(Duration::from_millis(20)).await;
+    }
+}
