@@ -1,4 +1,4 @@
-import { source } from '@/lib/source'
+import { SITE_URL, markdownUrl, source } from '@/lib/source'
 import {
   DocsPage,
   DocsBody,
@@ -24,6 +24,11 @@ export default async function Page(props: {
       <DocsDescription>{page.data.description}</DocsDescription>
       <DocsBody>
         <MDX components={{ ...defaultMdxComponents }} />
+        <p className="text-sm text-fd-muted-foreground">
+          <a href={`/redissun${markdownUrl(page.slugs)}`}>View this page as Markdown</a>
+          {' · '}
+          <a href="/redissun/llms.txt">llms.txt</a>
+        </p>
       </DocsBody>
     </DocsPage>
   )
@@ -43,5 +48,8 @@ export async function generateMetadata(props: {
   return {
     title: page.data.title,
     description: page.data.description,
+    alternates: {
+      types: { 'text/markdown': `${SITE_URL}${markdownUrl(page.slugs)}` },
+    },
   }
 }

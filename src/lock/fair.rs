@@ -15,7 +15,7 @@ const PURGE_STALE: &str = "while true do
     if head == false then break end
     if head == ARGV[2] then break end
     local due = redis.call('ZSCORE', KEYS[3], head)
-    if due == false or tonumber(due) <= now then
+    if due == false or tonumber(due) + 1000 <= now then
         redis.call('ZREM', KEYS[3], head)
         redis.call('LPOP', KEYS[2])
     else

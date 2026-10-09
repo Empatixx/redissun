@@ -8,10 +8,10 @@
     "postinstall": "fumadocs-mdx"
   },
   "dependencies": {
-    "fumadocs-core": "^16.7.11",
-    "fumadocs-mdx": "^14.2.11",
-    "fumadocs-ui": "^16.7.11",
-    "next": "^16.2.2",
+    "fumadocs-core": "16.15.15",
+    "fumadocs-mdx": "14.2.14",
+    "fumadocs-ui": "16.15.15",
+    "next": "16.2.3",
     "react": "^19",
     "react-dom": "^19"
   },
@@ -24,5 +24,8 @@
     "postcss": "^8",
     "tailwindcss": "^4",
     "typescript": "^5.9"
+  },
+  "overrides": {
+    "mdast-util-to-markdown": "2.1.2"
   }
 }

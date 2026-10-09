@@ -33,7 +33,7 @@ The guard is the same `LockGuard` as for `Lock`. `FairLock` also has the `Object
 
 ## Crashed waiters
 
-Each waiter has a time until which it keeps its place. If the program crashes, the others skip it after that time (about 5 seconds for every waiter ahead of it).
+Each waiter has a time until which it keeps its place. If the program crashes, the others skip it one second after that time (about 5 seconds for every waiter ahead of it).
 
 ## Redis keys
 
