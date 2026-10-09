@@ -16,8 +16,11 @@ async fn kill_every_client_connection() {
         .unwrap();
 }
 
+static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn clients_recover_and_waiters_still_wake_after_every_connection_is_killed() {
+    let _turn = ONE_AT_A_TIME.lock().await;
     let holder_client = client().await;
     let waiter_client = client().await;
     let name = unique("lock");
@@ -55,6 +58,7 @@ async fn kill_pubsub_connections() {
 
 #[tokio::test]
 async fn topic_subscriber_keeps_receiving_after_the_pubsub_connection_is_killed() {
+    let _turn = ONE_AT_A_TIME.lock().await;
     let client = client().await;
     let topic = client.topic::<String>(unique("topic"));
     let mut subscriber = topic.subscribe().await.unwrap();
@@ -74,6 +78,7 @@ async fn topic_subscriber_keeps_receiving_after_the_pubsub_connection_is_killed(
 
 #[tokio::test]
 async fn local_cached_map_sees_remote_changes_after_the_pubsub_connection_is_killed() {
+    let _turn = ONE_AT_A_TIME.lock().await;
     let reader_client = client().await;
     let writer_client = client().await;
     let name = unique("lcm");
@@ -160,6 +165,7 @@ async fn receives_again(
 
 #[tokio::test]
 async fn reattach() {
+    let _turn = ONE_AT_A_TIME.lock().await;
     let client = client().await;
     let name = unique("topic");
     let topic = client.topic::<String>(name.clone());
@@ -196,6 +202,7 @@ async fn reattach() {
 
 #[tokio::test]
 async fn a_failed_resubscribe_is_retried_until_it_succeeds() {
+    let _turn = ONE_AT_A_TIME.lock().await;
     let user = AclUser::create().await;
     let client = user.client().await;
     let name = unique("topic");
@@ -219,6 +226,7 @@ async fn a_failed_resubscribe_is_retried_until_it_succeeds() {
 
 #[tokio::test]
 async fn add_listener_failover() {
+    let _turn = ONE_AT_A_TIME.lock().await;
     let user = AclUser::create().await;
     let client = user.client().await;
     let topic = client.topic::<String>(unique("topic"));
