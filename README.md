@@ -25,7 +25,7 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = "0.16"
+redissun = "0.17"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -498,7 +498,7 @@ To use a codec for every object, set it on the builder: `Client::builder().codec
 Turn on the `tls-rustls` feature and use a `rediss://` URL. It works for a single server, Sentinel (`rediss-sentinel://`) and Cluster (`rediss-cluster://`).
 
 ```toml
-redissun = { version = "0.16", features = ["tls-rustls"] }
+redissun = { version = "0.17", features = ["tls-rustls"] }
 ```
 
 ```rust

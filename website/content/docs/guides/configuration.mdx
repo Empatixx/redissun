@@ -117,7 +117,7 @@ TLS needs the `tls-rustls` feature:
 
 ```toml
 [dependencies]
-redissun = { version = "0.16", features = ["tls-rustls"] }
+redissun = { version = "0.17", features = ["tls-rustls"] }
 ```
 
 Then use a `rediss://` URL. Sentinel and Cluster work the same way with `rediss-sentinel://` and `rediss-cluster://`. The sentinels, the masters, the replicas and the cluster nodes must all speak TLS.
