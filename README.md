@@ -393,6 +393,7 @@ redissun follows Redisson's business logic, so it shares Redisson's limits.
 - A lock lives on one Redis master. On Sentinel and Cluster, taking or releasing a lock waits until a replica has it (`WAIT`, like Redisson's `checkLockSyncedSlaves`), but a failover can still lose a lock in rare cases. Use `FencedLock` and check the token where correctness matters.
 - Commands that Redisson never repeats are sent once, for example taking a lock or a permit. When the connection drops during such a call, it returns an error and nobody knows whether Redis ran it. A lock then holds until its lease ends; semaphore permits can be lost.
 - Other commands are retried up to 3 times, so a write such as `incr` can be applied twice.
+- `RateLimiter` counts its window with the clients' clocks, like Redisson. Clocks that differ, or requests delayed by the network, can let more permits through within one second, although the long-run rate holds.
 - `MultiLock` owners that list the same locks in different orders can block each other until their timeout. List the locks in the same order everywhere.
 - `VecDeque` pops and `Topic` messages are delivered at most once.
 
