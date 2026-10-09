@@ -311,9 +311,9 @@ async fn a_response_timeout_fails_the_execution_after_the_retries() {
         .retry_interval(Duration::from_millis(150));
     let name = unique("batch");
     let handle = batch.atomic_i64(name.clone()).incr();
-    for _ in 0..5000 {
-        let _ = batch.atomic_i64(name.clone()).get();
-    }
+    let _reads: std::vec::Vec<_> = (0..5000)
+        .map(|_| batch.atomic_i64(name.clone()).get())
+        .collect();
     let started = std::time::Instant::now();
     assert!(matches!(batch.execute().await, Err(Error::Timeout)));
     let elapsed = started.elapsed();
@@ -328,9 +328,9 @@ async fn by_default_a_batch_is_retried_four_times_with_jitter_like_redisson() {
     let batch = client.batch().response_timeout(Duration::from_nanos(1));
     let name = unique("batch");
     let handle = batch.atomic_i64(name.clone()).incr();
-    for _ in 0..5000 {
-        let _ = batch.atomic_i64(name.clone()).get();
-    }
+    let _reads: std::vec::Vec<_> = (0..5000)
+        .map(|_| batch.atomic_i64(name.clone()).get())
+        .collect();
     let started = std::time::Instant::now();
     assert!(matches!(batch.execute().await, Err(Error::Timeout)));
     let elapsed = started.elapsed();
