@@ -20,11 +20,10 @@ let value = bucket.get().await?;
 | `get()` | `GET` | `Option<V>` |
 | `set_ex(&v, ttl)` | `SET PX` | nothing |
 | `set_nx(&v)` | `SET NX` | `true` if the value was stored |
-| `get_set(&v)` | `SET GET` | the old value |
-| `get_del()` | `GETDEL` | the removed value |
-| `compare_and_set(&expected, &new)` | Lua script | `true` if the value was changed |
+| `get_set(&v)` | `GETSET` | the old value |
+| `get_del()` | Lua script | the removed value |
+| `compare_and_set(Some(&expected), Some(&new))` | Lua script | `true` if the value was changed. `None` as expected means "only if missing"; `None` as new deletes the key. |
 
-`get_set` and `get_del` need Redis 6.2 or newer.
 
 Values are passed by reference. For a `Bucket<String>` you can pass a `&str` such as `bucket.set("hello")`, or a `&String`.
 
