@@ -12,6 +12,9 @@ pub struct ClientBuilder<C: Codec = JsonCodec> {
     lock_lease: Duration,
     connect_timeout: Duration,
     eviction_interval: Duration,
+    check_lock_synced_replicas: bool,
+    replicas_sync_timeout: Duration,
+    fair_lock_wait_timeout: Duration,
     codec: C,
 }
 
@@ -23,6 +26,12 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             .field("lock_lease", &self.lock_lease)
             .field("connect_timeout", &self.connect_timeout)
             .field("eviction_interval", &self.eviction_interval)
+            .field(
+                "check_lock_synced_replicas",
+                &self.check_lock_synced_replicas,
+            )
+            .field("replicas_sync_timeout", &self.replicas_sync_timeout)
+            .field("fair_lock_wait_timeout", &self.fair_lock_wait_timeout)
             .finish()
     }
 }
@@ -35,6 +44,9 @@ impl ClientBuilder<JsonCodec> {
             lock_lease: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
             eviction_interval: Duration::from_secs(5),
+            check_lock_synced_replicas: true,
+            replicas_sync_timeout: Duration::from_secs(1),
+            fair_lock_wait_timeout: Duration::from_secs(300),
             codec: JsonCodec,
         }
     }
@@ -71,6 +83,24 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
+    /// Whether a lock call fails with `Error::NoSyncedReplicas` when no replica confirmed the write in time while replicas are connected. Lock calls are retried before they fail. Ignored for a single server. Defaults to `true`, like Redisson's `checkLockSyncedSlaves`.
+    pub fn check_lock_synced_replicas(mut self, check: bool) -> Self {
+        self.check_lock_synced_replicas = check;
+        self
+    }
+
+    /// How long a lock write waits for replicas (`WAIT`) in Sentinel and Cluster deployments. Defaults to 1 second, like Redisson's `slavesSyncTimeout`.
+    pub fn replicas_sync_timeout(mut self, timeout: Duration) -> Self {
+        self.replicas_sync_timeout = timeout;
+        self
+    }
+
+    /// How long a [`FairLock`](crate::FairLock) waiter that waits without a timeout keeps its place after the waiter ahead of it is due. Defaults to 5 minutes, like Redisson's `fairLockWaitTimeout`.
+    pub fn fair_lock_wait_timeout(mut self, timeout: Duration) -> Self {
+        self.fair_lock_wait_timeout = timeout;
+        self
+    }
+
     /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
@@ -79,6 +109,9 @@ impl<C: Codec> ClientBuilder<C> {
             lock_lease: self.lock_lease,
             connect_timeout: self.connect_timeout,
             eviction_interval: self.eviction_interval,
+            check_lock_synced_replicas: self.check_lock_synced_replicas,
+            replicas_sync_timeout: self.replicas_sync_timeout,
+            fair_lock_wait_timeout: self.fair_lock_wait_timeout,
             codec,
         }
     }
@@ -100,12 +133,27 @@ impl<C: Codec> ClientBuilder<C> {
         if self.eviction_interval.is_zero() {
             return Err(Error::Config("eviction_interval must be positive".into()));
         }
+        if self.replicas_sync_timeout.is_zero() {
+            return Err(Error::Config(
+                "replicas_sync_timeout must be positive".into(),
+            ));
+        }
+        if self.fair_lock_wait_timeout.is_zero() {
+            return Err(Error::Config(
+                "fair_lock_wait_timeout must be positive".into(),
+            ));
+        }
         let core = Core::connect(
             &url,
             self.pool_size,
             self.lock_lease,
             self.connect_timeout,
             self.eviction_interval,
+            crate::lock::LockSettings::new(
+                self.check_lock_synced_replicas,
+                self.replicas_sync_timeout,
+                self.fair_lock_wait_timeout,
+            ),
         )
         .await?;
         Ok(Client::from_parts(core, self.codec))

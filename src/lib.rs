@@ -80,7 +80,7 @@ pub use hyper_log_log::HyperLogLog;
 pub use latch::CountDownLatch;
 pub use local_cached_map::{LocalCachedMap, LocalCachedMapBuilder, SyncStrategy};
 pub use lock::{Lock, LockGuard, LockRequest};
-pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard};
+pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
 pub use object::Object;
 pub use pending::{Pending, PendingTimeout};
 pub use rate_limiter::{RateLimiter, RateType};

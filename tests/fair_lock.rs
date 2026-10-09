@@ -235,6 +235,7 @@ async fn object_methods_cover_the_queue_keys() {
     let waiting =
         tokio::spawn(async move { waiter.lock().timeout(Duration::from_millis(500)).await });
     queued(&lock, 1).await;
+    sleep(Duration::from_millis(100)).await;
 
     assert!(lock.exists().await.unwrap());
     assert!(lock.del().await.unwrap());

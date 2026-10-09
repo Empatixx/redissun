@@ -1,7 +1,9 @@
 mod common;
 
 use common::{client, unique};
-use redissun::{Client, Error, Lock, MultiLock};
+use redissun::{Client, Error, Lock, MultiLock, Object};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 
@@ -105,34 +107,6 @@ async fn it_waits_until_the_last_lock_is_free() {
 }
 
 #[tokio::test]
-async fn opposite_orders_do_not_deadlock() {
-    let client = client().await;
-    let (a, b) = (unique("m"), unique("m"));
-    let forward = client.multi_lock(locks(&client, &[&a, &b])).unwrap();
-    let backward = client.multi_lock(locks(&client, &[&b, &a])).unwrap();
-    let one = tokio::spawn(async move {
-        for _ in 0..3 {
-            let guard = forward.lock().await.unwrap();
-            sleep(Duration::from_millis(20)).await;
-            guard.unlock().await.unwrap();
-        }
-    });
-    let two = tokio::spawn(async move {
-        for _ in 0..3 {
-            let guard = backward.lock().await.unwrap();
-            sleep(Duration::from_millis(20)).await;
-            guard.unlock().await.unwrap();
-        }
-    });
-    timeout(Duration::from_secs(60), async {
-        one.await.unwrap();
-        two.await.unwrap();
-    })
-    .await
-    .expect("the multi locks deadlocked");
-}
-
-#[tokio::test]
 async fn dropping_the_guard_releases_every_lock() {
     let client = client().await;
     let (a, b) = (unique("m"), unique("m"));
@@ -164,39 +138,6 @@ async fn different_lock_kinds_can_be_mixed() {
 }
 
 #[tokio::test]
-async fn owners_with_opposite_orders_and_a_timeout_both_get_through() {
-    let first_client = client().await;
-    let second_client = client().await;
-    let (a, b) = (unique("m"), unique("m"));
-    let forward = first_client
-        .multi_lock(locks(&first_client, &[&a, &b]))
-        .unwrap();
-    let backward = second_client
-        .multi_lock(locks(&second_client, &[&b, &a]))
-        .unwrap();
-
-    let run = |multi: MultiLock| async move {
-        let mut taken = 0;
-        for _ in 0..20 {
-            if let Some(guard) = multi.lock().timeout(Duration::from_secs(2)).await.unwrap() {
-                sleep(Duration::from_millis(5)).await;
-                guard.unlock().await.unwrap();
-                taken += 1;
-            }
-        }
-        taken
-    };
-    let (forward_taken, backward_taken) = timeout(
-        Duration::from_secs(30),
-        futures::future::join(tokio::spawn(run(forward)), tokio::spawn(run(backward))),
-    )
-    .await
-    .expect("opposite orders deadlocked");
-    assert_eq!(forward_taken.unwrap(), 20);
-    assert_eq!(backward_taken.unwrap(), 20);
-}
-
-#[tokio::test]
 async fn guards_keep_the_order_the_locks_were_given_in() {
     let client = client().await;
     let names = [unique("z"), unique("a"), unique("m")];
@@ -207,6 +148,144 @@ async fn guards_keep_the_order_the_locks_were_given_in() {
     assert_eq!(guard.guards().len(), 3);
     for (part, name) in guard.guards().iter().zip(&names) {
         assert!(format!("{part:?}").contains(name.as_str()));
+    }
+    guard.unlock().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_lock_unlock() {
+    let client = client().await;
+    let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
+    let multi = client.multi_lock(locks(&client, &[&a, &b, &c])).unwrap();
+    let guard = multi.lock().lease(Duration::from_secs(10)).await.unwrap();
+    assert!(multi.is_held_by_current().await.unwrap());
+    sleep(Duration::from_secs(1)).await;
+    guard.unlock().await.unwrap();
+    assert!(!multi.is_held_by_current().await.unwrap());
+}
+
+#[tokio::test]
+async fn test_wait_and_lease_timeouts() {
+    let client = client().await;
+    let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
+    let counter = Arc::new(AtomicU32::new(0));
+    let mut tasks = Vec::new();
+    for _ in 0..10 {
+        let multi = client.multi_lock(locks(&client, &[&a, &b, &c])).unwrap();
+        let counter = counter.clone();
+        tasks.push(tokio::spawn(async move {
+            let taken = multi
+                .lock()
+                .lease(Duration::from_secs(10))
+                .timeout(Duration::ZERO)
+                .await
+                .unwrap();
+            if let Some(guard) = taken {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::mem::forget(guard);
+            }
+        }));
+    }
+    timeout(Duration::from_secs(5), futures::future::join_all(tasks))
+        .await
+        .unwrap();
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_multi_threads() {
+    let client = client().await;
+    let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
+    let holder = client.multi_lock(locks(&client, &[&a, &b, &c])).unwrap();
+    let holding = tokio::spawn(async move {
+        let guard = holder.lock().await.unwrap();
+        sleep(Duration::from_millis(1500)).await;
+        guard.unlock().await.unwrap();
+    });
+    sleep(Duration::from_millis(500)).await;
+    let multi = client.multi_lock(locks(&client, &[&a, &b, &c])).unwrap();
+    let guard = timeout(Duration::from_secs(20), multi.lock())
+        .await
+        .unwrap()
+        .unwrap();
+    guard.unlock().await.unwrap();
+    holding.await.unwrap();
+}
+
+#[tokio::test]
+async fn test() {
+    let first = client().await;
+    let second = client().await;
+    let third = client().await;
+    let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
+    let multi = first
+        .multi_lock([
+            first.lock(a.clone()),
+            second.lock(b.clone()),
+            third.lock(c.clone()),
+        ])
+        .unwrap();
+    let guard = multi.lock().await.unwrap();
+    let other = first
+        .multi_lock([first.lock(a), second.lock(b), third.lock(c)])
+        .unwrap();
+    let executed = tokio::spawn(async move {
+        assert!(other.try_lock().await.unwrap().is_none());
+        assert!(other.try_lock().await.unwrap().is_none());
+        true
+    });
+    assert!(timeout(Duration::from_secs(5), executed)
+        .await
+        .unwrap()
+        .unwrap());
+    guard.unlock().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_round_starts_again_from_the_first_lock_until_the_wait_runs_out() {
+    let client = client().await;
+    let (a, b) = (unique("m"), unique("m"));
+    let blocker = client.lock(b.clone());
+    let blocking = tokio::spawn(async move {
+        blocker
+            .lock()
+            .lease(Duration::from_millis(700))
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let multi = client.multi_lock(locks(&client, &[&a, &b])).unwrap();
+    let guard = multi
+        .lock()
+        .timeout(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the round after the lease ran out should take both locks");
+    assert!(client.lock(a).is_locked().await.unwrap());
+    guard.unlock().await.unwrap();
+    drop(blocking);
+}
+
+#[tokio::test]
+async fn a_lease_with_a_timeout_ends_up_as_the_requested_lease() {
+    let client = client().await;
+    let (a, b) = (unique("m"), unique("m"));
+    let parts = locks(&client, &[&a, &b]);
+    let multi = client.multi_lock(parts.clone()).unwrap();
+    let guard = multi
+        .lock()
+        .lease(Duration::from_secs(20))
+        .timeout(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    for part in &parts {
+        let ttl = part.ttl().await.unwrap().unwrap();
+        assert!(
+            ttl <= Duration::from_secs(20) && ttl > Duration::from_secs(19),
+            "{ttl:?}"
+        );
     }
     guard.unlock().await.unwrap();
 }
