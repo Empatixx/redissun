@@ -39,5 +39,5 @@ pub(crate) fn int(number: impl TryInto<i64>) -> Value {
 }
 
 pub(crate) fn malformed() -> Error {
-    Error::Redis("unexpected reply to a stream command".into())
+    Error::Redis("unexpected reply from Redis".into())
 }

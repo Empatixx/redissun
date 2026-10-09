@@ -257,6 +257,9 @@ where
         unit: GeoUnit,
         count: Option<usize>,
     ) -> Result<Vec<GeoMatch<V>>> {
+        if count == Some(0) {
+            return Ok(Vec::new());
+        }
         let mut args = vec![Value::from(self.key.redis_key())];
         match origin {
             Origin::Point(at) => {

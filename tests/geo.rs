@@ -174,3 +174,13 @@ async fn clear_and_object_methods() {
     geo.add("again", PRAGUE).await.unwrap();
     assert!(geo.del().await.unwrap());
 }
+
+#[tokio::test]
+async fn a_count_of_zero_returns_nothing() {
+    let geo = cities().await;
+    assert!(geo
+        .radius(BRNO, 300.0, GeoUnit::Kilometers, Some(0))
+        .await
+        .unwrap()
+        .is_empty());
+}
