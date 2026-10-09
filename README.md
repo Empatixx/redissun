@@ -190,6 +190,18 @@ users.insert("jirka", "Jirka").await?;
 let name = users.get("jirka").await?;
 ```
 
+### Batch
+
+Send many commands in one round trip.
+
+```rust
+let batch = client.batch();
+let visits = batch.atomic_i64("visits").incr();
+let user = batch.hash_map::<String, String>("users").get("jirka");
+batch.execute().await?;
+let (visits, user) = (visits.await?, user.await?);
+```
+
 ### Topic
 
 Send messages to every program that listens.

@@ -1,4 +1,5 @@
 use crate::atomic_i64::AtomicI64;
+use crate::batch::Batch;
 use crate::bit_set::BitSet;
 use crate::bloom_filter::BloomFilter;
 use crate::bucket::Bucket;
@@ -51,6 +52,11 @@ impl Client<JsonCodec> {
 impl<C: Codec> Client<C> {
     pub(crate) fn from_parts(core: Arc<Core>, codec: C) -> Self {
         Self { core, codec }
+    }
+
+    /// Starts a [`Batch`] that sends several commands in one round trip.
+    pub fn batch(&self) -> Batch<C> {
+        Batch::new(self.core.clone(), self.codec.clone())
     }
 
     /// Returns the [`AtomicI64`] stored under `name`.

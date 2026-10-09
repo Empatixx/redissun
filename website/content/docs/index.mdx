@@ -35,6 +35,7 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `CountDownLatch` | string and pub/sub | `RCountDownLatch` |
 | `RateLimiter` | hash, string and sorted set | `RRateLimiter` |
 
+- `client.batch()` sends commands of many objects in one round trip.
 - It uses tokio. Every call is `async`.
 - Values are turned into bytes by a codec. The default is JSON.
 - Anything that must be atomic runs as a Lua script.

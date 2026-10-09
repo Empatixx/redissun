@@ -13,7 +13,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
-static INSERT: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static INSERT: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -21,7 +21,7 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HDEL', KEYS[1], ARGV[1])

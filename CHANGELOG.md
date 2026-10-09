@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.15.0] - unreleased
+
+### Added
+
+- `Batch` (`client.batch()`): queues commands of several objects and sends them in one round trip, as in Redisson's `RBatch`. Each queued call returns a `BatchFuture` with the typed reply. Modes: pipelined by default, `.atomic()` for `MULTI`/`EXEC`, `.skip_result()` to drop the replies. Batch views exist for `HashMap`, `Bucket`, `HashSet`, `AtomicI64`, `Vec`, `VecDeque`, `SortedSet` and `Topic`, plus `del` and `expire` for any key.
+
+### Fixed
+
+- `Geo` searches with a count of zero return an empty list instead of a Redis error.
+
 ## [0.14.0] - unreleased
 
 ### Added

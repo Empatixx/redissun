@@ -18,6 +18,7 @@
 #![deny(missing_docs)]
 
 mod atomic_i64;
+mod batch;
 mod bit_set;
 mod bloom_filter;
 mod bucket;
@@ -56,6 +57,10 @@ mod vec_deque;
 mod wait;
 
 pub use atomic_i64::AtomicI64;
+pub use batch::{
+    Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchSortedSet,
+    BatchTopic, BatchVec, BatchVecDeque,
+};
 pub use bit_set::BitSet;
 pub use bloom_filter::BloomFilter;
 pub use bucket::Bucket;
