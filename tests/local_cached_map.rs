@@ -289,8 +289,15 @@ async fn the_load_strategy_drops_only_the_keys_changed_while_away() {
     .await;
     reader.get("b").await.unwrap();
     assert_eq!(reader.local_len(), 2);
+    writer.insert("a", "2").await.unwrap();
+    eventually("the reader never got a message", || async {
+        reader.local_len() == 1
+    })
+    .await;
+    assert_eq!(reader.get("a").await.unwrap().as_deref(), Some("2"));
+    assert_eq!(reader.local_len(), 2);
     let log = format!("redissun__cache_updates_log:{{{name}}}");
-    assert_eq!(common::raw_command(&["ZCARD", &log]).await.trim(), ":2");
+    assert_eq!(common::raw_command(&["ZCARD", &log]).await.trim(), ":3");
 
     let plain = second.hash_map::<String, String>(name.clone());
     plain.insert("b", "2").await.unwrap();
@@ -302,9 +309,11 @@ async fn the_load_strategy_drops_only_the_keys_changed_while_away() {
     ])
     .await;
     kill_pubsub_connections().await;
-    eventually("b was not dropped", || async { reader.local_len() == 1 }).await;
-    assert_eq!(reader.get("a").await.unwrap().as_deref(), Some("1"));
-    assert_eq!(reader.get("b").await.unwrap().as_deref(), Some("2"));
+    eventually("b was not dropped", || async {
+        reader.get("b").await.unwrap().as_deref() == Some("2")
+    })
+    .await;
+    assert_eq!(reader.get("a").await.unwrap().as_deref(), Some("2"));
 }
 
 #[tokio::test]
