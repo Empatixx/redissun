@@ -143,7 +143,7 @@ async fn redissun_ops(url: &str, run: &str) -> Ops {
         async move {
             let batch = c.batch();
             for name in names.iter() {
-                let _ = batch.bucket::<User>(name.as_str()).set(&*u);
+                drop(batch.bucket::<User>(name.as_str()).set(&*u));
             }
             batch.execute().await.unwrap();
         }
