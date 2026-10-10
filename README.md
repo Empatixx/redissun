@@ -92,10 +92,10 @@ Every object follows Redisson's logic and is tested with Redisson's own tests, p
 redissun runs the same operations as hand-written code on [redis-rs](https://crates.io/crates/redis) and [fred](https://crates.io/crates/fred), and as [Redisson](https://github.com/redisson/redisson) in Java. Redis runs on the same machine, so the charts show what the client costs, not the network.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Empatixx/redissun/main/website/public/bench/latency.svg" alt="Latency of one operation: redissun, redis-rs, fred and Redisson are within 3 microseconds for get and set; a redissun lock and batch are slower">
+  <img src="website/public/bench/latency.svg" alt="Latency of one operation: redissun, redis-rs, fred and Redisson are within 3 microseconds for get and set; a redissun lock and batch are slower">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Empatixx/redissun/main/website/public/bench/throughput.svg" alt="Throughput with 64 tasks: redissun is 7 to 15 percent below redis-rs and close to fred; Redisson reaches about a third">
+  <img src="website/public/bench/throughput.svg" alt="Throughput with 64 tasks: redissun is 7 to 15 percent below redis-rs and close to fred; Redisson reaches about a third">
 </p>
 
 - **One call:** a get, a set and a map insert take about 75 µs on every library. That is the Redis round trip on this machine, and the client adds under 3 µs.
