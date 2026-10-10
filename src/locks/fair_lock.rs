@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::lock::{
+use crate::locks::{
     acquire, fair, force_unlock, unlock_message, Lock, LockGuard, LockRequest, Mode, Wait,
 };
 use crate::object::{HasKey, Key};
@@ -24,7 +24,7 @@ impl fmt::Debug for FairLock {
     }
 }
 
-impl From<FairLock> for crate::multi_lock::LockTarget {
+impl From<FairLock> for crate::locks::multi_lock::LockTarget {
     fn from(lock: FairLock) -> Self {
         Self::new(lock.key, Mode::Fair)
     }

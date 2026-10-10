@@ -1,5 +1,9 @@
 pub(crate) mod fair;
+pub(crate) mod fair_lock;
+pub(crate) mod fenced_lock;
 mod guard;
+pub(crate) mod multi_lock;
+pub(crate) mod rw_lock;
 pub(crate) mod sync;
 mod watchdog;
 
@@ -498,7 +502,7 @@ impl fmt::Debug for Lock {
     }
 }
 
-impl From<Lock> for crate::multi_lock::LockTarget {
+impl From<Lock> for crate::locks::multi_lock::LockTarget {
     fn from(lock: Lock) -> Self {
         Self::new(lock.key, Mode::Exclusive)
     }

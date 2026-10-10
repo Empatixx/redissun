@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::lock::{
+use crate::locks::{
     acquire, channel, force_unlock, hold_count, is_held_by_current, read_unlock_message,
     unlock_message, LockGuard, LockRequest, Mode, Wait, READ_FORCE_UNLOCK, READ_IS_LOCKED,
     WRITE_FORCE_UNLOCK,

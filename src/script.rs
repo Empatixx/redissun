@@ -1,5 +1,5 @@
+use crate::client::core::Core;
 use crate::codec::{Codec, JsonCodec};
-use crate::core::Core;
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use fred::clients::Client as RedisClient;

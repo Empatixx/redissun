@@ -1,4 +1,4 @@
-use crate::core::Core;
+use crate::client::core::Core;
 use crate::error::Result;
 use std::future::Future;
 use std::time::Duration;

@@ -1,7 +1,7 @@
 use crate::codec::Codec;
+use crate::coordination::rate_limiter::{suffix_name, EXPIRE_ANY, PERSIST_ANY};
 use crate::error::{Error, Result};
 use crate::object::{Key, Object};
-use crate::rate_limiter::{suffix_name, EXPIRE_ANY, PERSIST_ANY};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::scripts::Script;
@@ -435,7 +435,7 @@ where
             .key
             .core
             .eval(
-                &crate::bit_set::COUNT,
+                &crate::values::bit_set::COUNT,
                 vec![self.key.redis_key()],
                 Vec::new(),
             )

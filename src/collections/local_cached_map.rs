@@ -1,7 +1,7 @@
+use crate::client::core::Core;
 use crate::codec::Codec;
-use crate::core::Core;
+use crate::collections::hash_map::HashMap;
 use crate::error::Result;
-use crate::hash_map::HashMap;
 use crate::object::{tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;

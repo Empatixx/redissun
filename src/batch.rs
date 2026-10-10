@@ -1,9 +1,9 @@
+use crate::client::core::Core;
+use crate::client::retry::DelayStrategy;
 use crate::codec::Codec;
-use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::object::millis as to_millis;
 use crate::reply::{bytes, int, malformed, number, text};
-use crate::retry::DelayStrategy;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pipeline};
 use fred::interfaces::{ClientLike, ClusterInterface};
@@ -932,7 +932,7 @@ where
     {
         let args = (|| {
             Ok(vec![
-                lua(&crate::hash_map::INSERT),
+                lua(&crate::collections::hash_map::INSERT),
                 Value::Integer(1),
                 self.key(),
                 Value::Bytes(self.batch.codec.encode(k)?),
@@ -968,7 +968,7 @@ where
     {
         let args = self.batch.codec.encode(k).map(|field| {
             vec![
-                lua(&crate::hash_map::REMOVE),
+                lua(&crate::collections::hash_map::REMOVE),
                 Value::Integer(1),
                 self.key(),
                 Value::Bytes(field),

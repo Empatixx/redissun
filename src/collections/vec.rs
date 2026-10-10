@@ -1,6 +1,6 @@
 use crate::codec::Codec;
+use crate::collections::list;
 use crate::error::{Error, Result};
-use crate::list;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::ListInterface;

@@ -1,6 +1,6 @@
+use crate::client::retry::Retry;
 use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
-use crate::retry::Retry;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool, WithOptions};
 use fred::interfaces::{
@@ -25,7 +25,7 @@ pub(crate) struct Startup {
     pub(crate) lock_lease: Duration,
     pub(crate) connect_timeout: Duration,
     pub(crate) eviction_interval: Duration,
-    pub(crate) lock_settings: crate::lock::LockSettings,
+    pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) retry: Retry,
     pub(crate) ping_interval: Duration,
     pub(crate) client_name: Option<String>,
@@ -35,7 +35,7 @@ pub(crate) struct Core {
     pool: Pool,
     id: String,
     pub(crate) lock_lease: Duration,
-    pub(crate) lock_settings: crate::lock::LockSettings,
+    pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) eviction_interval: Duration,
     pub(crate) retry: Retry,
     pub(crate) read_only_scripts: std::sync::atomic::AtomicBool,

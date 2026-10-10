@@ -1,4 +1,4 @@
-use crate::core::{Core, Evictor};
+use crate::client::core::{Core, Evictor};
 use crate::error::Result;
 use bytes::Bytes;
 use fred::types::scripts::Script;

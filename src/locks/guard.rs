@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::lock::{release, Mode};
+use crate::locks::{release, Mode};
 use crate::object::Key;
 use crate::shield::shielded;
 use std::fmt;

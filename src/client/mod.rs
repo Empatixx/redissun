@@ -1,32 +1,39 @@
-use crate::atomic_i64::AtomicI64;
+pub(crate) mod config;
+pub(crate) mod core;
+pub(crate) mod credentials;
+pub(crate) mod retry;
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+pub(crate) mod tls;
+
 use crate::batch::Batch;
-use crate::bit_set::BitSet;
-use crate::bloom_filter::BloomFilter;
-use crate::bucket::Bucket;
+use crate::client::config::ClientBuilder;
+use crate::client::core::Core;
 use crate::codec::{Codec, JsonCodec};
-use crate::config::ClientBuilder;
-use crate::core::Core;
-use crate::delayed_queue::DelayedQueue;
+use crate::collections::hash_map::HashMap;
+use crate::collections::hash_map_cache::HashMapCache;
+use crate::collections::hash_set_cache::HashSetCache;
+use crate::collections::local_cached_map::LocalCachedMapBuilder;
+use crate::collections::sorted_set::SortedSet;
+use crate::coordination::latch::CountDownLatch;
+use crate::coordination::rate_limiter::RateLimiter;
+use crate::coordination::semaphore::Semaphore;
 use crate::error::Result;
-use crate::fair_lock::FairLock;
-use crate::fenced_lock::FencedLock;
-use crate::geo::Geo;
-use crate::hash_map::HashMap;
-use crate::hash_map_cache::HashMapCache;
-use crate::hash_set_cache::HashSetCache;
-use crate::hyper_log_log::HyperLogLog;
-use crate::latch::CountDownLatch;
-use crate::local_cached_map::LocalCachedMapBuilder;
-use crate::lock::Lock;
-use crate::multi_lock::{LockTarget, MultiLock};
+use crate::locks::fair_lock::FairLock;
+use crate::locks::fenced_lock::FencedLock;
+use crate::locks::multi_lock::{LockTarget, MultiLock};
+use crate::locks::rw_lock::RwLock;
+use crate::locks::Lock;
+use crate::messaging::delayed_queue::DelayedQueue;
+use crate::messaging::stream::Stream;
+use crate::messaging::topic::{PatternTopic, Topic};
 use crate::object::{tagged, Key};
-use crate::rate_limiter::RateLimiter;
-use crate::rw_lock::RwLock;
 use crate::script::{Function, Script};
-use crate::semaphore::Semaphore;
-use crate::sorted_set::SortedSet;
-use crate::stream::Stream;
-use crate::topic::{PatternTopic, Topic};
+use crate::values::atomic_i64::AtomicI64;
+use crate::values::bit_set::BitSet;
+use crate::values::bloom_filter::BloomFilter;
+use crate::values::bucket::Bucket;
+use crate::values::geo::Geo;
+use crate::values::hyper_log_log::HyperLogLog;
 use std::fmt;
 use std::sync::Arc;
 
@@ -114,26 +121,38 @@ impl<C: Codec> Client<C> {
     }
 
     /// Returns the [`Vec`](crate::Vec) stored under `name`.
-    pub fn vec<V>(&self, name: impl Into<Arc<str>>) -> crate::vec::Vec<V, C> {
-        crate::vec::Vec::new(Key::new(self.core.clone(), name), self.codec.clone())
+    pub fn vec<V>(&self, name: impl Into<Arc<str>>) -> crate::collections::vec::Vec<V, C> {
+        crate::collections::vec::Vec::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`VecDeque`](crate::VecDeque) stored under `name`.
-    pub fn vec_deque<V>(&self, name: impl Into<Arc<str>>) -> crate::vec_deque::VecDeque<V, C> {
-        crate::vec_deque::VecDeque::new(Key::new(self.core.clone(), name), self.codec.clone())
+    pub fn vec_deque<V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> crate::collections::vec_deque::VecDeque<V, C> {
+        crate::collections::vec_deque::VecDeque::new(
+            Key::new(self.core.clone(), name),
+            self.codec.clone(),
+        )
     }
 
     /// Returns a [`DelayedQueue`] that delivers its values to `destination` after a delay.
     pub fn delayed_queue<V>(
         &self,
-        destination: &crate::vec_deque::VecDeque<V, C>,
+        destination: &crate::collections::vec_deque::VecDeque<V, C>,
     ) -> DelayedQueue<V, C> {
         DelayedQueue::new(destination, self.codec.clone())
     }
 
     /// Returns the [`HashSet`](crate::HashSet) stored under `name`.
-    pub fn hash_set<V>(&self, name: impl Into<Arc<str>>) -> crate::hash_set::HashSet<V, C> {
-        crate::hash_set::HashSet::new(Key::new(self.core.clone(), name), self.codec.clone())
+    pub fn hash_set<V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> crate::collections::hash_set::HashSet<V, C> {
+        crate::collections::hash_set::HashSet::new(
+            Key::new(self.core.clone(), name),
+            self.codec.clone(),
+        )
     }
 
     /// Returns the [`SortedSet`] stored under `name`.

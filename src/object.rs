@@ -1,4 +1,4 @@
-use crate::core::Core;
+use crate::client::core::Core;
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;

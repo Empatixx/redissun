@@ -1,9 +1,9 @@
+use crate::client::core::{Core, Evictor};
 use crate::codec::Codec;
-use crate::core::{Core, Evictor};
+use crate::collections::vec_deque::VecDeque;
 use crate::error::{Error, Result};
 use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
-use crate::vec_deque::VecDeque;
 use bytes::Bytes;
 use fred::interfaces::ListInterface;
 use fred::types::scripts::Script;

@@ -1,5 +1,5 @@
+use crate::client::core::no_retry;
 use crate::codec::Codec;
-use crate::core::no_retry;
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;

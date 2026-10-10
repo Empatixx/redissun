@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::lock::{acquire, is_held_by_current, LockGuard, Mode, Wait};
+use crate::locks::{acquire, is_held_by_current, LockGuard, Mode, Wait};
 use crate::object::{millis, Key};
 use crate::pending::{Pending, PendingTimeout};
 use fred::interfaces::KeysInterface;

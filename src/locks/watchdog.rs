@@ -1,4 +1,4 @@
-use crate::lock::{renew, Mode};
+use crate::locks::{renew, Mode};
 use crate::object::Key;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;

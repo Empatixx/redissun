@@ -1,8 +1,8 @@
+use crate::client::core::{Core, Startup};
+use crate::client::retry::{DelayStrategy, Retry};
 use crate::client::Client;
 use crate::codec::{Codec, JsonCodec};
-use crate::core::{Core, Startup};
 use crate::error::{Error, Result};
-use crate::retry::{DelayStrategy, Retry};
 use fred::prelude::{Builder, Config};
 use fred::socket2::TcpKeepalive;
 use std::fmt;
@@ -31,10 +31,10 @@ struct Settings {
     database: Option<u8>,
     username: Option<String>,
     password: Option<String>,
-    resolver: Option<crate::credentials::Resolver>,
+    resolver: Option<crate::client::credentials::Resolver>,
     credentials_refresh: Option<Duration>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-    tls: crate::tls::TlsSettings,
+    tls: crate::client::tls::TlsSettings,
 }
 
 /// Builder for [`Client`].
@@ -252,14 +252,14 @@ impl<C: Codec> ClientBuilder<C> {
     /// Trusts only the CA certificates in this PEM data instead of the system's, like Redisson's `sslTruststore`. Needs a `rediss://` URL.
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
     pub fn tls_ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
-        self.settings.tls.ca = Some(crate::tls::Pem::Bytes(pem.into()));
+        self.settings.tls.ca = Some(crate::client::tls::Pem::Bytes(pem.into()));
         self
     }
 
     /// Like [`tls_ca_pem`](ClientBuilder::tls_ca_pem), with the PEM data read from a file when the client is built.
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
     pub fn tls_ca_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.settings.tls.ca = Some(crate::tls::Pem::File(path.into()));
+        self.settings.tls.ca = Some(crate::client::tls::Pem::File(path.into()));
         self
     }
 
@@ -271,8 +271,8 @@ impl<C: Codec> ClientBuilder<C> {
         private_key: impl Into<Vec<u8>>,
     ) -> Self {
         self.settings.tls.client_auth = Some((
-            crate::tls::Pem::Bytes(certificate_chain.into()),
-            crate::tls::Pem::Bytes(private_key.into()),
+            crate::client::tls::Pem::Bytes(certificate_chain.into()),
+            crate::client::tls::Pem::Bytes(private_key.into()),
         ));
         self
     }
@@ -285,8 +285,8 @@ impl<C: Codec> ClientBuilder<C> {
         private_key: impl Into<std::path::PathBuf>,
     ) -> Self {
         self.settings.tls.client_auth = Some((
-            crate::tls::Pem::File(certificate_chain.into()),
-            crate::tls::Pem::File(private_key.into()),
+            crate::client::tls::Pem::File(certificate_chain.into()),
+            crate::client::tls::Pem::File(private_key.into()),
         ));
         self
     }
@@ -324,7 +324,7 @@ impl<C: Codec> ClientBuilder<C> {
         F: Fn(String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<crate::Credentials>> + Send + 'static,
     {
-        self.settings.resolver = Some(crate::credentials::Resolver::new(resolve));
+        self.settings.resolver = Some(crate::client::credentials::Resolver::new(resolve));
         self
     }
 
@@ -452,7 +452,7 @@ impl<C: Codec> ClientBuilder<C> {
                 lock_lease: settings.lock_lease,
                 connect_timeout: settings.connect_timeout,
                 eviction_interval: settings.eviction_interval,
-                lock_settings: crate::lock::LockSettings::new(
+                lock_settings: crate::locks::LockSettings::new(
                     settings.check_lock_synced_replicas,
                     settings.replicas_sync_timeout,
                     settings.fair_lock_wait_timeout,

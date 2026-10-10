@@ -1,6 +1,6 @@
+use crate::client::retry::Retry;
 use crate::error::{Error, Result};
 use crate::object::Key;
-use crate::retry::Retry;
 use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, ClusterInterface};

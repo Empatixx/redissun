@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::lock::{acquire, token_key, Lock, LockGuard, LockRequest, Mode, Wait};
+use crate::locks::{acquire, token_key, Lock, LockGuard, LockRequest, Mode, Wait};
 use crate::object::{HasKey, Key};
 use fred::interfaces::KeysInterface;
 use std::fmt;
@@ -21,7 +21,7 @@ impl fmt::Debug for FencedLock {
     }
 }
 
-impl From<FencedLock> for crate::multi_lock::LockTarget {
+impl From<FencedLock> for crate::locks::multi_lock::LockTarget {
     fn from(lock: FencedLock) -> Self {
         Self::new(lock.key, Mode::Fenced)
     }

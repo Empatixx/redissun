@@ -18,93 +18,68 @@
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod atomic_i64;
 mod batch;
-mod bit_set;
-mod bloom_filter;
-mod bucket;
 mod client;
 mod codec;
-mod config;
-mod core;
-mod credentials;
-mod delayed_queue;
+mod collections;
+mod coordination;
 mod error;
 mod eviction;
-mod fair_lock;
-mod fenced_lock;
-mod geo;
-mod hash_map;
-mod hash_map_cache;
-mod hash_set;
-mod hash_set_cache;
-mod hyper_log_log;
-mod latch;
-mod list;
-mod local_cached_map;
-mod lock;
-mod multi_lock;
+mod locks;
+mod messaging;
 mod object;
 mod pending;
 mod pubsub;
-mod rate_limiter;
 mod reply;
-mod retry;
-mod rw_lock;
 mod script;
-mod semaphore;
 mod shield;
-mod sorted_set;
-mod stream;
-#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-mod tls;
-mod topic;
-mod vec;
-mod vec_deque;
+mod values;
 mod wait;
 
-pub use atomic_i64::{AtomicI64, Comparison};
 pub use batch::{
     Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchResult,
     BatchSortedSet, BatchTopic, BatchVec, BatchVecDeque,
 };
-pub use bit_set::BitSet;
-pub use bloom_filter::BloomFilter;
-pub use bucket::Bucket;
+pub use client::config::ClientBuilder;
+pub use client::credentials::Credentials;
+pub use client::retry::DelayStrategy;
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+pub use client::tls::TlsVerification;
 pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
-pub use config::ClientBuilder;
-pub use credentials::Credentials;
-pub use delayed_queue::DelayedQueue;
-pub use error::{Error, Result};
-pub use fair_lock::FairLock;
-pub use fenced_lock::FencedLock;
-pub use geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
-pub use hash_map::HashMap;
-pub use hash_map_cache::{Event, EventKind, Events, EvictionMode, HashMapCache, Insert, InsertNx};
-pub use hash_set::HashSet;
-pub use hash_set_cache::{Expirations, HashSetCache, SetInsert};
-pub use hyper_log_log::HyperLogLog;
-pub use latch::CountDownLatch;
-pub use local_cached_map::{
+pub use collections::hash_map::HashMap;
+pub use collections::hash_map_cache::{
+    Event, EventKind, Events, EvictionMode, HashMapCache, Insert, InsertNx,
+};
+pub use collections::hash_set::HashSet;
+pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};
+pub use collections::local_cached_map::{
     EvictionPolicy, LocalCachedMap, LocalCachedMapBuilder, ReconnectionStrategy, SyncStrategy,
 };
-pub use lock::{Lock, LockGuard, LockRequest};
-pub use multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
-pub use object::Object;
-pub use pending::{Pending, PendingTimeout};
-pub use rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
-pub use retry::DelayStrategy;
-pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-pub use script::{Decoded, Function, LuaScript, Script, ScriptCall, ScriptMode, ScriptOutput};
-pub use semaphore::{Permits, Semaphore};
-pub use sorted_set::{Aggregate, SortedSet};
-pub use stream::{
+pub use collections::sorted_set::{Aggregate, SortedSet};
+pub use collections::vec::Vec;
+pub use collections::vec_deque::VecDeque;
+pub use coordination::latch::CountDownLatch;
+pub use coordination::rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
+pub use coordination::semaphore::{Permits, Semaphore};
+pub use error::{Error, Result};
+pub use locks::fair_lock::FairLock;
+pub use locks::fenced_lock::FencedLock;
+pub use locks::multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
+pub use locks::rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use locks::{Lock, LockGuard, LockRequest};
+pub use messaging::delayed_queue::DelayedQueue;
+pub use messaging::stream::{
     AutoClaim, PendingEntry, PendingRange, PendingSummary, ReadGroup, Stream, StreamAdd,
     StreamConsumer, StreamEntry, StreamGroup, StreamId, StreamInfo, StreamTrim,
 };
-#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-pub use tls::TlsVerification;
-pub use topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
-pub use vec::Vec;
-pub use vec_deque::VecDeque;
+pub use messaging::topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
+pub use object::Object;
+pub use pending::{Pending, PendingTimeout};
+pub use script::{Decoded, Function, LuaScript, Script, ScriptCall, ScriptMode, ScriptOutput};
+pub use values::atomic_i64::{AtomicI64, Comparison};
+pub use values::bit_set::BitSet;
+pub use values::bloom_filter::BloomFilter;
+pub use values::bucket::Bucket;
+pub use values::geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
+pub use values::hyper_log_log::HyperLogLog;

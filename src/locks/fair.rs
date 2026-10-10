@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::lock::sync::{synced_eval, with_sync_retry};
+use crate::locks::sync::{synced_eval, with_sync_retry};
 use crate::object::Key;
 use bytes::Bytes;
 use fred::types::scripts::Script;
