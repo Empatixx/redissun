@@ -1,0 +1,11 @@
+{
+  "workload": {"payload": "JSON object of about 80 bytes", "concurrency": 64, "batch_commands": 100, "measure_seconds": 3},
+  "results": [
+    {"library": "redisson", "operation": "bucket_set", "p50_us": 73.875, "p99_us": 117.375, "ops_per_second": 136305.3},
+    {"library": "redisson", "operation": "bucket_get", "p50_us": 75.666, "p99_us": 124.833, "ops_per_second": 137702.0},
+    {"library": "redisson", "operation": "map_insert", "p50_us": 80.000, "p99_us": 119.250, "ops_per_second": 110283.7},
+    {"library": "redisson", "operation": "map_get", "p50_us": 75.250, "p99_us": 111.583, "ops_per_second": 136975.6},
+    {"library": "redisson", "operation": "lock_unlock", "p50_us": 205.667, "p99_us": 288.709, "ops_per_second": 37921.8},
+    {"library": "redisson", "operation": "batch_100", "p50_us": 175.583, "p99_us": 270.583, "ops_per_second": null}
+  ]
+}

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 488" width="760" height="488" role="img" aria-label="Throughput with 64 tasks">
+<title>Throughput with 64 tasks</title>
+<style>
+  svg { color-scheme: light dark; }
+  .surface { fill: #fcfcfb; }
+  .ink { fill: #0b0b0b; }
+  .ink2 { fill: #52514e; }
+  .grid { stroke: #e3e2de; stroke-width: 1; }
+  .s1 { fill: #2a78d6; } .s2 { fill: #eb6834; } .s3 { fill: #1baf7a; } .s4 { fill: #eda100; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .ink { fill: #f0efec; }
+    .ink2 { fill: #c3c2b7; }
+    .grid { stroke: #343432; }
+    .s1 { fill: #3987e5; } .s2 { fill: #d95926; } .s3 { fill: #199e70; } .s4 { fill: #c98500; }
+  }
+</style>
+<rect class="surface" width="760" height="488" rx="8"/>
+<text class="ink" x="20" y="28" font-size="15" font-weight="600">Throughput with 64 tasks</text>
+<text class="ink2" x="20" y="46" font-size="12">Operations per second, 64 tasks on different keys. Higher is better.</text>
+<rect class="s1" x="150" y="57" width="10" height="10" rx="2"/>
+<text class="ink2" x="165" y="66" font-size="11">redissun</text>
+<rect class="s2" x="235.8" y="57" width="10" height="10" rx="2"/>
+<text class="ink2" x="250.8" y="66" font-size="11">redis-rs</text>
+<rect class="s3" x="321.6" y="57" width="10" height="10" rx="2"/>
+<text class="ink2" x="336.6" y="66" font-size="11">fred</text>
+<rect class="s4" x="381.0" y="57" width="10" height="10" rx="2"/>
+<text class="ink2" x="396.0" y="66" font-size="11">Redisson (Java)</text>
+<line class="grid" x1="150.0" y1="70" x2="150.0" y2="444"/>
+<text class="ink2" x="150.0" y="460" font-size="11" text-anchor="middle">0k</text>
+<line class="grid" x1="283.0" y1="70" x2="283.0" y2="444"/>
+<text class="ink2" x="283.0" y="460" font-size="11" text-anchor="middle">125k</text>
+<line class="grid" x1="416.0" y1="70" x2="416.0" y2="444"/>
+<text class="ink2" x="416.0" y="460" font-size="11" text-anchor="middle">250k</text>
+<line class="grid" x1="549.0" y1="70" x2="549.0" y2="444"/>
+<text class="ink2" x="549.0" y="460" font-size="11" text-anchor="middle">375k</text>
+<line class="grid" x1="682.0" y1="70" x2="682.0" y2="444"/>
+<text class="ink2" x="682.0" y="460" font-size="11" text-anchor="middle">500k</text>
+<text class="ink" x="138" y="107.0" font-size="12" text-anchor="end">Bucket set</text>
+<path class="s1" d="M150,74 h470.8 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-470.8 z"><title>redissun, Bucket set: 446k/s</title></path>
+<text class="ink2" x="630.8" y="84" font-size="10.5">446k/s</text>
+<path class="s2" d="M150,89 h509.0 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-509.0 z"><title>redis-rs, Bucket set: 482k/s</title></path>
+<text class="ink2" x="669.0" y="99" font-size="10.5">482k/s</text>
+<path class="s3" d="M150,104 h444.1 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-444.1 z"><title>fred, Bucket set: 421k/s</title></path>
+<text class="ink2" x="604.1" y="114" font-size="10.5">421k/s</text>
+<path class="s4" d="M150,119 h141.4 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-141.4 z"><title>Redisson (Java), Bucket set: 137k/s</title></path>
+<text class="ink2" x="301.4" y="129" font-size="10.5">137k/s</text>
+<text class="ink" x="138" y="183.0" font-size="12" text-anchor="end">Bucket get</text>
+<path class="s1" d="M150,150 h451.7 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-451.7 z"><title>redissun, Bucket get: 428k/s</title></path>
+<text class="ink2" x="611.7" y="160" font-size="10.5">428k/s</text>
+<path class="s2" d="M150,165 h517.8 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-517.8 z"><title>redis-rs, Bucket get: 490k/s</title></path>
+<text class="ink2" x="677.8" y="175" font-size="10.5">490k/s</text>
+<path class="s3" d="M150,180 h460.6 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-460.6 z"><title>fred, Bucket get: 437k/s</title></path>
+<text class="ink2" x="620.6" y="190" font-size="10.5">437k/s</text>
+<path class="s4" d="M150,195 h144.2 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-144.2 z"><title>Redisson (Java), Bucket get: 139k/s</title></path>
+<text class="ink2" x="304.2" y="205" font-size="10.5">139k/s</text>
+<text class="ink" x="138" y="259.0" font-size="12" text-anchor="end">HashMap insert</text>
+<path class="s1" d="M150,226 h267.2 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-267.2 z"><title>redissun, HashMap insert: 255k/s</title></path>
+<text class="ink2" x="427.2" y="236" font-size="10.5">255k/s</text>
+<path class="s2" d="M150,241 h315.6 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-315.6 z"><title>redis-rs, HashMap insert: 300k/s</title></path>
+<text class="ink2" x="475.6" y="251" font-size="10.5">300k/s</text>
+<path class="s3" d="M150,256 h278.9 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-278.9 z"><title>fred, HashMap insert: 266k/s</title></path>
+<text class="ink2" x="438.9" y="266" font-size="10.5">266k/s</text>
+<path class="s4" d="M150,271 h114.4 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-114.4 z"><title>Redisson (Java), HashMap insert: 111k/s</title></path>
+<text class="ink2" x="274.4" y="281" font-size="10.5">111k/s</text>
+<text class="ink" x="138" y="335.0" font-size="12" text-anchor="end">HashMap get</text>
+<path class="s1" d="M150,302 h460.9 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-460.9 z"><title>redissun, HashMap get: 437k/s</title></path>
+<text class="ink2" x="620.9" y="312" font-size="10.5">437k/s</text>
+<path class="s2" d="M150,317 h514.6 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-514.6 z"><title>redis-rs, HashMap get: 487k/s</title></path>
+<text class="ink2" x="674.6" y="327" font-size="10.5">487k/s</text>
+<path class="s3" d="M150,332 h454.6 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-454.6 z"><title>fred, HashMap get: 431k/s</title></path>
+<text class="ink2" x="614.6" y="342" font-size="10.5">431k/s</text>
+<path class="s4" d="M150,347 h140.8 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-140.8 z"><title>Redisson (Java), HashMap get: 136k/s</title></path>
+<text class="ink2" x="300.8" y="357" font-size="10.5">136k/s</text>
+<text class="ink" x="138" y="411.0" font-size="12" text-anchor="end">Lock and unlock</text>
+<path class="s1" d="M150,378 h80.7 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-80.7 z"><title>redissun, Lock and unlock: 80k/s</title></path>
+<text class="ink2" x="240.7" y="388" font-size="10.5">80k/s</text>
+<path class="s2" d="M150,393 h193.3 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-193.3 z"><title>redis-rs, Lock and unlock: 185k/s</title></path>
+<text class="ink2" x="353.3" y="403" font-size="10.5">185k/s</text>
+<path class="s3" d="M150,408 h170.0 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-170.0 z"><title>fred, Lock and unlock: 164k/s</title></path>
+<text class="ink2" x="330.0" y="418" font-size="10.5">164k/s</text>
+<path class="s4" d="M150,423 h36.3 a4,4 0 0 1 4,4 v5 a4,4 0 0 1 -4,4 h-36.3 z"><title>Redisson (Java), Lock and unlock: 38k/s</title></path>
+<text class="ink2" x="196.3" y="433" font-size="10.5">38k/s</text>
+</svg>

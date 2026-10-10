@@ -1,0 +1,136 @@
+{
+  "results": [
+    {
+      "library": "redissun",
+      "operation": "bucket_set",
+      "ops_per_second": 397988.73425253615,
+      "p50_us": 76.667,
+      "p99_us": 133.834
+    },
+    {
+      "library": "redissun",
+      "operation": "bucket_get",
+      "ops_per_second": 407229.7341268811,
+      "p50_us": 76.625,
+      "p99_us": 151.917
+    },
+    {
+      "library": "redissun",
+      "operation": "map_insert",
+      "ops_per_second": 215744.6794858788,
+      "p50_us": 79.0,
+      "p99_us": 136.5
+    },
+    {
+      "library": "redissun",
+      "operation": "map_get",
+      "ops_per_second": 326550.2238826523,
+      "p50_us": 85.625,
+      "p99_us": 243.125
+    },
+    {
+      "library": "redissun",
+      "operation": "lock_unlock",
+      "ops_per_second": 75395.44060274962,
+      "p50_us": 218.791,
+      "p99_us": 350.583
+    },
+    {
+      "library": "redissun",
+      "operation": "batch_100",
+      "ops_per_second": null,
+      "p50_us": 292.292,
+      "p99_us": 583.3340000000001
+    },
+    {
+      "library": "fred",
+      "operation": "bucket_set",
+      "ops_per_second": 416611.9643925172,
+      "p50_us": 78.208,
+      "p99_us": 181.667
+    },
+    {
+      "library": "fred",
+      "operation": "bucket_get",
+      "ops_per_second": 429298.6349446474,
+      "p50_us": 75.375,
+      "p99_us": 119.45899999999999
+    },
+    {
+      "library": "fred",
+      "operation": "map_insert",
+      "ops_per_second": 264630.79644935153,
+      "p50_us": 79.25,
+      "p99_us": 123.79200000000002
+    },
+    {
+      "library": "fred",
+      "operation": "map_get",
+      "ops_per_second": 426092.42306687136,
+      "p50_us": 75.917,
+      "p99_us": 125.45899999999999
+    },
+    {
+      "library": "fred",
+      "operation": "lock_unlock",
+      "ops_per_second": 162348.14162943195,
+      "p50_us": 155.875,
+      "p99_us": 213.125
+    },
+    {
+      "library": "fred",
+      "operation": "batch_100",
+      "ops_per_second": null,
+      "p50_us": 232.5,
+      "p99_us": 419.667
+    },
+    {
+      "library": "redis-rs",
+      "operation": "bucket_set",
+      "ops_per_second": 482142.03722895985,
+      "p50_us": 75.333,
+      "p99_us": 119.667
+    },
+    {
+      "library": "redis-rs",
+      "operation": "bucket_get",
+      "ops_per_second": 460208.47896409256,
+      "p50_us": 74.875,
+      "p99_us": 114.167
+    },
+    {
+      "library": "redis-rs",
+      "operation": "map_insert",
+      "ops_per_second": 300336.04807200667,
+      "p50_us": 77.625,
+      "p99_us": 124.625
+    },
+    {
+      "library": "redis-rs",
+      "operation": "map_get",
+      "ops_per_second": 482390.9103408622,
+      "p50_us": 76.625,
+      "p99_us": 123.125
+    },
+    {
+      "library": "redis-rs",
+      "operation": "lock_unlock",
+      "ops_per_second": 184490.03746514893,
+      "p50_us": 155.834,
+      "p99_us": 227.167
+    },
+    {
+      "library": "redis-rs",
+      "operation": "batch_100",
+      "ops_per_second": null,
+      "p50_us": 133.292,
+      "p99_us": 181.5
+    }
+  ],
+  "workload": {
+    "batch_commands": 100,
+    "concurrency": 64,
+    "measure_seconds": 3,
+    "payload": "JSON object of about 80 bytes"
+  }
+}

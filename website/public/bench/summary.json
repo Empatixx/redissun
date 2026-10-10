@@ -1,0 +1,194 @@
+[
+  {
+    "library": "redissun",
+    "operation": "Bucket set",
+    "p50_us": 76.667,
+    "p99_us": 133.834,
+    "ops_per_second": 446284.80227565154,
+    "runs": 3
+  },
+  {
+    "library": "redissun",
+    "operation": "Bucket get",
+    "p50_us": 75.333,
+    "p99_us": 112.584,
+    "ops_per_second": 428247.0584313856,
+    "runs": 3
+  },
+  {
+    "library": "redissun",
+    "operation": "HashMap insert",
+    "p50_us": 78.875,
+    "p99_us": 129.292,
+    "ops_per_second": 254926.44438824142,
+    "runs": 3
+  },
+  {
+    "library": "redissun",
+    "operation": "HashMap get",
+    "p50_us": 75.208,
+    "p99_us": 112.54199999999999,
+    "ops_per_second": 436928.66592930385,
+    "runs": 3
+  },
+  {
+    "library": "redissun",
+    "operation": "Lock and unlock",
+    "p50_us": 217.83300000000003,
+    "p99_us": 319.334,
+    "ops_per_second": 79597.72886190435,
+    "runs": 3
+  },
+  {
+    "library": "redissun",
+    "operation": "Batch of 100 sets",
+    "p50_us": 271.709,
+    "p99_us": 425.5,
+    "ops_per_second": null,
+    "runs": 3
+  },
+  {
+    "library": "redis-rs",
+    "operation": "Bucket set",
+    "p50_us": 74.709,
+    "p99_us": 115.5,
+    "ops_per_second": 482142.03722895985,
+    "runs": 3
+  },
+  {
+    "library": "redis-rs",
+    "operation": "Bucket get",
+    "p50_us": 74.875,
+    "p99_us": 114.167,
+    "ops_per_second": 490386.1602494463,
+    "runs": 3
+  },
+  {
+    "library": "redis-rs",
+    "operation": "HashMap insert",
+    "p50_us": 78.0,
+    "p99_us": 124.625,
+    "ops_per_second": 300336.04807200667,
+    "runs": 3
+  },
+  {
+    "library": "redis-rs",
+    "operation": "HashMap get",
+    "p50_us": 74.75,
+    "p99_us": 117.667,
+    "ops_per_second": 487421.44115632726,
+    "runs": 3
+  },
+  {
+    "library": "redis-rs",
+    "operation": "Lock and unlock",
+    "p50_us": 155.209,
+    "p99_us": 226.791,
+    "ops_per_second": 185419.16724272832,
+    "runs": 3
+  },
+  {
+    "library": "redis-rs",
+    "operation": "Batch of 100 sets",
+    "p50_us": 133.375,
+    "p99_us": 173.75,
+    "ops_per_second": null,
+    "runs": 3
+  },
+  {
+    "library": "fred",
+    "operation": "Bucket set",
+    "p50_us": 75.875,
+    "p99_us": 115.25,
+    "ops_per_second": 421128.11834700766,
+    "runs": 3
+  },
+  {
+    "library": "fred",
+    "operation": "Bucket get",
+    "p50_us": 75.375,
+    "p99_us": 115.91600000000001,
+    "ops_per_second": 436679.33094545983,
+    "runs": 3
+  },
+  {
+    "library": "fred",
+    "operation": "HashMap insert",
+    "p50_us": 78.70800000000001,
+    "p99_us": 123.58399999999999,
+    "ops_per_second": 265836.51752726134,
+    "runs": 3
+  },
+  {
+    "library": "fred",
+    "operation": "HashMap get",
+    "p50_us": 74.75,
+    "p99_us": 112.0,
+    "ops_per_second": 431026.6332185699,
+    "runs": 3
+  },
+  {
+    "library": "fred",
+    "operation": "Lock and unlock",
+    "p50_us": 155.875,
+    "p99_us": 220.125,
+    "ops_per_second": 163548.64267036502,
+    "runs": 3
+  },
+  {
+    "library": "fred",
+    "operation": "Batch of 100 sets",
+    "p50_us": 230.375,
+    "p99_us": 354.292,
+    "ops_per_second": null,
+    "runs": 3
+  },
+  {
+    "library": "Redisson (Java)",
+    "operation": "Bucket set",
+    "p50_us": 75.083,
+    "p99_us": 117.916,
+    "ops_per_second": 136615.4,
+    "runs": 3
+  },
+  {
+    "library": "Redisson (Java)",
+    "operation": "Bucket get",
+    "p50_us": 75.666,
+    "p99_us": 116.417,
+    "ops_per_second": 139328.2,
+    "runs": 3
+  },
+  {
+    "library": "Redisson (Java)",
+    "operation": "HashMap insert",
+    "p50_us": 80.125,
+    "p99_us": 117.5,
+    "ops_per_second": 111269.4,
+    "runs": 3
+  },
+  {
+    "library": "Redisson (Java)",
+    "operation": "HashMap get",
+    "p50_us": 75.417,
+    "p99_us": 111.583,
+    "ops_per_second": 136126.5,
+    "runs": 3
+  },
+  {
+    "library": "Redisson (Java)",
+    "operation": "Lock and unlock",
+    "p50_us": 205.667,
+    "p99_us": 288.709,
+    "ops_per_second": 37921.8,
+    "runs": 3
+  },
+  {
+    "library": "Redisson (Java)",
+    "operation": "Batch of 100 sets",
+    "p50_us": 176.042,
+    "p99_us": 270.583,
+    "ops_per_second": null,
+    "runs": 3
+  }
+]
