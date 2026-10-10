@@ -1,0 +1,45 @@
+---
+title: Benchmarks
+description: redissun against hand-written redis-rs and fred code, and against Redisson.
+---
+
+These benchmarks answer one question: **what does an object cost on top of the plain Redis commands?** redissun runs the same operations as hand-written code on two other Rust clients, [redis-rs](https://crates.io/crates/redis) and [fred](https://crates.io/crates/fred), and as [Redisson](https://github.com/redisson/redisson), the Java library redissun is modelled on.
+
+![Latency of one operation](/bench/latency.svg)
+
+![Throughput with 64 tasks](/bench/throughput.svg)
+
+## What it shows
+
+- **A single call costs the same everywhere.** A get, a set and a map insert take about 75 µs on every library. This is the Redis round trip on one machine. The client adds under 3 µs, so on a real network, where one round trip takes 100 to 1000 times longer, the differences disappear.
+- **Under load redissun is a little behind the bare clients.** With 64 tasks it is 7 to 15 % below redis-rs, whose single multiplexed connection is the leanest setup, and within a few percent of fred. Redisson uses a blocking API with 64 threads and reaches about a third of the Rust numbers.
+- **A lock costs more than `SET NX`, on purpose.** A redissun lock takes 218 µs, a bare `SET NX PX` plus a Lua compare-and-delete takes 155 µs. The difference buys a reentrant lock, an immediate wake-up of waiting owners through pub/sub and a watchdog that renews the lease. Against Redisson's lock the latency is close (218 against 206 µs) and the throughput under load is twice as high.
+- **`Batch` has room to improve.** 100 queued sets take 272 µs, a redis-rs pipeline takes 133 µs. Each queued command also creates a handle that gives its reply, which may explain part of the gap. This has not been profiled.
+
+## How it was measured
+
+| Operation | redissun | redis-rs and fred, by hand | Redisson |
+|---|---|---|---|
+| Bucket set, get | `Bucket::set`, `get` | `SET`, `GET` and `serde_json` | `RBucket.set`, `get` |
+| HashMap insert | `HashMap::insert`, which returns the replaced value | a Lua script with `HGET` and `HSET`, the same as redissun sends | `RMap.put` |
+| HashMap get | `HashMap::get` | `HGET` and `serde_json` | `RMap.get` |
+| Lock and unlock | `Lock::lock`, `unlock` | `SET NX PX` and a Lua compare-and-delete | `RLock.lock`, `unlock` |
+| Batch of 100 sets | `Batch` | a pipeline | `RBatch` |
+
+- The value is a JSON object of about 80 bytes. Every library stores it as JSON.
+- **Latency** is the median of one call from one task, after a warm-up. The JVM gets a longer warm-up.
+- **Throughput** is operations per second from 64 tasks (64 threads for Redisson), each on its own key.
+- Every library runs with its default settings. redissun uses 4 connections, fred is set to 4, redis-rs uses one multiplexed connection and Redisson uses its default pool of 64.
+- Each number is the median of three runs. The machine was an Apple M5 Pro running other programs, so expect about 10 % of noise. The versions are redissun 0.17, redis-rs 1.7.1, fred 10.1.0, Redisson 4.8.0, Rust 1.98, JDK 25 and Redis 8.10.
+
+## Run it yourself
+
+```bash
+export REDISSUN_BENCH_URL=redis://127.0.0.1:6379
+
+cargo bench --bench compare            # redissun, fred and redis-rs
+(cd benches/redisson && mvn -q compile exec:java -Dexec.args="$REDISSUN_BENCH_URL ../results/redisson.json")
+python3 benches/plot.py                # draws the charts
+```
+
+The benchmark writes keys named `bench:*`, so use a Redis you can throw away. The code and the details are in the [`benches/`](https://github.com/Empatixx/redissun/tree/main/benches) folder.
