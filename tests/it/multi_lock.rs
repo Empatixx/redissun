@@ -1,6 +1,4 @@
-mod common;
-
-use common::{client, unique};
+use crate::common::{client, unique};
 use redissun::{Client, Error, Lock, MultiLock, Object};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;

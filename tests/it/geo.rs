@@ -1,6 +1,4 @@
-mod common;
-
-use common::{client, unique};
+use crate::common::{client, unique};
 use redissun::{Error, Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit, JsonCodec, Object};
 use std::collections::BTreeMap;
 

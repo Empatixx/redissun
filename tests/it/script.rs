@@ -1,7 +1,5 @@
-mod common;
-
+use crate::common::{client, unique};
 use bytes::Bytes;
-use common::{client, unique};
 use redissun::{Decoded, Error, LuaScript, Object, ScriptMode, StringCodec};
 use tokio::sync::Mutex;
 

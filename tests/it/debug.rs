@@ -1,6 +1,4 @@
-mod common;
-
-use common::{client, unique};
+use crate::common::{client, unique};
 use redissun::Client;
 
 #[tokio::test]

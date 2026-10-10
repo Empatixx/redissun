@@ -1,6 +1,4 @@
-mod common;
-
-use common::{client, unique};
+use crate::common::{client, unique};
 use futures::TryStreamExt;
 use redissun::{Client, DelayedQueue, JsonCodec, Object, VecDeque};
 use std::time::Duration;
@@ -209,7 +207,7 @@ async fn due_times_come_from_the_client_clock() {
         .unwrap()
         .as_millis() as i64;
     delayed.push("x", Duration::from_secs(60)).await.unwrap();
-    let reply = common::raw_command(&[
+    let reply = crate::common::raw_command(&[
         "ZRANGE",
         &format!("redissun__delay_timeout:{{{name}}}"),
         "0",

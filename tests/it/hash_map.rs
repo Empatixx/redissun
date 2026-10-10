@@ -1,6 +1,4 @@
-mod common;
-
-use common::{client, unique};
+use crate::common::{client, unique};
 use futures::TryStreamExt;
 use redissun::Object;
 use serde::{Deserialize, Serialize};

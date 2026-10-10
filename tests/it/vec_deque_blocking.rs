@@ -1,6 +1,4 @@
-mod common;
-
-use common::{client, unique};
+use crate::common::{client, unique};
 use redissun::Object;
 use std::collections::HashSet;
 use std::time::Duration;
