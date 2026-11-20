@@ -41,9 +41,11 @@ pub(crate) struct Core {
     background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
-    pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
-    /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
-    pub(crate) batch_connections: Arc<tokio::sync::Semaphore>,
+    /// The idle connections of batches.
+    pub(crate) exclusive: std::sync::Mutex<Vec<crate::batch::Wire>>,
+    /// For each node, one permit for each connection that batches may use at the same time, `pool_size` of them, like the connections of Redisson's pool for that node.
+    batch_gates: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    pool_size: usize,
 }
 
 impl Core {
@@ -76,7 +78,8 @@ impl Core {
             pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
             exclusive: std::sync::Mutex::new(Vec::new()),
-            batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
+            batch_gates: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pool_size: startup.pool_size,
         });
         for client in core.pool.clients() {
             core.keep_named(client).await?;
@@ -100,6 +103,33 @@ impl Core {
             set_name(client, name, None).await?;
         }
         Ok(())
+    }
+
+    pub(crate) fn client_name(&self) -> Option<&str> {
+        self.client_name.as_deref()
+    }
+
+    /// The permits of the batch connections of the node `server`.
+    pub(crate) fn batch_gate(&self, server: &str) -> Arc<tokio::sync::Semaphore> {
+        let mut gates = self.batch_gates.lock().unwrap_or_else(|e| e.into_inner());
+        let gate = gates.entry(server.to_string());
+        gate.or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(self.pool_size)))
+            .clone()
+    }
+
+    /// Reads the slots of the cluster again, after Redis answered a batch with `MOVED` or a node did not answer.
+    pub(crate) fn refresh_cluster(&self) {
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        for client in self.pool.clients() {
+            if client.is_clustered() {
+                let client = client.clone();
+                runtime.spawn(async move {
+                    let _ = client.sync_cluster().await;
+                });
+            }
+        }
     }
 
     async fn keep_named(&self, client: &RedisClient) -> Result<()> {
@@ -298,23 +328,11 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
         };
         let idle = std::mem::take(&mut *strong.exclusive.lock().unwrap_or_else(|e| e.into_inner()));
         drop(strong);
-        for client in idle {
-            let answered = client.is_connected()
-                && matches!(
-                    tokio::time::timeout(wait, client.ping::<()>(None)).await,
-                    Ok(Ok(()))
-                );
-            match core.upgrade() {
-                Some(strong) if answered => strong
-                    .exclusive
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(client),
-                _ => {
-                    tokio::spawn(async move {
-                        let _ = client.quit().await;
-                    });
-                }
+        for mut wire in idle {
+            let answered = wire.ping(wait).await;
+            if let (Some(strong), true) = (core.upgrade(), answered) {
+                let mut idle = strong.exclusive.lock().unwrap_or_else(|e| e.into_inner());
+                idle.push(wire);
             }
         }
     }
@@ -368,14 +386,10 @@ impl Drop for Core {
         };
         let pool = self.pool.clone();
         let pubsub = self.pubsub.take();
-        let exclusive = std::mem::take(self.exclusive.get_mut().unwrap_or_else(|e| e.into_inner()));
         runtime.spawn(async move {
             let _ = pool.quit().await;
             if let Some(pubsub) = pubsub {
                 pubsub.quit().await;
-            }
-            for client in exclusive {
-                let _ = client.quit().await;
             }
         });
     }

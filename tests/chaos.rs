@@ -156,7 +156,6 @@ impl Exclusive {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn lock_keeps_mutual_exclusion_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-lock");
@@ -187,7 +186,6 @@ async fn lock_keeps_mutual_exclusion_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn fair_lock_keeps_mutual_exclusion_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-fair");
@@ -218,7 +216,6 @@ async fn fair_lock_keeps_mutual_exclusion_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn fenced_lock_tokens_only_grow_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-fenced");
@@ -250,7 +247,6 @@ async fn fenced_lock_tokens_only_grow_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn rw_lock_never_mixes_a_writer_with_others_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-rw");
@@ -313,7 +309,6 @@ async fn rw_lock_never_mixes_a_writer_with_others_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn multi_lock_never_deadlocks_and_stays_exclusive_under_faults() {
     let (_turn, clients) = clients().await;
     let names: std::vec::Vec<String> = (0..5).map(|i| unique(&format!("chaos-multi{i}"))).collect();
@@ -346,7 +341,6 @@ async fn multi_lock_never_deadlocks_and_stays_exclusive_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn semaphore_never_overbooks_and_loses_permits_only_to_failed_calls_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-semaphore");
@@ -410,7 +404,6 @@ async fn semaphore_never_overbooks_and_loses_permits_only_to_failed_calls_under_
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn counter_never_loses_an_acknowledged_increment_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-counter");
@@ -447,7 +440,6 @@ async fn counter_never_loses_an_acknowledged_increment_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn rate_limiter_keeps_its_long_run_rate_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-limiter");
@@ -504,7 +496,6 @@ async fn rate_limiter_keeps_its_long_run_rate_under_faults() {
 }
 
 #[tokio::test]
-#[ignore = "runs a fault-injection workload for several seconds; run with --ignored"]
 async fn queue_delivers_only_values_that_were_pushed_under_faults() {
     let (_turn, clients) = clients().await;
     let name = unique("chaos-queue");

@@ -46,7 +46,6 @@ async fn wait_for_replicas(topology: &Topology, key: &str) {
 }
 
 #[tokio::test]
-#[ignore = "starts a sentinel topology in docker; run with --ignored"]
 async fn objects_work_through_sentinel() {
     let topology = Topology::sentinel().await;
     let client = connect(&topology).await;
@@ -63,7 +62,6 @@ async fn objects_work_through_sentinel() {
 }
 
 #[tokio::test]
-#[ignore = "starts a sentinel topology in docker; run with --ignored"]
 async fn reads_and_writes_continue_after_sentinel_failover() {
     let topology = Topology::sentinel().await;
     let client = connect(&topology).await;
@@ -91,7 +89,6 @@ async fn reads_and_writes_continue_after_sentinel_failover() {
 }
 
 #[tokio::test]
-#[ignore = "starts a sentinel topology in docker; run with --ignored"]
 async fn lock_waiter_wakes_after_sentinel_failover() {
     let topology = Topology::sentinel().await;
     let holder_client = connect(&topology).await;
@@ -125,7 +122,6 @@ async fn lock_waiter_wakes_after_sentinel_failover() {
 }
 
 #[tokio::test]
-#[ignore = "starts a sentinel topology in docker; run with --ignored"]
 async fn topic_subscriber_receives_after_sentinel_failover() {
     let topology = Topology::sentinel().await;
     let client = connect(&topology).await;
@@ -149,7 +145,6 @@ async fn topic_subscriber_receives_after_sentinel_failover() {
 }
 
 #[tokio::test]
-#[ignore = "starts a sentinel topology in docker; run with --ignored"]
 async fn blocking_pop_survives_sentinel_failover() {
     let topology = Topology::sentinel().await;
     let client = connect(&topology).await;

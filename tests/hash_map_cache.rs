@@ -1868,7 +1868,6 @@ async fn the_string_codec_stores_and_iterates_plain_strings() {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn an_entry_expires_and_is_reported_on_a_cluster() {
     let topology = Topology::cluster().await;
     let client = redissun::Client::builder()

@@ -17,7 +17,6 @@ async fn connect(topology: &Topology) -> Client {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn plain_collections_work_on_a_cluster() {
     let topology = Topology::cluster().await;
     let client = connect(&topology).await;
@@ -69,7 +68,6 @@ async fn plain_collections_work_on_a_cluster() {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn objects_with_several_keys_work_on_a_cluster() {
     let topology = Topology::cluster().await;
     let client = connect(&topology).await;
@@ -139,7 +137,6 @@ async fn objects_with_several_keys_work_on_a_cluster() {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn locks_work_on_a_cluster() {
     let topology = Topology::cluster().await;
     let client = connect(&topology).await;
@@ -186,7 +183,6 @@ async fn locks_work_on_a_cluster() {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn queues_and_topics_work_on_a_cluster() {
     let topology = Topology::cluster().await;
     let client = connect(&topology).await;
@@ -236,7 +232,6 @@ async fn queues_and_topics_work_on_a_cluster() {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn lock_and_data_survive_a_cluster_master_failover() {
     let topology = Topology::cluster().await;
     let holder_client = connect(&topology).await;
@@ -280,7 +275,6 @@ async fn lock_and_data_survive_a_cluster_master_failover() {
 }
 
 #[tokio::test]
-#[ignore = "starts a redis cluster in docker; run with --ignored"]
 async fn scripts_and_functions_work_on_a_cluster() {
     let topology = Topology::cluster().await;
     let client = connect(&topology).await.with_codec(redissun::StringCodec);

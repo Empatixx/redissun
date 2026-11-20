@@ -193,7 +193,6 @@ async fn tls_settings_need_a_rediss_url() {
 }
 
 #[tokio::test]
-#[ignore = "starts a sentinel topology in docker; run with --ignored"]
 async fn objects_work_through_sentinel_over_tls() {
     let authority = Authority::new("sentinel CA");
     let topology = Topology::sentinel_tls(&authority, &authority.server(&["127.0.0.1"])).await;
@@ -207,7 +206,6 @@ async fn objects_work_through_sentinel_over_tls() {
 }
 
 #[tokio::test]
-#[ignore = "starts a cluster topology in docker; run with --ignored"]
 async fn objects_work_through_cluster_over_tls() {
     let authority = Authority::new("cluster CA");
     let topology = Topology::cluster_tls(&authority, &authority.server(&["127.0.0.1"])).await;
