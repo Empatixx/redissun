@@ -62,30 +62,31 @@ async fn main() -> redissun::Result<()> {
 | [`Vec`](https://empatixx.github.io/redissun/docs/objects/vec) | list | stable |
 | [`VecDeque`](https://empatixx.github.io/redissun/docs/objects/vec-deque) | list | stable |
 | [`HashSet`](https://empatixx.github.io/redissun/docs/objects/hash-set) | set | stable |
-| [`LocalCachedMap`](https://empatixx.github.io/redissun/docs/objects/local-cached-map) | hash and pub/sub | experimental |
+| [`LocalCachedMap`](https://empatixx.github.io/redissun/docs/objects/local-cached-map) | hash and pub/sub | stable |
 | [`Lock`](https://empatixx.github.io/redissun/docs/objects/lock) | hash and pub/sub | stable |
 | [`RwLock`](https://empatixx.github.io/redissun/docs/objects/rw-lock) | hash, set, strings and pub/sub | stable |
 | [`FairLock`](https://empatixx.github.io/redissun/docs/objects/fair-lock) | hash, list, sorted set and pub/sub | stable |
 | [`FencedLock`](https://empatixx.github.io/redissun/docs/objects/fenced-lock) | hash, string and pub/sub | stable |
 | [`MultiLock`](https://empatixx.github.io/redissun/docs/objects/multi-lock) | the locks it holds | stable |
 | [`SortedSet`](https://empatixx.github.io/redissun/docs/objects/sorted-set) | sorted set | stable |
-| [`DelayedQueue`](https://empatixx.github.io/redissun/docs/objects/delayed-queue) | list, sorted set and pub/sub | experimental |
+| [`DelayedQueue`](https://empatixx.github.io/redissun/docs/objects/delayed-queue) | list, sorted set and pub/sub | stable |
 | [`BitSet`](https://empatixx.github.io/redissun/docs/objects/bit-set) | string | stable |
 | [`HyperLogLog`](https://empatixx.github.io/redissun/docs/objects/hyper-log-log) | HyperLogLog | stable |
-| [`BloomFilter`](https://empatixx.github.io/redissun/docs/objects/bloom-filter) | string and hash | experimental |
-| [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash and sorted set | experimental |
-| [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | experimental |
+| [`BloomFilter`](https://empatixx.github.io/redissun/docs/objects/bloom-filter) | string and hash | stable |
+| [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash and sorted set | stable |
+| [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |
-| [`Stream`](https://empatixx.github.io/redissun/docs/objects/stream) | stream | experimental |
+| [`Stream`](https://empatixx.github.io/redissun/docs/objects/stream) | stream | stable |
 | [`Geo`](https://empatixx.github.io/redissun/docs/objects/geo) | sorted set | stable |
 | [`AtomicI64`](https://empatixx.github.io/redissun/docs/objects/atomic-i64) | string | stable |
 | [`Semaphore`](https://empatixx.github.io/redissun/docs/objects/semaphore) | string and pub/sub | stable |
-| [`CountDownLatch`](https://empatixx.github.io/redissun/docs/objects/count-down-latch) | string and pub/sub | experimental |
+| [`CountDownLatch`](https://empatixx.github.io/redissun/docs/objects/count-down-latch) | string and pub/sub | stable |
 | [`RateLimiter`](https://empatixx.github.io/redissun/docs/objects/rate-limiter) | hash, string and sorted set | stable |
 | [`Batch`](https://empatixx.github.io/redissun/docs/objects/batch) | the commands it holds | experimental |
-| [`Script, Function`](https://empatixx.github.io/redissun/docs/guides/scripts) | Lua scripts and functions | experimental |
+| [`Script`](https://empatixx.github.io/redissun/docs/guides/scripts) | Lua scripts | stable |
+| [`Function`](https://empatixx.github.io/redissun/docs/guides/scripts) | Redis functions | experimental |
 
-Every object follows Redisson's logic and is tested with Redisson's own tests, ported to Rust. **Stable** objects are also thin wrappers over Redis commands or pass the fault-injection tests and the Sentinel and Cluster failover tests. **Experimental** objects are not yet tested under faults, and their API may still change. Every object also has the common methods `name`, `del`, `exists`, `rename`, `expire`, `ttl` and `persist` (add `use redissun::Object;`).
+Every object follows Redisson's logic and is tested with Redisson's own tests, ported to Rust. **Stable** objects behave like their Redisson counterpart in every ported test; the locks, `Semaphore`, `AtomicI64`, `RateLimiter` and `VecDeque` also pass the fault-injection tests. **Experimental** objects still differ from Redisson in a known way, and their API may still change. Every object also has the common methods `name`, `del`, `exists`, `rename`, `expire`, `ttl` and `persist` (add `use redissun::Object;`).
 
 ## Benchmarks
 

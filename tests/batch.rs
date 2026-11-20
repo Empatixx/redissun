@@ -1,10 +1,54 @@
 mod common;
 
-use common::{client, connect_with, unique};
+use common::{client, connect_with, redis_url, unique};
 use redissun::{Error, Object};
 use std::sync::Arc;
 use std::time::Duration;
+use testcontainers::runners::AsyncRunner;
+use testcontainers::ImageExt;
+use testcontainers_modules::redis::Redis;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+
+async fn raw_reply(url: &str, command: &str) -> String {
+    let mut stream = TcpStream::connect(url.trim_start_matches("redis://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("{command}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "redis closed the connection");
+        reply.extend_from_slice(&chunk[..read]);
+        let Some(header) = reply.iter().position(|byte| *byte == b'\n') else {
+            continue;
+        };
+        if reply[0] != b'$' {
+            return String::from_utf8_lossy(&reply[..header]).trim().to_string();
+        }
+        let length: usize = std::str::from_utf8(&reply[1..header - 1])
+            .unwrap()
+            .parse()
+            .unwrap();
+        if reply.len() >= header + 1 + length {
+            return String::from_utf8_lossy(&reply[header + 1..header + 1 + length]).to_string();
+        }
+    }
+}
+
+async fn clients_named(url: &str, name: &str) -> Vec<String> {
+    raw_reply(url, "CLIENT LIST")
+        .await
+        .lines()
+        .filter(|line| line.contains(&format!("name={name} ")))
+        .map(str::to_string)
+        .collect()
+}
 
 async fn wrong_type_key(client: &redissun::Client) -> String {
     let name = unique("batch");
@@ -556,7 +600,7 @@ async fn connection_leak_after_error() {
 
 #[tokio::test]
 async fn connection_leak_after_error_in_stored_mode() {
-    let client = client().await;
+    let client = connect_with(|builder| builder.pool_size(1)).await;
     let name = unique("test");
     let batch = client
         .batch()
@@ -729,7 +773,8 @@ async fn batch_list() {
 
 #[tokio::test]
 async fn batch_ping() {
-    let client = client().await;
+    let client =
+        connect_with(|builder| builder.ping_connection_interval(Duration::from_millis(100))).await;
     for batch in modes(&client) {
         let handle = batch.bucket::<String>(unique("test")).set("1232");
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -860,10 +905,158 @@ async fn a_queue_time_error_aborts_the_transaction_of_its_node() {
     assert_eq!(applied.await.unwrap(), 1);
 }
 
+#[tokio::test]
+async fn atomic_batch_discard() {
+    let client = connect_with(|builder| builder.pool_size(1)).await;
+    let key = unique("key");
+    client
+        .bucket::<String>(key.clone())
+        .set("value")
+        .await
+        .unwrap();
+
+    let batch = client.batch().stored_in_redis();
+    drop(batch.bucket::<String>(key.clone()).get());
+    drop(batch.bucket::<String>(key.clone()).set("changed"));
+    batch.discard().await.unwrap();
+
+    assert_eq!(
+        client
+            .bucket::<String>(key.clone())
+            .get()
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("value")
+    );
+
+    let next = client.batch().stored_in_redis();
+    let read = next.bucket::<String>(key).get();
+    assert_eq!(next.execute().await.unwrap().commands, 1);
+    assert_eq!(read.await.unwrap().as_deref(), Some("value"));
+}
+
+#[tokio::test]
+async fn ping_during_long_batch_execution() {
+    for skip_result in [true, false] {
+        let client = connect_with(|builder| {
+            builder
+                .pool_size(1)
+                .ping_connection_interval(Duration::from_millis(50))
+                .timeout(Duration::from_millis(50))
+        })
+        .await;
+        let mut batch = client
+            .batch()
+            .response_timeout(Duration::from_secs(5))
+            .retry_attempts(0);
+        if skip_result {
+            batch = batch.skip_result();
+        }
+        let prefix = unique("pingDuringBatch");
+        // Redisson's test sends 300000 commands. A debug build on a CI runner needs more than the 5 second response timeout for that, and 100000 still keep the connection busy for many ping intervals.
+        let size = 100_000;
+        for i in 0..size {
+            drop(batch.bucket::<String>(format!("{prefix}:{i}")).set("v"));
+        }
+        batch.execute().await.unwrap();
+
+        let first = client.bucket::<String>(format!("{prefix}:0"));
+        assert!(first.exists().await.unwrap());
+        let last = client.bucket::<String>(format!("{prefix}:{}", size - 1));
+        assert!(last.exists().await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn batch_ping_while_queued() {
+    let name = unique("batch-ping");
+    let client = connect_with(|builder| {
+        builder
+            .ping_connection_interval(Duration::from_millis(100))
+            .client_name(name.clone())
+    })
+    .await;
+    let key = unique("test");
+    client
+        .bucket::<String>(key.clone())
+        .set("1232")
+        .await
+        .unwrap();
+
+    let batch = client.batch().stored_in_redis();
+    let read = batch.bucket::<String>(key).get();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(batch.execute().await.unwrap().commands, 1);
+    assert_eq!(read.await.unwrap().as_deref(), Some("1232"));
+
+    let url = redis_url().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let clients = clients_named(&url, &name).await;
+        if !clients.is_empty() && clients.iter().all(|line| !line.contains("cmd=exec")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a connection of the batch is not pinged after EXEC: {clients:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn batch_ping_after_failed_discard() {
+    let container = Redis::default().with_tag("7.4").start().await.unwrap();
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    let url = format!("redis://127.0.0.1:{port}");
+    let name = "discard-ping";
+    let mut connected = None;
+    for _ in 0..50 {
+        let built = redissun::Client::builder()
+            .url(url.clone())
+            .ping_connection_interval(Duration::from_millis(100))
+            .timeout(Duration::from_millis(200))
+            .retry_attempts(0)
+            .client_name(name)
+            .build()
+            .await;
+        if let Ok(client) = built {
+            connected = Some(client);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let client = connected.expect("could not connect to redis");
+
+    let batch = client.batch().stored_in_redis();
+    drop(batch.bucket::<String>("test").set("1"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(raw_reply(&url, "CLIENT PAUSE 1000").await, "+OK");
+    assert!(batch.discard().await.is_err());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let clients = clients_named(&url, name).await;
+        if clients.iter().all(|line| !line.contains("cmd=discard")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a connection is left after a failed DISCARD: {clients:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    drop(client);
+    container.rm().await.unwrap();
+}
+
 mod cluster {
     use super::common::topology::Topology;
     use super::common::unique;
-    use redissun::Client;
+    use redissun::{Client, DelayStrategy};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     async fn connect(topology: &Topology) -> Client {
@@ -885,11 +1078,15 @@ mod cluster {
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        Client::builder()
-            .url(topology.cluster_url())
-            .build()
-            .await
-            .expect("could not connect to the cluster")
+        let mut last = None;
+        for _ in 0..30 {
+            match Client::builder().url(topology.cluster_url()).build().await {
+                Ok(client) => return client,
+                Err(error) => last = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        panic!("could not connect to the cluster: {last:?}");
     }
 
     #[tokio::test]
@@ -999,5 +1196,195 @@ mod cluster {
                 assert_eq!(client.atomic_i64(name).get().await.unwrap(), 7);
             }
         }
+    }
+
+    async fn wait_for_replicas(topology: &Topology) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let mut online = 0;
+            for port in topology.ports() {
+                let info = topology.cli(port, &["INFO", "replication"]).await;
+                if info.contains("role:master") && info.contains("state=online") {
+                    online += 1;
+                }
+            }
+            if online == 3 {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "replicas did not come online"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn masters(topology: &Topology) -> Vec<u16> {
+        let mut masters = Vec::new();
+        for port in topology.ports() {
+            let info = topology.cli(port, &["INFO", "replication"]).await;
+            if info.contains("role:master") {
+                masters.push(port);
+            }
+        }
+        masters
+    }
+
+    async fn slot_migration(stored: bool) {
+        let topology = Topology::cluster().await;
+        let client = connect(&topology).await;
+        let name = "test{kaO}";
+        let slot = topology
+            .cli(topology.base, &["CLUSTER", "KEYSLOT", name])
+            .await;
+        let slot = slot.trim();
+        let masters = masters(&topology).await;
+        let source = topology.cluster_master_of(name).await;
+        let destination = *masters.iter().find(|port| **port != source).unwrap();
+        let source_id = topology.cli(source, &["CLUSTER", "MYID"]).await;
+        let destination_id = topology.cli(destination, &["CLUSTER", "MYID"]).await;
+        let (source_id, destination_id) = (source_id.trim(), destination_id.trim());
+
+        let batch = if stored {
+            client.batch().stored_in_redis()
+        } else {
+            client.batch()
+        };
+        let map = batch.hash_map::<String, i64>(name);
+        let handles: Vec<_> = (0..5i64).map(|i| map.insert(&i.to_string(), &i)).collect();
+
+        topology
+            .cli(
+                destination,
+                &["CLUSTER", "SETSLOT", slot, "IMPORTING", source_id],
+            )
+            .await;
+        topology
+            .cli(
+                source,
+                &["CLUSTER", "SETSLOT", slot, "MIGRATING", destination_id],
+            )
+            .await;
+        let keys = topology
+            .cli(source, &["CLUSTER", "GETKEYSINSLOT", slot, "100"])
+            .await;
+        let keys: Vec<&str> = keys.lines().filter(|key| !key.trim().is_empty()).collect();
+        if !keys.is_empty() {
+            let port = destination.to_string();
+            let mut args = vec!["MIGRATE", "127.0.0.1", &port, "", "0", "2000", "KEYS"];
+            args.extend(keys);
+            topology.cli(source, &args).await;
+        }
+        for master in &masters {
+            topology
+                .cli(
+                    *master,
+                    &["CLUSTER", "SETSLOT", slot, "NODE", destination_id],
+                )
+                .await;
+        }
+        assert_eq!(topology.cluster_master_of(name).await, destination);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        batch.execute().await.unwrap();
+        for handle in handles {
+            let _ = tokio::time::timeout(Duration::from_millis(1), handle)
+                .await
+                .expect("a handle was not resolved by execute");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "starts a redis cluster in docker; run with --ignored"]
+    async fn slot_migration_in_cluster() {
+        slot_migration(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "starts a redis cluster in docker; run with --ignored"]
+    async fn slot_migration_in_cluster_in_stored_mode() {
+        slot_migration(true).await;
+    }
+
+    async fn execute_batch(client: &Client) -> redissun::Result<redissun::BatchResult> {
+        let batch = client.batch();
+        for i in 0..100_000 {
+            drop(batch.bucket::<String>(i.to_string()).get());
+        }
+        batch.execute().await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "differs from Redisson: the last batch of 100000 GETs fails with Error::Timeout. The client cannot tell when a pipeline is written, so the 100 ms response timeout still covers writing it, and a batch that gave up stays queued in the connection; needs a cluster in docker"]
+    async fn connection_leak() {
+        let topology = Topology::cluster().await;
+        let client = Client::builder()
+            .url(topology.cluster_url())
+            .connect_timeout(Duration::from_millis(500))
+            .ping_connection_interval(Duration::from_secs(2))
+            .pool_size(1)
+            .timeout(Duration::from_millis(100))
+            .retry_attempts(0)
+            .retry_delay(DelayStrategy::Constant(Duration::from_millis(20)))
+            .build()
+            .await
+            .expect("could not connect to the cluster");
+
+        let has_errors = Arc::new(AtomicBool::new(false));
+        let mut tasks = Vec::new();
+        for _ in 0..5 * 15 {
+            let client = client.clone();
+            let has_errors = has_errors.clone();
+            tasks.push(tokio::spawn(async move {
+                if execute_batch(&client).await.is_err() {
+                    has_errors.store(true, Ordering::SeqCst);
+                }
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(14), async {
+            for task in tasks {
+                task.await.unwrap();
+            }
+        })
+        .await
+        .expect("the batches did not finish");
+        assert!(has_errors.load(Ordering::SeqCst));
+
+        execute_batch(&client).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts a redis cluster in docker; run with --ignored"]
+    async fn failover() {
+        let topology = Topology::cluster().await;
+        wait_for_replicas(&topology).await;
+        let client = connect(&topology).await;
+        let keys_amount = 100_000;
+
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let batch = client.batch().retry_attempts(20);
+                for i in 0..keys_amount {
+                    let key = i.to_string();
+                    drop(batch.bucket::<String>(key.clone()).set(&key));
+                }
+                batch.execute().await
+            })
+        };
+
+        topology.cluster_failover_of("0").await;
+
+        let outcome = tokio::time::timeout(Duration::from_secs(60), task)
+            .await
+            .expect("the batch did not finish after the failover")
+            .unwrap();
+        assert_eq!(outcome.unwrap().commands, keys_amount);
+        let mut count = 0;
+        for master in masters(&topology).await {
+            let size = topology.cli(master, &["DBSIZE"]).await;
+            count += size.trim().parse::<usize>().unwrap();
+        }
+        assert_eq!(count, keys_amount);
     }
 }

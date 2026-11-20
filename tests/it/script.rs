@@ -4,6 +4,10 @@ use redissun::{Decoded, Error, LuaScript, Object, ScriptMode, StringCodec};
 use tokio::sync::Mutex;
 
 static CACHE: Mutex<()> = Mutex::const_new(());
+static FUNCTIONS: Mutex<()> = Mutex::const_new(());
+
+const GET_FOO: &str = "return redis.call('get', 'foo')";
+const GET_FOO_SHA: &str = "282297a0228f48cd3fc6a55de6316f31422f5d17";
 
 const INCRBY: &str = "return redis.call('INCRBY', KEYS[1], ARGV[1])";
 
@@ -193,6 +197,7 @@ fn library(name: &str) -> String {
 
 #[tokio::test]
 async fn functions_load_call_and_delete() {
+    let _functions = FUNCTIONS.lock().await;
     let functions = client().await.with_codec(StringCodec).function();
     let name = unique("lib").replace([':', '-'], "_");
     let code = library(&name);
@@ -232,4 +237,244 @@ async fn functions_load_call_and_delete() {
 async fn function_kill_without_a_running_function_fails() {
     let functions = client().await.function();
     assert!(functions.kill().await.is_err());
+}
+
+#[tokio::test]
+async fn a_read_only_script_returns_nested_lists() {
+    let script = client().await.with_codec(StringCodec).script();
+    let key = unique("ABCD17436");
+    for stamp in 1506524856000_i64..1506524856100 {
+        let member = format!("DENY\tTESTREDISSON\t{stamp}\thelloworld_hongqin");
+        let _: i64 = script
+            .eval("return redis.call('zadd', KEYS[1], 0, ARGV[1])")
+            .key(key.clone())
+            .arg(&member)
+            .await
+            .unwrap();
+    }
+
+    let max = "'[DENY\tTESTREDISSON\t1506524856099'";
+    let min = "'[DENY\tTESTREDISSON\t1506524856000'";
+    let source = format!(
+        "local d = {{}}; d[1] = redis.call('zrevrangebylex','{key}',{max},{min},'LIMIT',0,5);  \
+         d[2] = redis.call('zrevrangebylex','{key}',{max},{min},'LIMIT',0,15);  \
+         d[3] = redis.call('zrevrangebylex','{key}',{max},{min},'LIMIT',0,25);  return d;"
+    );
+    let lists: Vec<Vec<String>> = script.eval(&source).read_only().await.unwrap();
+    assert_eq!(lists.len(), 3);
+    assert_eq!(lists[0].len(), 5);
+    assert_eq!(lists[1].len(), 15);
+    assert_eq!(lists[2].len(), 25);
+}
+
+#[tokio::test]
+async fn a_read_only_script_returns_a_string() {
+    let script = client().await.with_codec(StringCodec).script();
+    let reply: String = script.eval("return 'hello'").read_only().await.unwrap();
+    assert_eq!(reply, "hello");
+}
+
+#[tokio::test]
+async fn a_list_reply_ends_at_the_first_nil() {
+    let script = client().await.with_codec(StringCodec).script();
+    let reply: Vec<String> = script
+        .eval("return {'1','2','3.3333','foo',nil,'bar'}")
+        .read_only()
+        .await
+        .unwrap();
+    assert_eq!(reply, ["1", "2", "3.3333", "foo"]);
+}
+
+#[tokio::test]
+async fn a_value_set_by_a_script_is_read_back_through_the_codec() {
+    let script = client().await.script();
+    let key = unique("foo");
+    let value = "test".to_string();
+    let _: Option<Decoded<String>> = script
+        .eval("redis.call('set', KEYS[1], ARGV[1])")
+        .key(key.clone())
+        .arg(&value)
+        .await
+        .unwrap();
+
+    let read: Decoded<String> = script
+        .eval("return redis.call('get', KEYS[1])")
+        .key(key)
+        .await
+        .unwrap();
+    assert_eq!(read.into_inner(), value);
+}
+
+#[tokio::test]
+async fn script_exists_is_false_after_a_flush() {
+    let _cache = CACHE.lock().await;
+    let script = client().await.script();
+    let sha = script.script_load(GET_FOO).await.unwrap();
+    assert_eq!(sha, GET_FOO_SHA);
+
+    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [true]);
+
+    script.script_flush().await.unwrap();
+
+    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [false]);
+}
+
+#[tokio::test]
+async fn eval_sha_fails_with_noscript_after_a_flush() {
+    let _cache = CACHE.lock().await;
+    let client = client().await;
+    client
+        .bucket::<String>("foo")
+        .set(&"bar".to_string())
+        .await
+        .unwrap();
+    let script = client.script();
+    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+    let read: Decoded<String> = script.eval_sha(GET_FOO_SHA).read_only().await.unwrap();
+    assert_eq!(read.into_inner(), "bar");
+    script.script_flush().await.unwrap();
+
+    let outcome = script
+        .eval_sha::<Decoded<String>>(GET_FOO_SHA)
+        .read_only()
+        .await;
+    assert!(matches!(outcome, Err(Error::Redis(message)) if message.contains("NOSCRIPT")));
+}
+
+#[tokio::test]
+async fn script_load_returns_the_digest_that_eval_sha_runs() {
+    let _cache = CACHE.lock().await;
+    let client = client().await;
+    client
+        .bucket::<String>("foo")
+        .set(&"bar".to_string())
+        .await
+        .unwrap();
+    let script = client.script();
+    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+    let read: Decoded<String> = script.eval_sha(GET_FOO_SHA).read_only().await.unwrap();
+    assert_eq!(read.into_inner(), "bar");
+}
+
+#[tokio::test]
+async fn eval_sha_reads_a_value_stored_after_the_script_was_loaded() {
+    let _cache = CACHE.lock().await;
+    let client = client().await;
+    let script = client.script();
+    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+
+    client
+        .bucket::<String>("foo")
+        .set(&"bar".to_string())
+        .await
+        .unwrap();
+    let read: Decoded<String> = script.eval_sha(GET_FOO_SHA).read_only().await.unwrap();
+    assert_eq!(read.into_inner(), "bar");
+}
+
+#[tokio::test]
+async fn eval_and_eval_sha_of_one_script_return_the_same_value() {
+    let _cache = CACHE.lock().await;
+    let client = client().await;
+    let script = client.script();
+    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+
+    client
+        .bucket::<String>("foo")
+        .set(&"bar".to_string())
+        .await
+        .unwrap();
+    let evaluated: Decoded<String> = script.eval(GET_FOO).read_only().await.unwrap();
+    assert_eq!(evaluated.into_inner(), "bar");
+    let by_digest: Decoded<String> = script.eval_sha(GET_FOO_SHA).read_only().await.unwrap();
+    assert_eq!(by_digest.into_inner(), "bar");
+}
+
+fn named_library(name: &str, code: &str) -> String {
+    format!("#!lua name={name} \n {code}")
+}
+
+#[tokio::test]
+async fn functions_are_called_in_read_and_write_mode_and_replaced() {
+    let _functions = FUNCTIONS.lock().await;
+    let client = client().await;
+    let functions = client.function();
+    functions.flush().await.unwrap();
+    functions
+        .load(&named_library(
+            "lib",
+            "redis.register_function{function_name='myfun', callback=function(keys, args) return args[1] end, flags={ 'no-writes' }}\
+             redis.register_function{function_name='myfun2', callback=function(keys, args) return 'test' end, flags={ 'no-writes' }}\
+             redis.register_function('myfun3', function(keys, args) return 123 end)",
+        ))
+        .await
+        .unwrap();
+    let echoed: Decoded<String> = functions
+        .call("myfun")
+        .read_only()
+        .arg("test")
+        .await
+        .unwrap();
+    assert_eq!(echoed.into_inner(), "test");
+
+    let text = client.with_codec(StringCodec).function();
+    let constant: String = text.call("myfun2").read_only().await.unwrap();
+    assert_eq!(constant, "test");
+
+    let number: i64 = text.call("myfun3").await.unwrap();
+    assert_eq!(number, 123);
+
+    functions
+        .load_and_replace(&named_library(
+            "lib",
+            "redis.register_function('myfun', function(keys, args) return args[1] end)\
+             redis.register_function('myfun2', function(keys, args) return 'test2' end)\
+             redis.register_function('myfun3', function(keys, args) return 123 end)",
+        ))
+        .await
+        .unwrap();
+
+    let replaced: String = text.call("myfun2").await.unwrap();
+    assert_eq!(replaced, "test2");
+}
+
+#[tokio::test]
+async fn a_function_receives_its_keys_and_arguments() {
+    let _functions = FUNCTIONS.lock().await;
+    let client = client().await;
+    let functions = client.function();
+    functions.flush().await.unwrap();
+    functions
+        .load(&named_library(
+            "lib",
+            "redis.register_function{function_name='myfun', callback=function(keys, args) return keys[1] end, flags={ 'no-writes' }}\
+             redis.register_function('myfun2', function(keys, args) return args[1] end)",
+        ))
+        .await
+        .unwrap();
+    let key: String = functions
+        .call("myfun")
+        .read_only()
+        .key("testKey")
+        .arg("arg1")
+        .await
+        .unwrap();
+    assert_eq!(key, "testKey");
+
+    let text = client.with_codec(StringCodec).function();
+    let argument: String = text
+        .call("myfun2")
+        .keys(["testKey1", "testKey2"])
+        .arg("arg1")
+        .await
+        .unwrap();
+    assert_eq!(argument, "arg1");
+
+    let decoded: Decoded<String> = functions
+        .call("myfun2")
+        .key("testKey")
+        .arg("argv1")
+        .await
+        .unwrap();
+    assert_eq!(decoded.into_inner(), "argv1");
 }

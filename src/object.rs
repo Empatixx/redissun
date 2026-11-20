@@ -140,6 +140,16 @@ impl Key {
         Ok(removed > 0)
     }
 
+    pub(crate) async fn del_with(
+        &self,
+        script: &Script,
+        keys: Vec<String>,
+        args: Vec<Bytes>,
+    ) -> Result<bool> {
+        let removed: i64 = self.core.eval(script, keys, args).await?;
+        Ok(removed == 1)
+    }
+
     pub(crate) async fn expire_all(&self, ttl: Duration, companions: Vec<String>) -> Result<bool> {
         if companions.is_empty() {
             return self.expire(ttl).await;
@@ -162,6 +172,35 @@ impl Key {
         let cleared: i64 = self
             .core
             .eval(&PERSIST_ALL, self.with(companions), Vec::new())
+            .await?;
+        Ok(cleared == 1)
+    }
+
+    pub(crate) async fn expire_with(
+        &self,
+        script: &Script,
+        ttl: Duration,
+        companions: Vec<String>,
+    ) -> Result<bool> {
+        let applied: i64 = self
+            .core
+            .eval(
+                script,
+                self.with(companions),
+                vec![Bytes::from(millis(ttl)?.to_string())],
+            )
+            .await?;
+        Ok(applied == 1)
+    }
+
+    pub(crate) async fn persist_with(
+        &self,
+        script: &Script,
+        companions: Vec<String>,
+    ) -> Result<bool> {
+        let cleared: i64 = self
+            .core
+            .eval(script, self.with(companions), Vec::new())
             .await?;
         Ok(cleared == 1)
     }
@@ -240,6 +279,8 @@ impl Key {
 
 mod sealed {
     use super::Key;
+    use bytes::Bytes;
+    use fred::types::scripts::Script;
 
     pub trait HasKey {
         fn key(&self) -> &Key;
@@ -250,6 +291,22 @@ mod sealed {
 
         fn renamed_companions(&self, _new_name: &str) -> Option<Vec<String>> {
             self.companions().is_empty().then(Vec::new)
+        }
+
+        fn renamed_key(&self, new_name: &str) -> String {
+            new_name.to_string()
+        }
+
+        fn del_script(&self) -> Option<(&'static Script, Vec<String>, Vec<Bytes>)> {
+            None
+        }
+
+        fn expire_script(&self) -> Option<&'static Script> {
+            None
+        }
+
+        fn persist_script(&self) -> Option<&'static Script> {
+            None
         }
     }
 }
@@ -262,7 +319,14 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn del(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.key().del_all(self.companions())
+        let companions = self.companions();
+        let script = self.del_script();
+        async move {
+            match script {
+                Some((script, keys, args)) => self.key().del_with(script, keys, args).await,
+                None => self.key().del_all(companions).await,
+            }
+        }
     }
 
     fn exists(&self) -> impl Future<Output = Result<bool>> + Send {
@@ -271,11 +335,12 @@ impl<T: HasKey + Sync> Object for T {
 
     fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send {
         let companions = self.companions();
-        let renamed = self.renamed_companions(new_name);
+        let new_name = self.renamed_key(new_name);
+        let renamed = self.renamed_companions(&new_name);
         async move {
             match renamed {
                 Some(renamed) if renamed.len() == companions.len() => {
-                    self.key().rename_all(new_name, companions, renamed).await
+                    self.key().rename_all(&new_name, companions, renamed).await
                 }
                 _ => Err(Error::Unsupported("rename".into())),
             }
@@ -283,7 +348,14 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn expire(&self, ttl: Duration) -> impl Future<Output = Result<bool>> + Send {
-        self.key().expire_all(ttl, self.companions())
+        let companions = self.companions();
+        let script = self.expire_script();
+        async move {
+            match script {
+                Some(script) => self.key().expire_with(script, ttl, companions).await,
+                None => self.key().expire_all(ttl, companions).await,
+            }
+        }
     }
 
     fn ttl(&self) -> impl Future<Output = Result<Option<Duration>>> + Send {
@@ -291,7 +363,14 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.key().persist_all(self.companions())
+        let companions = self.companions();
+        let script = self.persist_script();
+        async move {
+            match script {
+                Some(script) => self.key().persist_with(script, companions).await,
+                None => self.key().persist_all(companions).await,
+            }
+        }
     }
 }
 

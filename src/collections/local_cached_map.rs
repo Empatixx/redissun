@@ -3,7 +3,7 @@ use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
 use crate::error::Result;
 use crate::object::{tagged, HasKey, Key};
-use crate::pubsub::Subscription;
+use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface, PubsubInterface, SortedSetsInterface};
 use fred::types::scripts::Script;
@@ -29,6 +29,7 @@ const UPDATE: u8 = b'U';
 const CLEAR: u8 = b'C';
 const UPDATES_LOG_TIME: Duration = Duration::from_secs(10 * 60);
 const UPDATES_LOG_KEEP: Duration = Duration::from_secs(11 * 60);
+const EXPIRED_EVENTS: &str = "__keyevent@*:expired";
 
 static PUT: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
@@ -466,21 +467,28 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             last_invalidate: AtomicI64::new(0),
             listener: Mutex::new(None),
         });
-        if self.sync != SyncStrategy::None || self.reconnection != ReconnectionStrategy::None {
-            let pubsub = self.key.core.pubsub().await?.clone();
+        let pubsub = self.key.core.pubsub().await?.clone();
+        let synced =
+            self.sync != SyncStrategy::None || self.reconnection != ReconnectionStrategy::None;
+        let (subscription, messages) = if synced {
             let (subscription, messages) =
                 pubsub.subscribe_with_messages(&channel(&self.key)).await?;
-            let reconnects = pubsub.reconnects();
-            let handle = tokio::spawn(listen(
-                Arc::downgrade(&local),
-                Arc::downgrade(&self.key.core),
-                vec![self.key.redis_key(), updates_log(&self.key)],
-                subscription,
-                messages,
-                reconnects,
-            ));
-            *local.listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
-        }
+            (Some(subscription), Some(messages))
+        } else {
+            (None, None)
+        };
+        let (expiry, expired) = pubsub.psubscribe_with_messages(EXPIRED_EVENTS).await?;
+        let reconnects = pubsub.reconnects();
+        let handle = tokio::spawn(listen(
+            Arc::downgrade(&local),
+            Arc::downgrade(&self.key.core),
+            vec![self.key.redis_key(), updates_log(&self.key)],
+            (subscription, expiry),
+            messages,
+            Some(expired),
+            reconnects,
+        ));
+        *local.listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
         Ok(LocalCachedMap {
             map: HashMap::new(self.key.clone(), self.codec.clone()),
             key: self.key,
@@ -531,22 +539,41 @@ async fn load_after_reconnection(local: &Local, core: Weak<Core>, keys: &[String
     }
 }
 
+async fn next<T: Clone>(
+    receiver: &mut Option<broadcast::Receiver<T>>,
+) -> std::result::Result<T, RecvError> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn listen(
     local: Weak<Local>,
     core: Weak<Core>,
     keys: std::vec::Vec<String>,
-    _subscription: Subscription,
-    mut messages: broadcast::Receiver<Bytes>,
+    _subscriptions: (Option<Subscription>, Subscription<PatternMessage>),
+    mut messages: Option<broadcast::Receiver<Bytes>>,
+    mut expired: Option<broadcast::Receiver<PatternMessage>>,
     mut reconnects: broadcast::Receiver<()>,
 ) {
     loop {
         tokio::select! {
-            received = messages.recv() => {
+            received = next(&mut messages) => {
                 let Some(local) = local.upgrade() else { return };
                 match received {
                     Ok(payload) => local.apply(&payload),
                     Err(RecvError::Lagged(_)) => local.forget_all(),
                     Err(RecvError::Closed) => return,
+                }
+            }
+            received = next(&mut expired) => {
+                let Some(local) = local.upgrade() else { return };
+                match received {
+                    Ok((_, name)) if name == keys[0].as_bytes() => local.forget_all(),
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => local.forget_all(),
+                    Err(RecvError::Closed) => expired = None,
                 }
             }
             reconnected = reconnects.recv() => {
@@ -570,7 +597,9 @@ async fn listen(
 ///
 /// Every write goes to Redis and, when something changed, publishes a message in the same Lua script, so the other instances of the same map can drop or update their copy (see [`SyncStrategy`]). An instance never reacts to its own messages, and its own writes update its cache. What happens after a lost pub/sub connection is set by [`ReconnectionStrategy`]; when this client falls behind on the messages, the whole local cache is cleared.
 ///
-/// Only changes made through a `LocalCachedMap` are announced. Changes made through a plain [`HashMap`] or [`Object::del`](crate::Object::del) of the same name are not, so other instances see them only when their entry expires or is pushed out. Use [`LocalCachedMap::clear`] to empty the map for everybody.
+/// Only changes made through a `LocalCachedMap` are announced. Changes made through a plain [`HashMap`] of the same name are not, so other instances see them only when their entry expires or is pushed out. [`LocalCachedMap::clear`] and [`Object::del`](crate::Object::del) on a `LocalCachedMap` empty the map for everybody.
+///
+/// As in Redisson, every instance also listens for `__keyevent@*:expired` and clears its local cache when the map's key expires. Redis sends these events only when `notify-keyspace-events` contains `Ex`; neither Redisson nor this crate sets it.
 ///
 /// The data in Redis is a normal hash, so a [`HashMap`] with the same name and codec reads the same entries.
 pub struct LocalCachedMap<K, V, C: Codec> {
@@ -594,14 +623,14 @@ impl<K, V, C: Codec> HasKey for LocalCachedMap<K, V, C> {
     fn key(&self) -> &Key {
         &self.key
     }
+
+    fn del_script(&self) -> Option<(&'static Script, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
+        self.local.forget_all();
+        Some((&CLEAR_ALL, self.clear_keys(), self.clear_arguments()))
+    }
 }
 
-impl<K, V, C> LocalCachedMap<K, V, C>
-where
-    K: Serialize + DeserializeOwned + Send + Sync,
-    V: Serialize + DeserializeOwned + Send + Sync,
-    C: Codec,
-{
+impl<K, V, C: Codec> LocalCachedMap<K, V, C> {
     fn mode(&self) -> Bytes {
         Bytes::from(if self.reconnection == ReconnectionStrategy::Load {
             "2"
@@ -612,6 +641,25 @@ where
         })
     }
 
+    fn clear_keys(&self) -> std::vec::Vec<String> {
+        vec![self.key.redis_key(), updates_log(&self.key)]
+    }
+
+    fn clear_arguments(&self) -> std::vec::Vec<Bytes> {
+        vec![
+            Bytes::from(channel(&self.key)),
+            self.mode(),
+            message(&self.local.id, CLEAR, &[]),
+        ]
+    }
+}
+
+impl<K, V, C> LocalCachedMap<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
     fn log_arguments(&self, field: &Bytes) -> [Bytes; 3] {
         let mut entry = Uuid::new_v4().as_bytes()[..LOG_ID_LEN].to_vec();
         entry.extend_from_slice(field);
@@ -620,10 +668,6 @@ where
             Bytes::from(entry),
             Bytes::from(UPDATES_LOG_KEEP.as_millis().to_string()),
         ]
-    }
-
-    fn redis_keys(&self) -> std::vec::Vec<String> {
-        vec![self.key.redis_key(), updates_log(&self.key)]
     }
 
     /// Returns the value for a key, from the local cache when it is there. A value read from Redis is cached. The key is borrowed: `map.get("k")`.
@@ -683,7 +727,7 @@ where
             .core
             .eval(
                 &PUT,
-                self.redis_keys(),
+                self.clear_keys(),
                 vec![
                     field.clone(),
                     value,
@@ -715,7 +759,7 @@ where
             .core
             .eval(
                 &REMOVE,
-                self.redis_keys(),
+                self.clear_keys(),
                 vec![
                     field.clone(),
                     Bytes::new(),
@@ -761,17 +805,9 @@ where
     /// Removes every entry for everybody; returns whether there was anything to remove. The other instances empty their local cache only when something was removed.
     pub async fn clear(&self) -> Result<bool> {
         self.local.forget_all();
-        let notice = message(&self.local.id, CLEAR, &[]);
-        let removed: i64 = self
-            .key
-            .core
-            .eval(
-                &CLEAR_ALL,
-                self.redis_keys(),
-                vec![Bytes::from(channel(&self.key)), self.mode(), notice],
-            )
-            .await?;
-        Ok(removed == 1)
+        self.key
+            .del_with(&CLEAR_ALL, self.clear_keys(), self.clear_arguments())
+            .await
     }
 
     /// Number of entries in the local cache of this instance, including cached misses.

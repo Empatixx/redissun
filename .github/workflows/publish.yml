@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   publish:
@@ -40,7 +41,7 @@ jobs:
         if: steps.exists.outputs.published == 'false'
         run: |
           version="${{ steps.version.outputs.version }}"
-          awk -v v="$version" 'index($0, "## [" v "]") == 1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > release-notes.md
+          .github/release-notes.sh > release-notes.md
           gh release create "v$version" --target "$GITHUB_SHA" --title "v$version" --notes-file release-notes.md
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,7 +1,7 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
-use crate::object::{millis, HasKey, Key};
+use crate::object::{millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
 use fred::interfaces::HashesInterface;
@@ -708,7 +708,76 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
             self.options_key(),
         ]
     }
+
+    fn renamed_key(&self, new_name: &str) -> String {
+        tagged(new_name)
+    }
+
+    fn renamed_companions(&self, new_name: &str) -> Option<std::vec::Vec<String>> {
+        Some(vec![
+            timeout_key(new_name),
+            idle_key(new_name),
+            access_key(new_name),
+            options_key(new_name),
+        ])
+    }
+
+    fn expire_script(&self) -> Option<&'static Script> {
+        Some(&EXPIRE)
+    }
+
+    fn persist_script(&self) -> Option<&'static Script> {
+        Some(&PERSIST)
+    }
 }
+
+fn timeout_key(key: &str) -> String {
+    format!("redissun__timeout__set:{key}")
+}
+
+fn idle_key(key: &str) -> String {
+    format!("redissun__idle__set:{key}")
+}
+
+fn access_key(key: &str) -> String {
+    format!("redissun__map_cache_last_access__set:{key}")
+}
+
+fn options_key(key: &str) -> String {
+    format!("redissun__map_cache_options:{key}")
+}
+
+static EXPIRE: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local maxSize = tonumber(redis.call('HGET', KEYS[5], 'max-size'))
+        if maxSize ~= nil and maxSize ~= 0 then
+            redis.call('ZADD', KEYS[4], 92233720368547758, 'redissun__expiretag')
+            redis.call('PEXPIRE', KEYS[5], ARGV[1])
+            redis.call('PEXPIRE', KEYS[4], ARGV[1])
+        end
+        redis.call('ZADD', KEYS[2], 92233720368547758, 'redissun__expiretag')
+        redis.call('ZADD', KEYS[3], 92233720368547758, 'redissun__expiretag')
+        redis.call('PEXPIRE', KEYS[2], ARGV[1])
+        redis.call('PEXPIRE', KEYS[3], ARGV[1])
+        return redis.call('PEXPIRE', KEYS[1], ARGV[1])",
+    )
+});
+
+static PERSIST: LazyLock<Script> = LazyLock::new(|| {
+    Script::from_lua(
+        "local maxSize = tonumber(redis.call('HGET', KEYS[5], 'max-size'))
+        if maxSize ~= nil and maxSize ~= 0 then
+            redis.call('PERSIST', KEYS[5])
+            redis.call('ZREM', KEYS[4], 'redissun__expiretag')
+            redis.call('PERSIST', KEYS[4])
+        end
+        redis.call('ZREM', KEYS[2], 'redissun__expiretag')
+        redis.call('PERSIST', KEYS[2])
+        redis.call('ZREM', KEYS[3], 'redissun__expiretag')
+        redis.call('PERSIST', KEYS[3])
+        return redis.call('PERSIST', KEYS[1])",
+    )
+});
 
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
@@ -727,22 +796,19 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
     }
 
     fn timeout_key(&self) -> String {
-        format!("redissun__timeout__set:{}", self.key.redis_key())
+        timeout_key(&self.key.redis_key())
     }
 
     fn idle_key(&self) -> String {
-        format!("redissun__idle__set:{}", self.key.redis_key())
+        idle_key(&self.key.redis_key())
     }
 
     fn access_key(&self) -> String {
-        format!(
-            "redissun__map_cache_last_access__set:{}",
-            self.key.redis_key()
-        )
+        access_key(&self.key.redis_key())
     }
 
     fn options_key(&self) -> String {
-        format!("redissun__map_cache_options:{}", self.key.redis_key())
+        options_key(&self.key.redis_key())
     }
 
     fn channel(&self, kind: EventKind) -> String {

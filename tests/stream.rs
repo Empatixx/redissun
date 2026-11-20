@@ -355,6 +355,34 @@ async fn test_type() {
 }
 
 #[tokio::test]
+async fn test_empty_map() {
+    let log = stream().await;
+    log.create_group("group", &StreamId::latest())
+        .await
+        .unwrap();
+    add(&log, &[("key", "value")]).await;
+    let result2 = log
+        .read_group_wait("group", "consumer", Some(1))
+        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result2.len(), 1);
+
+    log.trim_min_id(&StreamId::new(2634125048379, 0))
+        .await
+        .unwrap();
+    let result = log
+        .read_group("group", "consumer", Some(1))
+        .after(StreamId::zero())
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].id, result2[0].id);
+    assert!(result[0].fields.is_empty());
+}
+
+#[tokio::test]
 async fn test_busy_group_is_not_retry_exception() {
     let log = stream().await;
     assert!(log
@@ -659,17 +687,20 @@ async fn assert_pending(log: &Log, ids: &[StreamId; 4]) {
     assert_eq!(list.len(), 4);
     for entry in &list {
         assert!(ids.contains(&entry.id));
+        assert!(entry.consumer == "consumer1" || entry.consumer == "consumer2");
         assert_eq!(entry.deliveries, 1);
     }
     let list2 = log
         .pending_entries("testGroup", 10)
         .consumer("consumer1")
+        .range(&StreamId::min(), &StreamId::max())
         .await
         .unwrap();
     assert_eq!(list2.len(), 2);
     for entry in &list2 {
         assert!(ids[..2].contains(&entry.id));
         assert_eq!(entry.consumer, "consumer1");
+        assert_eq!(entry.deliveries, 1);
     }
 }
 
@@ -717,6 +748,8 @@ async fn test_pending_range() {
         .await
         .unwrap();
     assert_eq!(ids_of(&pres2), [id1, id2]);
+    assert_eq!(map(&pres2[0]), owned(&[("11", "12")]));
+    assert_eq!(map(&pres2[1]), owned(&[("21", "22")]));
     let pres3 = log
         .pending_entries("testGroup", 10)
         .consumer("consumer2")
@@ -759,6 +792,15 @@ async fn test_read_group_blocking() {
         .unwrap();
     assert_eq!(s.len(), 3);
     assert!(["1", "2", "3"].contains(&s[0].fields[0].0.as_str()));
+
+    assert!(log.destroy_group("testGroup").await.unwrap());
+    assert!(log.create_group("testGroup", &id0).await.unwrap());
+    add(&log, &[("1", "1")]).await;
+    add(&log, &[("2", "2")]).await;
+    add(&log, &[("3", "3")]).await;
+    let other = stream().await;
+    let id1 = add(&other, &[("0", "0")]).await;
+    assert!(other.create_group("testGroup", &id1).await.unwrap());
 }
 
 #[tokio::test]
@@ -787,6 +829,7 @@ async fn test_read_group() {
         .read_group("testGroup", "consumer1", None)
         .await
         .unwrap();
+    assert!(["1", "2", "3"].contains(&s[0].fields[0].0.as_str()));
     assert_eq!(s.len(), 3);
     add(&log, &[("1", "1")]).await;
     add(&log, &[("2", "2")]).await;
@@ -894,6 +937,7 @@ async fn test_range() {
         .await
         .unwrap();
     assert_eq!(ids_of(&r2), [StreamId::new(1, 0), StreamId::new(2, 0)]);
+    assert_eq!(map(&r2[0]), owned(&ENTRIES1));
     assert_eq!(map(&r2[1]), owned(&ENTRIES2));
 }
 
@@ -910,6 +954,8 @@ async fn test_range_reversed2() {
         .await
         .unwrap();
     assert_eq!(ids_of(&r2), [StreamId::new(2, 0), StreamId::new(1, 0)]);
+    assert_eq!(map(&r2[1]), owned(&ENTRIES1));
+    assert_eq!(map(&r2[0]), owned(&ENTRIES2));
 }
 
 #[tokio::test]
@@ -921,6 +967,14 @@ async fn test_range2() {
         .await
         .unwrap();
     assert_eq!(r.len(), 1);
+    assert_eq!(map(&r[0]), owned(&ENTRIES1));
+    let r2 = log
+        .range(&StreamId::min(), &StreamId::max(), Some(10))
+        .await
+        .unwrap();
+    assert_eq!(ids_of(&r2), [StreamId::new(1, 0), StreamId::new(2, 0)]);
+    assert_eq!(map(&r2[0]), owned(&ENTRIES1));
+    assert_eq!(map(&r2[1]), owned(&ENTRIES2));
     let r3 = log
         .range(&StreamId::new(1, 0).exclusive(), &StreamId::new(2, 0), None)
         .await
@@ -950,7 +1004,7 @@ async fn test_poll() {
         .unwrap();
     let elapsed = started.elapsed();
     assert!(elapsed >= Duration::from_millis(1900), "{elapsed:?}");
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
+    assert!(elapsed <= Duration::from_millis(2200), "{elapsed:?}");
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].id, StreamId::new(1, 0));
     assert_eq!(map(&s[0]), owned(&ENTRIES1));
@@ -987,6 +1041,8 @@ async fn test_read_single() {
     let log = stream().await;
     log.add(pairs(&ENTRIES1))
         .id(StreamId::new(1, 0))
+        .max_len(1)
+        .non_strict()
         .await
         .unwrap();
     let result = log.read(&StreamId::new(0, 0), Some(10)).await.unwrap();
@@ -1085,7 +1141,7 @@ async fn test_stream_consumers() {
     assert_eq!(s1.len(), 1);
     assert_eq!(s1[0].name, "consumer1");
     assert_eq!(s1[0].pending, 6);
-    assert!(s1[0].idle < Duration::from_secs(5));
+    assert!(s1[0].idle < Duration::from_millis(100));
     let read2 = log
         .read_group("testGroup2", "consumer2", None)
         .await
@@ -1095,6 +1151,7 @@ async fn test_stream_consumers() {
     assert_eq!(s2.len(), 1);
     assert_eq!(s2[0].name, "consumer2");
     assert_eq!(s2[0].pending, 6);
+    assert!(s2[0].idle < Duration::from_millis(100));
 }
 
 #[tokio::test]
@@ -1102,6 +1159,8 @@ async fn test_stream_groups_info() {
     let log = stream().await;
     log.add(pairs(&[("6", "61"), ("4", "41")]))
         .id(StreamId::new(12, 42))
+        .max_len(10)
+        .non_strict()
         .await
         .unwrap();
     assert!(log.groups().await.unwrap().is_empty());
@@ -1111,6 +1170,9 @@ async fn test_stream_groups_info() {
         add(&log, &[(k, v)]).await;
     }
     log.create_group("testGroup2", &id1).await.unwrap();
+    for (k, v) in [("1", "1"), ("2", "2"), ("3", "3")] {
+        add(&log, &[(k, v)]).await;
+    }
     let s2 = log.groups().await.unwrap();
     assert_eq!(s2.len(), 2);
     assert_eq!(s2[0].name, "testGroup");
@@ -1118,6 +1180,8 @@ async fn test_stream_groups_info() {
     assert_eq!(s2[0].pending, 0);
     assert_eq!(s2[0].last_delivered_id, id1);
     assert_eq!(s2[1].name, "testGroup2");
+    assert_eq!(s2[1].consumers, 0);
+    assert_eq!(s2[1].pending, 0);
     assert_eq!(s2[1].last_delivered_id, id1);
 }
 
@@ -1139,11 +1203,15 @@ async fn test_stream_info() {
     let id = StreamId::new(12, 42);
     log.add(pairs(&[("6", "61"), ("4", "41")]))
         .id(id.clone())
+        .max_len(10)
+        .non_strict()
         .await
         .unwrap();
     let last_id = StreamId::new(12, 43);
     log.add(pairs(&[("10", "52"), ("44", "89")]))
         .id(last_id.clone())
+        .max_len(10)
+        .non_strict()
         .await
         .unwrap();
     let info = log.info().await.unwrap();

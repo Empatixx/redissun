@@ -119,7 +119,7 @@ impl TlsRedis {
             }
         }
         let port = container.get_host_port_ipv4(6379).await.unwrap();
-        for _ in 0..100 {
+        for _ in 0..600 {
             if tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .is_ok()
