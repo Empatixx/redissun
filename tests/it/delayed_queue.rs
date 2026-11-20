@@ -223,6 +223,23 @@ async fn due_times_come_from_the_client_clock() {
 }
 
 #[tokio::test]
+async fn test_destroy() {
+    let client = client().await;
+    let (destination, delayed) = numbers(&client, &unique("test"));
+    delayed.push(&1, Duration::from_secs(2)).await.unwrap();
+    drop(delayed);
+    let second = client.delayed_queue(&destination);
+    drop(second);
+    sleep(Duration::from_secs(1)).await;
+    let value = destination
+        .pop_front_wait()
+        .timeout(Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(value, None);
+}
+
+#[tokio::test]
 async fn test_remove() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("delay_queue"));

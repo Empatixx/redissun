@@ -138,7 +138,7 @@ pub struct ReadGroup<'a, K, V, C: Codec> {
 }
 
 impl<K, V, C: Codec> ReadGroup<'_, K, V, C> {
-    /// Re-reads the entries already delivered to this consumer and still pending, with an id after `after`, instead of new ones.
+    /// Re-reads the entries already delivered to this consumer and still pending, with an id after `after`, instead of new ones. A pending entry that was deleted or trimmed from the stream comes back with no fields.
     pub fn after(mut self, after: StreamId) -> Self {
         self.after = Some(after);
         self

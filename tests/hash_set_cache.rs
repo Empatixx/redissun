@@ -555,3 +555,111 @@ async fn test_expired_listener() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_add_slow_encoding_value() {
+    let map: HashMap<i32, String> = (0..80000).map(|i| (i, format!("value{i}"))).collect();
+    let set = client()
+        .await
+        .hash_set_cache::<HashMap<i32, String>>(unique("simple"));
+    assert!(set.insert(&map).await.unwrap());
+    assert!(set.contains(&map).await.unwrap());
+    assert_eq!(set.len().await.unwrap(), 1);
+    let read: Vec<HashMap<i32, String>> = set.iter().try_collect().await.unwrap();
+    assert_eq!(read, vec![map]);
+}
+
+#[tokio::test]
+async fn test_iterator_remove() {
+    let set = client().await.hash_set_cache::<String>(unique("list"));
+    let ttl = Duration::from_millis(300);
+    set.insert("1").await.unwrap();
+    set.insert("4").ttl(ttl).await.unwrap();
+    set.insert("2").await.unwrap();
+    set.insert("5").ttl(ttl).await.unwrap();
+    set.insert("3").await.unwrap();
+    sleep(ttl + Duration::from_millis(50)).await;
+
+    let mut values = Box::pin(set.iter());
+    while let Some(value) = values.next().await {
+        let value = value.unwrap();
+        if value == "2" {
+            assert!(set.remove(&value).await.unwrap());
+        }
+    }
+    drop(values);
+    assert_eq!(
+        all(&set).await,
+        HashSet::from(["1".to_string(), "3".to_string()])
+    );
+
+    let mut iteration = 0;
+    let mut values = Box::pin(set.iter());
+    while let Some(value) = values.next().await {
+        set.remove(&value.unwrap()).await.unwrap();
+        iteration += 1;
+    }
+    drop(values);
+    assert_eq!(iteration, 2);
+    assert!(!set.contains("4").await.unwrap());
+    assert!(!set.contains("5").await.unwrap());
+}
+
+#[tokio::test]
+async fn test_iterator_remove_high_volume() {
+    let set = client().await.hash_set_cache::<i32>(unique("set"));
+    let numbers: Vec<i32> = (1..=5000).collect();
+    for chunk in numbers.chunks(100) {
+        let set = &set;
+        futures::future::try_join_all(chunk.iter().map(|i| async move {
+            let scaled = i * 100_000;
+            set.insert(i).await?;
+            set.insert(&scaled).ttl(Duration::from_secs(20)).await
+        }))
+        .await
+        .unwrap();
+    }
+    let mut count = 0;
+    let mut values = Box::pin(set.iter());
+    while let Some(value) = values.next().await {
+        set.remove(&value.unwrap()).await.unwrap();
+        count += 1;
+    }
+    drop(values);
+    assert_eq!(count, 10000);
+    assert_eq!(set.len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_to_array() {
+    let set = client().await.hash_set_cache::<String>(unique("set"));
+    set.insert("1").await.unwrap();
+    set.insert("4").await.unwrap();
+    set.insert("2")
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap();
+    set.insert("5").await.unwrap();
+    set.insert("3").await.unwrap();
+    sleep(Duration::from_millis(450)).await;
+    let expected: HashSet<String> = ["1", "4", "5", "3"].map(String::from).into();
+    assert_eq!(all(&set).await, expected);
+    let array: Vec<String> = set.iter().try_collect().await.unwrap();
+    assert_eq!(array.len(), 4);
+    assert_eq!(array.into_iter().collect::<HashSet<_>>(), expected);
+}
+
+#[tokio::test]
+async fn rename_moves_the_values_to_the_set_with_the_new_name() {
+    let client = client().await;
+    let new_name = unique("renamed");
+    let set = client.hash_set_cache::<String>(unique("set"));
+    set.insert("a").await.unwrap();
+    set.insert("b").ttl(Duration::from_secs(60)).await.unwrap();
+    set.rename(&new_name).await.unwrap();
+    assert!(!set.exists().await.unwrap());
+    let renamed = client.hash_set_cache::<String>(new_name);
+    assert_eq!(renamed.len().await.unwrap(), 2);
+    assert!(renamed.contains("a").await.unwrap());
+    assert!(renamed.contains("b").await.unwrap());
+}

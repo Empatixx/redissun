@@ -99,7 +99,7 @@ impl<C: Codec> Batch<C> {
         self
     }
 
-    /// How long one attempt may wait for Redis before it fails with `Error::Timeout` or is retried. With [`sync`](Batch::sync) the sync timeout is added. The default is the client's [`timeout`](crate::ClientBuilder::timeout), 3 seconds unless changed, as in Redisson; zero waits forever.
+    /// How long one attempt may wait for the answers of Redis before it fails with `Error::Timeout` or is retried. The time starts when the connection takes the batch, not while the batch waits behind other commands of the client; that wait has the same limit, or the sum of the retry pauses when that is longer. In the atomic modes the time starts when the commands are written, as in Redisson. With [`sync`](Batch::sync) the sync timeout is added. The default is the client's [`timeout`](crate::ClientBuilder::timeout), 3 seconds unless changed, as in Redisson; zero waits forever.
     pub fn response_timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
         self
@@ -199,10 +199,21 @@ impl<C: Codec> Batch<C> {
         BatchFuture { receiver }
     }
 
-    /// Throws the queued commands away. Their handles resolve to `Error::Config`, and nothing is applied.
+    /// Throws the queued commands away. Their handles resolve to `Error::Config`, and nothing is applied. A batch [`stored_in_redis`](Batch::stored_in_redis) ends its transactions with `DISCARD`, as in Redisson, and fails when Redis does not answer within the [`response_timeout`](Batch::response_timeout).
     pub async fn discard(self) -> Result<()> {
         self.ops.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        Ok(())
+        let stored = self.stored.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(stored) = stored else {
+            return Ok(());
+        };
+        let (reply, receiver) = oneshot::channel();
+        if stored.sender.send(Command::Discard { reply }).is_err() {
+            return Ok(());
+        }
+        self.with_timeout(async { receiver.await.map_err(|_| Failure::Other(malformed()))? })
+            .await
+            .map(|_lease| ())
+            .map_err(Failure::into_error)
     }
 
     /// Sends every queued command and fills the handles.
@@ -219,7 +230,7 @@ impl<C: Codec> Batch<C> {
             });
         }
         let outcome = match self.mode {
-            Mode::Stored => self.finish_stored(count).await,
+            Mode::Stored => self.finish_stored(&ops).await,
             _ => self.run_with_retries(&ops).await,
         };
         match outcome {
@@ -255,7 +266,7 @@ impl<C: Codec> Batch<C> {
         }
     }
 
-    async fn finish_stored(&self, count: usize) -> std::result::Result<Replies, Failure> {
+    async fn finish_stored(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
         let sender = self
             .stored
             .lock()
@@ -267,20 +278,72 @@ impl<C: Codec> Batch<C> {
         sender
             .send(Command::Finish {
                 replication: self.replication_command(),
+                limits: self.limits(),
                 reply,
             })
             .map_err(|_| Failure::Other(malformed()))?;
-        let (replies, synced, _lease) = self
-            .with_timeout(async { receiver.await.map_err(|_| Failure::Other(malformed()))? })
-            .await?;
-        if replies.len() != count {
+        let finish = receiver.await.map_err(|_| Failure::Other(malformed()))??;
+        if finish.replies.len() != ops.len() {
             return Err(Failure::Other(malformed()));
+        }
+        self.follow_moved(ops, finish).await
+    }
+
+    /// Sends the transactions that Redis refused with `MOVED` again, to the node that owns the slot now. Redis applies nothing of a transaction it refuses, so nothing runs twice.
+    async fn follow_moved(
+        &self,
+        ops: &[Op],
+        finish: Finish,
+    ) -> std::result::Result<Replies, Failure> {
+        let Finish {
+            mut replies,
+            mut synced,
+            mut moved,
+            lease,
+        } = finish;
+        drop(lease);
+        for _ in 0..MAX_REDIRECTIONS {
+            if moved.is_empty() {
+                break;
+            }
+            let mut session = Session::begin(&self.core).await?;
+            for &op in &moved {
+                let op = &ops[op];
+                session.send(op.name, op.args.clone(), op.key_offset);
+            }
+            let again = session
+                .finish(self.replication_command(), self.limits())
+                .await?;
+            for (&op, reply) in moved.iter().zip(again.replies) {
+                replies[op] = reply;
+            }
+            synced += again.synced;
+            moved = again.moved.into_iter().map(|at| moved[at]).collect();
         }
         Ok((replies, synced))
     }
 
     fn attempt_timeout(&self) -> Duration {
         self.response_timeout + self.sync.map_or(Duration::ZERO, |sync| sync.timeout)
+    }
+
+    /// The time until the connection has taken the commands and the time for the answers. As in Redisson, the first is the sum of the retry pauses when the batch is retried and the response timeout when it is not; here it is never less than the response timeout.
+    fn limits(&self) -> Option<Limits> {
+        if self.response_timeout.is_zero() {
+            return None;
+        }
+        let mut pause = Duration::ZERO;
+        let mut pauses = Duration::ZERO;
+        if self.retry_attempts > 0 {
+            for attempt in 0..=self.retry_attempts.min(64) {
+                pause = self.retry_delay.delay(attempt, pause);
+                pauses = pauses.saturating_add(pause);
+            }
+        }
+        Some(Limits {
+            write: pauses.max(self.response_timeout),
+            response: self.attempt_timeout(),
+        })
     }
 
     async fn with_timeout<T>(
@@ -299,7 +362,7 @@ impl<C: Codec> Batch<C> {
         let mut attempt = 0;
         let mut pause = Duration::ZERO;
         loop {
-            let outcome = self.with_timeout(self.run_once(ops)).await;
+            let outcome = self.run_once(ops).await;
             match outcome {
                 Err(failure) if failure.retryable() && attempt < self.retry_attempts => {
                     pause = self.retry_delay.delay(attempt, pause);
@@ -319,8 +382,10 @@ impl<C: Codec> Batch<C> {
                 for op in ops {
                     session.send(op.name, op.args.clone(), op.key_offset);
                 }
-                let (replies, synced, _lease) = session.finish(self.replication_command()).await?;
-                Ok((replies, synced))
+                let finish = session
+                    .finish(self.replication_command(), self.limits())
+                    .await?;
+                self.follow_moved(ops, finish).await
             }
         }
     }
@@ -328,33 +393,40 @@ impl<C: Codec> Batch<C> {
     async fn run_pipeline(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
         let client = self.core.redis();
         let routing = routing(client);
-        let pipeline = Pipeline::from(client.with_options(&Options {
+        let options = Options {
             timeout: Some(Duration::ZERO),
             ..Default::default()
-        }));
+        };
         let mut nodes: Vec<(Option<Server>, Option<u16>)> = Vec::new();
+        let mut commands = Vec::with_capacity(ops.len());
         for op in ops {
             let (server, slot) = locate(routing.as_ref(), &op.args, op.key_offset);
             if !nodes.iter().any(|(known, _)| *known == server) {
                 nodes.push((server, slot));
             }
-            let command =
-                CustomCommand::new_static(op.name, ClusterHash::Offset(op.key_offset), false);
-            let _: Value = pipeline.custom(command, op.args.clone()).await?;
+            let hash = ClusterHash::Offset(op.key_offset);
+            commands.push((op.name, hash, op.args.clone()));
         }
-        let waits = match self.replication_command() {
-            Some((name, args)) => {
-                for (_, slot) in &nodes {
-                    let command =
-                        CustomCommand::new_static(name, hashed(*slot, ClusterHash::Random), false);
-                    let _: Value = pipeline.custom(command, args.clone()).await?;
-                }
-                nodes.len()
+        if let Some((name, args)) = self.replication_command() {
+            for (_, slot) in &nodes {
+                commands.push((name, hashed(*slot, ClusterHash::Random), args.clone()));
             }
-            None => 0,
-        };
-        let replies = pipeline.try_all::<Value>().await;
-        if replies.len() != ops.len() + waits
+        }
+        let expected = commands.len();
+        let pipeline = Pipeline::from(client.with_options(&options));
+        for (name, hash, args) in commands {
+            let command = CustomCommand::new_static(name, hash, false);
+            let _: Value = pipeline.custom(command, args).await?;
+        }
+        let (sending, early) = hand_over_pipeline(pipeline);
+        let replies = answered(client, self.limits(), async {
+            Ok(match early {
+                Some(outcome) => outcome,
+                None => sending.await,
+            })
+        })
+        .await?;
+        if replies.len() != expected
             || replies
                 .iter()
                 .any(|reply| matches!(reply, Err(error) if transport(error)))

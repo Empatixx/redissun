@@ -455,7 +455,7 @@ async fn test_update_strategy() {
 async fn test_put_after_delete() {
     let _gate = shared().await;
     let map = cached(&client().await, &unique("test")).await;
-    for _ in 0..200 {
+    for _ in 0..1_000 {
         map.clear().await.unwrap();
         map.insert("key", "val1").await.unwrap();
         map.get("key").await.unwrap();
@@ -877,4 +877,347 @@ async fn test_fast_put() {
     assert_eq!(map.insert("1", &3).await.unwrap(), Some(2));
     assert_eq!(map.get("1").await.unwrap(), Some(3));
     assert_eq!(map.len().await.unwrap(), 1);
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+struct SimpleKey {
+    key: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+struct SimpleValue {
+    value: String,
+}
+
+fn simple_key(key: &str) -> SimpleKey {
+    SimpleKey { key: key.into() }
+}
+
+fn simple_value(value: &str) -> SimpleValue {
+    SimpleValue {
+        value: value.into(),
+    }
+}
+
+type Simple = LocalCachedMap<SimpleKey, SimpleValue, JsonCodec>;
+
+async fn simple(client: &Client, name: &str) -> Simple {
+    client
+        .local_cached_map::<SimpleKey, SimpleValue>(name.to_string())
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn simple_with_three_entries(client: &Client, name: &str) -> Simple {
+    let map = simple(client, name).await;
+    for (key, value) in [("1", "2"), ("33", "44"), ("5", "6")] {
+        map.insert(&simple_key(key), &simple_value(value))
+            .await
+            .unwrap();
+    }
+    map
+}
+
+#[tokio::test]
+async fn del_on_one_instance_clears_the_cache_of_the_others_and_removes_the_updates_log() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let (first, second) = (client().await, client().await);
+    let a = with_reconnection(&first, &name, ReconnectionStrategy::Load).await;
+    let b = with_reconnection(&second, &name, ReconnectionStrategy::Load).await;
+    a.insert("k", "v").await.unwrap();
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(a.local_len(), 1);
+    assert_eq!(b.local_len(), 1);
+    let log = format!("redissun__cache_updates_log:{{{name}}}");
+    assert_eq!(common::raw_command(&["EXISTS", &log]).await.trim(), ":1");
+
+    assert!(a.del().await.unwrap());
+    assert_eq!(a.local_len(), 0);
+    eventually("the clear never arrived", || async { b.local_len() == 0 }).await;
+    assert_eq!(common::raw_command(&["EXISTS", &log]).await.trim(), ":0");
+    assert_eq!(common::raw_command(&["EXISTS", &name]).await.trim(), ":0");
+    assert_eq!(b.get("k").await.unwrap(), None);
+    assert!(!a.del().await.unwrap());
+}
+
+#[tokio::test]
+async fn del_with_the_default_options_clears_the_cache_of_the_others() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let (first, second) = (client().await, client().await);
+    let a = cached(&first, &name).await;
+    let b = cached(&second, &name).await;
+    a.insert("k", "v").await.unwrap();
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(b.local_len(), 1);
+    assert!(a.del().await.unwrap());
+    eventually("the clear never arrived", || async { b.local_len() == 0 }).await;
+    assert_eq!(b.get("k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_expired_map_clears_the_cache_of_every_instance() {
+    let _gate = shared().await;
+    common::raw_command(&["CONFIG", "SET", "notify-keyspace-events", "EKx"]).await;
+    let name = unique("lcm");
+    let (first, second) = (client().await, client().await);
+    let a = cached(&first, &name).await;
+    let b = cached(&second, &name).await;
+    let other = cached(&first, &unique("lcm")).await;
+    a.insert("k", "v").await.unwrap();
+    other.insert("k", "v").await.unwrap();
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    assert!(a.expire(Duration::from_millis(300)).await.unwrap());
+    eventually("the caches were not cleared", || async {
+        a.local_len() == 0 && b.local_len() == 0
+    })
+    .await;
+    assert_eq!(other.local_len(), 1);
+}
+
+#[tokio::test]
+async fn test_expiration() {
+    let _gate = shared().await;
+    common::raw_command(&["CONFIG", "SET", "notify-keyspace-events", "EKx"]).await;
+    let map = cached(&client().await, &unique("test")).await;
+    map.insert("12", "32").await.unwrap();
+    assert_eq!(map.cached_entries().unwrap().len(), 1);
+    assert!(map.expire(Duration::from_secs(1)).await.unwrap());
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(map.cached_entries().unwrap().len(), 0);
+    assert_eq!(map.get("12").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_read_all_values() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("test");
+    let map = simple_with_three_entries(&client, &name).await;
+    assert_eq!(map.local_len(), 3);
+
+    let values: Vec<SimpleValue> = map.values().try_collect().await.unwrap();
+    assert_eq!(values.len(), 3);
+    let expected: HashMap<SimpleKey, SimpleValue> = map.iter().try_collect().await.unwrap();
+    assert_eq!(expected.len(), 3);
+    assert!(expected.values().all(|value| values.contains(value)));
+
+    let map2 = simple(&client, &name).await;
+    let values2: Vec<SimpleValue> = map2.values().try_collect().await.unwrap();
+    assert!(expected.values().all(|value| values2.contains(value)));
+}
+
+#[tokio::test]
+async fn test_integer() {
+    let _gate = shared().await;
+    let map = client()
+        .await
+        .local_cached_map::<i32, i32>(unique("test_int"))
+        .build()
+        .await
+        .unwrap();
+    map.insert(&1, &2).await.unwrap();
+    map.insert(&3, &4).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 2);
+    assert_eq!(map.get(&1).await.unwrap(), Some(2));
+    assert_eq!(map.get(&3).await.unwrap(), Some(4));
+}
+
+#[tokio::test]
+async fn test_long() {
+    let _gate = shared().await;
+    let map = client()
+        .await
+        .local_cached_map::<i64, i64>(unique("test_long"))
+        .build()
+        .await
+        .unwrap();
+    map.insert(&1, &2).await.unwrap();
+    map.insert(&3, &4).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 2);
+    assert_eq!(map.get(&1).await.unwrap(), Some(2));
+    assert_eq!(map.get(&3).await.unwrap(), Some(4));
+}
+
+#[tokio::test]
+async fn test_iterator() {
+    let _gate = shared().await;
+    let map = client()
+        .await
+        .local_cached_map::<i32, i32>(unique("123"))
+        .build()
+        .await
+        .unwrap();
+    let size = 1000;
+    for i in 0..size {
+        map.insert(&i, &i).await.unwrap();
+    }
+    assert_eq!(map.len().await.unwrap(), 1000);
+    let keys: Vec<i32> = map.keys().try_collect().await.unwrap();
+    assert_eq!(keys.len(), size as usize);
+    let values: Vec<i32> = map.values().try_collect().await.unwrap();
+    assert_eq!(values.len(), size as usize);
+    let entries: Vec<(i32, i32)> = map.iter().try_collect().await.unwrap();
+    assert_eq!(entries.len(), size as usize);
+}
+
+#[tokio::test]
+async fn test_size() {
+    let _gate = shared().await;
+    let map = simple(&client().await, &unique("simple")).await;
+    let put = |key: &'static str, value: &'static str| {
+        let map = &map;
+        async move {
+            map.insert(&simple_key(key), &simple_value(value))
+                .await
+                .unwrap();
+        }
+    };
+    put("1", "2").await;
+    put("3", "4").await;
+    put("5", "6").await;
+    assert_eq!(map.len().await.unwrap(), 3);
+
+    put("1", "2").await;
+    put("3", "4").await;
+    assert_eq!(map.len().await.unwrap(), 3);
+
+    put("1", "21").await;
+    put("3", "41").await;
+    assert_eq!(map.len().await.unwrap(), 3);
+
+    put("51", "6").await;
+    assert_eq!(map.len().await.unwrap(), 4);
+
+    map.remove(&simple_key("3")).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_put_get() {
+    let _gate = shared().await;
+    let map = simple_with_three_entries(&client().await, &unique("simple")).await;
+    let val1 = map.get(&simple_key("33")).await.unwrap().unwrap();
+    assert_eq!(val1.value, "44");
+    let val2 = map.get(&simple_key("5")).await.unwrap().unwrap();
+    assert_eq!(val2.value, "6");
+}
+
+#[tokio::test]
+async fn test_contains_key() {
+    let _gate = shared().await;
+    let map = simple_with_three_entries(&client().await, &unique("simple")).await;
+    assert!(map.contains_key(&simple_key("33")).await.unwrap());
+    assert!(!map.contains_key(&simple_key("34")).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_remove_object() {
+    let _gate = shared().await;
+    let map = simple_with_three_entries(&client().await, &unique("simple")).await;
+    assert_eq!(
+        map.remove(&simple_key("33")).await.unwrap(),
+        Some(simple_value("44"))
+    );
+    assert_eq!(
+        map.remove(&simple_key("5")).await.unwrap(),
+        Some(simple_value("6"))
+    );
+    assert_eq!(map.remove(&simple_key("11")).await.unwrap(), None);
+    assert_eq!(map.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_value_iterator() {
+    let _gate = shared().await;
+    let map = client()
+        .await
+        .local_cached_map::<i32, i32>(unique("simple"))
+        .build()
+        .await
+        .unwrap();
+    for (key, value) in [(1, 0), (3, 5), (4, 6), (7, 8)] {
+        map.insert(&key, &value).await.unwrap();
+    }
+    let mut values: Vec<i32> = map.values().try_collect().await.unwrap();
+    assert_eq!(
+        values.iter().copied().collect::<HashSet<i32>>(),
+        HashSet::from([0, 5, 6, 8])
+    );
+    let again: Vec<i32> = map.values().try_collect().await.unwrap();
+    for value in again {
+        let position = values.iter().position(|candidate| *candidate == value);
+        values.remove(position.unwrap_or_else(|| panic!("unable to remove value {value}")));
+    }
+    assert_eq!(values.len(), 0);
+}
+
+#[tokio::test]
+async fn test_equals() {
+    let _gate = shared().await;
+    let map = cached(&client().await, &unique("simple")).await;
+    map.insert("1", "7").await.unwrap();
+    map.insert("2", "4").await.unwrap();
+    map.insert("3", "5").await.unwrap();
+    let expected: HashMap<String, String> = HashMap::from([
+        ("1".into(), "7".into()),
+        ("2".into(), "4".into()),
+        ("3".into(), "5".into()),
+    ]);
+    let entries: HashMap<String, String> = map.iter().try_collect().await.unwrap();
+    assert_eq!(entries, expected);
+}
+
+#[tokio::test]
+async fn test_read_all_key_set() {
+    let _gate = shared().await;
+    let map = simple_with_three_entries(&client().await, &unique("simple")).await;
+    let keys: Vec<SimpleKey> = map.keys().try_collect().await.unwrap();
+    assert_eq!(keys.len(), 3);
+    let entries: HashMap<SimpleKey, SimpleValue> = map.iter().try_collect().await.unwrap();
+    assert!(keys.iter().all(|key| entries.contains_key(key)));
+}
+
+#[tokio::test]
+async fn test_read_all_key_set_high_amount() {
+    let _gate = shared().await;
+    let map = simple(&client().await, &unique("simple")).await;
+    for i in 0..1000 {
+        let text = i.to_string();
+        map.insert(&simple_key(&text), &simple_value(&text))
+            .await
+            .unwrap();
+    }
+    let keys: Vec<SimpleKey> = map.keys().try_collect().await.unwrap();
+    assert_eq!(keys.len(), 1000);
+    let entries: HashMap<SimpleKey, SimpleValue> = map.iter().try_collect().await.unwrap();
+    assert!(keys.iter().all(|key| entries.contains_key(key)));
+}
+
+#[tokio::test]
+async fn an_expired_map_still_clears_the_cache_after_a_reconnect() {
+    let _gate = exclusive().await;
+    common::raw_command(&["CONFIG", "SET", "notify-keyspace-events", "EKx"]).await;
+    let client = client().await;
+    let map = cached(&client, &unique("lcm")).await;
+    let probe = with_reconnection(&client, &unique("lcm"), ReconnectionStrategy::Clear).await;
+    map.insert("k", "v").await.unwrap();
+    probe.insert("p", "v").await.unwrap();
+    kill_pubsub_connections().await;
+    eventually("the client did not reconnect", || async {
+        probe.local_len() == 0
+    })
+    .await;
+    assert_eq!(map.local_len(), 1);
+    assert!(map.expire(Duration::from_millis(300)).await.unwrap());
+    eventually("the cache was not cleared", || async {
+        map.local_len() == 0
+    })
+    .await;
+    assert_eq!(map.get("k").await.unwrap(), None);
 }

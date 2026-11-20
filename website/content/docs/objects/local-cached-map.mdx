@@ -56,6 +56,8 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 - When this client falls behind on the messages, the whole local cache is cleared. A lost pub/sub connection is handled by the reconnection strategy; with the default `None`, changes made meanwhile are missed until the entry changes again or expires locally.
 - A message can arrive a few milliseconds after the write, so another instance may read the old value for a short time.
 
-Only changes made through a `LocalCachedMap` are announced. A plain `HashMap` of the same name, or `del()`, changes Redis without telling the others. Their cached entries stay until they expire (`ttl`, `max_idle`), are pushed out, or you call `clear()`.
+Only changes made through a `LocalCachedMap` are announced. A plain `HashMap` of the same name changes Redis without telling the others. Their cached entries stay until they expire (`ttl`, `max_idle`), are pushed out, or you call `clear()`. `del()` works like `clear()`: it deletes the map and tells the other clients to clear their local caches.
+
+When the map itself expires in Redis (`expire`), every client clears its local cache, as in Redisson. For this the Redis server must send expired events: set `notify-keyspace-events` to at least `Ex`.
 
 The data in Redis is a normal hash, so a `HashMap` with the same name and codec reads the same entries.

@@ -70,8 +70,9 @@ pub fn unique(prefix: &str) -> String {
     format!("{prefix}:{}", Uuid::new_v4())
 }
 
+// Colima and Docker Desktop forward a new container's port from the VM with a delay that can reach tens of seconds right after a big test binary closed thousands of connections.
 async fn wait_until_ready(port: u16) {
-    for _ in 0..100 {
+    for _ in 0..600 {
         if ping(port).await {
             return;
         }

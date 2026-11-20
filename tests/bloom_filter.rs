@@ -281,7 +281,7 @@ async fn test_not_initialized_on_expected_insertions() {
 async fn test_expire() {
     let name = unique("filter");
     let filter = client().await.bloom_filter::<String>(name.clone());
-    filter.try_init(550_000, 0.03).await.unwrap();
+    filter.try_init(55_000_000, 0.03).await.unwrap();
     filter.insert("test").await.unwrap();
     assert!(filter.expire(Duration::from_secs(2)).await.unwrap());
     tokio::time::sleep(Duration::from_millis(2100)).await;
@@ -313,11 +313,12 @@ async fn test_empty_rename() {
 #[tokio::test]
 async fn test() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    filter.try_init(550_000, 0.5).await.unwrap();
+    filter.try_init(550_000_000, 0.5).await.unwrap();
     check(&filter).await;
     filter.del().await.unwrap();
-    assert!(filter.try_init(550_000, 0.03).await.unwrap());
+    assert!(filter.try_init(550_000_000, 0.03).await.unwrap());
     check(&filter).await;
+    filter.del().await.unwrap();
 }
 
 async fn check(filter: &redissun::BloomFilter<String, redissun::JsonCodec>) {
@@ -340,7 +341,7 @@ async fn test_rename() {
     let name = unique("filter");
     let renamed = unique("new_filter");
     let filter = client.bloom_filter::<String>(name.clone());
-    filter.try_init(550_000, 0.03).await.unwrap();
+    filter.try_init(550_000_000, 0.03).await.unwrap();
     assert!(filter.insert("123").await.unwrap());
     filter.rename(&renamed).await.unwrap();
 
@@ -348,6 +349,7 @@ async fn test_rename() {
     assert_eq!(filter2.count().await.unwrap(), 1);
     let filter3 = client.bloom_filter::<String>(name);
     assert!(!filter3.exists().await.unwrap());
+    filter2.del().await.unwrap();
 }
 
 #[tokio::test]
@@ -363,4 +365,31 @@ async fn test_contains_exception() {
     f2.try_init(200, 0.03).await.unwrap();
 
     assert!(!f1.contains("1").await.unwrap());
+}
+
+#[tokio::test]
+async fn a_filter_laid_out_by_redisson_is_read_and_extended() {
+    let name = unique("filter");
+    let config = format!("{{{name}}}:config");
+    for (field, value) in [
+        ("size", "958"),
+        ("hashIterations", "7"),
+        ("expectedInsertions", "100"),
+        ("falseProbability", "0.01"),
+    ] {
+        raw_command(&["HSET", &config, field, value]).await;
+    }
+    for bit in ["136", "940", "156", "2", "176", "22", "196"] {
+        raw_command(&["SETBIT", &name, bit, "1"]).await;
+    }
+    let filter = client().await.bloom_filter::<String>(name.clone());
+    assert!(!filter.try_init(100, 0.01).await.unwrap());
+    assert_eq!(filter.size_bits().await.unwrap(), 958);
+    assert_eq!(filter.hash_iterations().await.unwrap(), 7);
+    assert_eq!(filter.expected_insertions().await.unwrap(), 100);
+    assert_eq!(filter.false_probability().await.unwrap(), 0.01);
+    assert!(filter.contains("123").await.unwrap());
+    assert!(!filter.insert("123").await.unwrap());
+    assert_eq!(filter.count().await.unwrap(), 1);
+    assert_eq!(raw_command(&["BITCOUNT", &name]).await, ":7\r\n");
 }

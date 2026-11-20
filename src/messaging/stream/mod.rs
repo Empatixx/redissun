@@ -181,7 +181,10 @@ where
             return Ok(None);
         };
         if matches!(fields, Value::Null) {
-            return Ok(None);
+            return Ok(Some(StreamEntry {
+                id: id_of(id)?,
+                fields: Vec::new(),
+            }));
         }
         let parts = array(fields);
         let mut decoded = Vec::with_capacity(parts.len() / 2);

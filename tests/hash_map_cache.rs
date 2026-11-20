@@ -1,8 +1,11 @@
 mod common;
 
+use common::topology::Topology;
 use common::{client, connect_with, raw_command, unique};
 use futures::TryStreamExt;
-use redissun::{Error, Event, EventKind, Events, EvictionMode, HashMapCache, JsonCodec, Object};
+use redissun::{
+    Error, Event, EventKind, Events, EvictionMode, HashMapCache, JsonCodec, Object, StringCodec,
+};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
@@ -328,10 +331,6 @@ async fn object_methods_cover_both_keys() {
     assert!(cache.persist().await.unwrap());
     let expires_ttl = raw_command(&["TTL", &format!("redissun__timeout__set:{{{name}}}")]).await;
     assert_eq!(expires_ttl.trim(), ":-1");
-    assert!(matches!(
-        cache.rename("other").await,
-        Err(Error::Unsupported(_))
-    ));
     assert!(cache.del().await.unwrap());
     assert!(!cache.exists().await.unwrap());
     let expires = raw_command(&["EXISTS", &format!("redissun__timeout__set:{{{name}}}")]).await;
@@ -1638,4 +1637,343 @@ async fn test_iterator() {
     assert!(values.len() >= 1000);
     let entries: HashMap<i32, i32> = cache.iter().try_collect().await.unwrap();
     assert_eq!(entries.len(), 1000);
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+struct SimpleKey {
+    key: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+struct SimpleValue {
+    value: String,
+}
+
+fn simple_key(key: &str) -> SimpleKey {
+    SimpleKey { key: key.into() }
+}
+
+fn simple_value(value: &str) -> SimpleValue {
+    SimpleValue {
+        value: value.into(),
+    }
+}
+
+#[tokio::test]
+async fn insert_nx_with_a_time_limit_wins_again_only_after_the_entry_expired() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simpleTTL"));
+    let key = simple_key("1");
+    let value = simple_value("2");
+    let second = Duration::from_secs(1);
+    let idle = Duration::from_millis(500);
+    cache.insert_nx(&key, &value).ttl(second).await.unwrap();
+    assert!(!cache
+        .insert_nx(&key, &simple_value("3"))
+        .ttl(second)
+        .await
+        .unwrap());
+    assert_eq!(cache.get(&key).await.unwrap(), Some(value));
+
+    sleep(Duration::from_millis(1100)).await;
+
+    assert!(cache
+        .insert_nx(&key, &simple_value("3"))
+        .ttl(second)
+        .await
+        .unwrap());
+    assert_eq!(cache.get(&key).await.unwrap(), Some(simple_value("3")));
+
+    assert!(!cache
+        .insert_nx(&key, &simple_value("4"))
+        .ttl(second)
+        .await
+        .unwrap());
+    assert_eq!(cache.get(&key).await.unwrap(), Some(simple_value("3")));
+
+    sleep(Duration::from_millis(1100)).await;
+    assert!(cache
+        .insert_nx(&key, &simple_value("4"))
+        .ttl(second)
+        .max_idle(idle)
+        .await
+        .unwrap());
+
+    sleep(Duration::from_millis(550)).await;
+    assert!(cache
+        .insert_nx(&key, &simple_value("5"))
+        .ttl(second)
+        .max_idle(idle)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn integer_keys_and_values_are_stored_and_read_back() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("test_int"));
+    cache.insert(&1, &2).await.unwrap();
+    cache.insert(&3, &4).await.unwrap();
+    assert_eq!(cache.len().await.unwrap(), 2);
+    assert_eq!(cache.get(&1).await.unwrap(), Some(2));
+    assert_eq!(cache.get(&3).await.unwrap(), Some(4));
+}
+
+#[tokio::test]
+async fn long_keys_and_values_are_stored_and_read_back() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i64, i64>(unique("test_long"));
+    cache.insert(&1i64, &2i64).await.unwrap();
+    cache.insert(&3i64, &4i64).await.unwrap();
+    assert_eq!(cache.len().await.unwrap(), 2);
+    assert_eq!(cache.get(&1i64).await.unwrap(), Some(2));
+    assert_eq!(cache.get(&3i64).await.unwrap(), Some(4));
+}
+
+#[tokio::test]
+async fn a_small_cache_is_iterated_in_the_order_it_was_written() {
+    let written = [
+        ("name", "123"),
+        ("ip", "4124"),
+        ("rank", "none"),
+        ("tokens", "0"),
+        ("coins", "0"),
+        ("ar_score", "0"),
+        ("ar_gameswon", "0"),
+        ("ar_gameslost", "0"),
+        ("ar_kills", "0"),
+        ("ar_deaths", "0"),
+    ];
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("123"));
+    for (key, value) in written {
+        cache.insert(key, value).await.unwrap();
+    }
+    let expected: Vec<(String, String)> = written
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    let found: Vec<String> = cache.keys().try_collect().await.unwrap();
+    let expected_keys: Vec<String> = expected.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(found, expected_keys);
+    let found: Vec<String> = cache.values().try_collect().await.unwrap();
+    let expected_values: Vec<String> = expected.iter().map(|(_, value)| value.clone()).collect();
+    assert_eq!(found, expected_values);
+    let found: Vec<(String, String)> = cache.iter().try_collect().await.unwrap();
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn a_value_of_the_wrong_shape_is_an_error_at_once() {
+    let client = client().await;
+    let name = unique("deserializationFailure");
+    let writer = client.hash_map_cache::<String, String>(name.clone());
+    let reader = client.hash_map_cache::<String, SimpleValue>(name);
+    writer.insert("test-key", "test-val").await.unwrap();
+    let read = tokio::time::timeout(Duration::from_secs(5), reader.get("test-key"))
+        .await
+        .expect("the read did not fail in time");
+    assert!(matches!(read, Err(Error::Codec(_))), "{read:?}");
+}
+
+#[tokio::test]
+async fn remove_returns_the_value_of_a_struct_key() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    for (key, value) in [("1", "2"), ("33", "44"), ("5", "6")] {
+        cache
+            .insert(&simple_key(key), &simple_value(value))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        cache.remove(&simple_key("33")).await.unwrap(),
+        Some(simple_value("44"))
+    );
+    assert_eq!(
+        cache.remove(&simple_key("5")).await.unwrap(),
+        Some(simple_value("6"))
+    );
+    assert_eq!(cache.remove(&simple_key("11")).await.unwrap(), None);
+    assert_eq!(cache.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn values_streams_every_value_once() {
+    let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+    for (key, value) in [(1, 0), (3, 5), (4, 6), (7, 8)] {
+        cache.insert(&key, &value).await.unwrap();
+    }
+    let mut values: Vec<i32> = cache.values().try_collect().await.unwrap();
+    let distinct: HashSet<i32> = values.iter().copied().collect();
+    assert_eq!(distinct, HashSet::from([0, 5, 6, 8]));
+    let streamed: Vec<i32> = cache.values().try_collect().await.unwrap();
+    for value in streamed {
+        let position = values.iter().position(|other| *other == value);
+        let position = position.unwrap_or_else(|| panic!("unable to remove value {value}"));
+        values.remove(position);
+    }
+    assert!(values.is_empty());
+}
+
+#[tokio::test]
+async fn insert_tells_a_new_entry_from_a_replaced_one() {
+    let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+    assert!(cache.insert(&1, &2).await.unwrap().is_none());
+    assert_eq!(cache.get(&1).await.unwrap(), Some(2));
+    assert!(cache.insert(&1, &3).await.unwrap().is_some());
+    assert_eq!(cache.get(&1).await.unwrap(), Some(3));
+    assert_eq!(cache.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn the_entries_equal_the_map_that_was_written() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("simple"));
+    cache.insert("1", "7").await.unwrap();
+    cache.insert("2", "4").await.unwrap();
+    cache.insert("3", "5").await.unwrap();
+    let expected: HashMap<String, String> = [("1", "7"), ("2", "4"), ("3", "5")]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    let entries: Vec<(String, String)> = cache.iter().try_collect().await.unwrap();
+    assert_eq!(entries.len(), expected.len());
+    assert_eq!(entries.into_iter().collect::<HashMap<_, _>>(), expected);
+}
+
+#[tokio::test]
+async fn the_string_codec_stores_and_iterates_plain_strings() {
+    let cache = client()
+        .await
+        .with_codec(StringCodec)
+        .hash_map_cache::<String, String>(unique("TestRMap01"));
+    cache.insert("A", "1").await.unwrap();
+    cache.insert("B", "2").await.unwrap();
+    let allowed = [
+        ("A".to_string(), "1".to_string()),
+        ("B".to_string(), "2".to_string()),
+    ];
+    let entries: Vec<(String, String)> = cache.iter().try_collect().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert!(allowed.contains(&entry), "{entry:?}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "starts a redis cluster in docker; run with --ignored"]
+async fn an_entry_expires_and_is_reported_on_a_cluster() {
+    let topology = Topology::cluster().await;
+    let client = redissun::Client::builder()
+        .url(topology.cluster_url())
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    let cache = client.hash_map_cache::<String, String>(unique("simple"));
+    let mut expired = cache.events_of(&[EventKind::Expired]).await.unwrap();
+    cache
+        .insert("1", "2")
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(10), expired.recv())
+        .await
+        .expect("no expired event on a cluster")
+        .unwrap();
+    assert_eq!(
+        event,
+        Event::Expired {
+            key: "1".into(),
+            value: "2".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn expire_also_covers_the_sets_that_are_created_later() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    cache.insert("plain", "x").await.unwrap();
+    assert!(cache.expire(Duration::from_secs(100)).await.unwrap());
+    cache
+        .insert("a", "x")
+        .ttl(Duration::from_secs(60))
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    for set in ["redissun__timeout__set", "redissun__idle__set"] {
+        let ttl = raw_command(&["TTL", &format!("{set}:{{{name}}}")]).await;
+        let ttl: i64 = ttl.trim().trim_start_matches(':').parse().unwrap();
+        assert!(
+            ttl > 0,
+            "{set} must expire with the cache, its ttl is {ttl}"
+        );
+    }
+    assert_eq!(cache.len().await.unwrap(), 2);
+    assert_eq!(cache.get("a").await.unwrap(), Some("x".to_string()));
+
+    assert!(cache.persist().await.unwrap());
+    for set in ["redissun__timeout__set", "redissun__idle__set"] {
+        let ttl = raw_command(&["TTL", &format!("{set}:{{{name}}}")]).await;
+        assert_eq!(ttl.trim(), ":-1");
+        let size = raw_command(&["ZCARD", &format!("{set}:{{{name}}}")]).await;
+        assert_eq!(size.trim(), ":1", "{set} must hold only the entry");
+    }
+}
+
+#[tokio::test]
+async fn expire_and_persist_on_a_missing_cache_leave_nothing_behind() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    assert!(!cache.expire(Duration::from_millis(200)).await.unwrap());
+    assert!(!cache.persist().await.unwrap());
+    let found = raw_command(&["EXISTS", &format!("redissun__timeout__set:{{{name}}}")]).await;
+    assert_eq!(found.trim(), ":0");
+}
+
+#[tokio::test]
+async fn rename_moves_the_entries_with_their_limits_and_the_size_limit() {
+    let client = client().await;
+    let name = unique("cache");
+    let new_name = unique("renamed");
+    let cache = client.hash_map_cache::<String, String>(name.clone());
+    cache.set_max_size(2, EvictionMode::Lru).await.unwrap();
+    cache.insert("plain", "x").await.unwrap();
+    cache
+        .insert("short", "y")
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap();
+    cache.rename(&new_name).await.unwrap();
+
+    assert!(!cache.exists().await.unwrap());
+    for set in [
+        "redissun__timeout__set",
+        "redissun__map_cache_last_access__set",
+        "redissun__map_cache_options",
+    ] {
+        let found = raw_command(&["EXISTS", &format!("{set}:{{{name}}}")]).await;
+        assert_eq!(found.trim(), ":0", "{set} must move with the cache");
+    }
+
+    let renamed = client.hash_map_cache::<String, String>(new_name);
+    assert_eq!(renamed.get("plain").await.unwrap(), Some("x".to_string()));
+    assert_eq!(renamed.get("short").await.unwrap(), Some("y".to_string()));
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(renamed.get("short").await.unwrap(), None);
+    renamed.insert("b", "1").await.unwrap();
+    renamed.insert("c", "2").await.unwrap();
+    renamed.evict_expired().await.unwrap();
+    assert_eq!(renamed.len().await.unwrap(), 2);
 }

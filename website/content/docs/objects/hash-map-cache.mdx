@@ -91,4 +91,4 @@ Events are published on the channels `redissun_map_cache_created:{name}`, `redis
 
 ## Object methods
 
-`del`, `expire` and `persist` apply to all five Redis keys. `clear` deletes the entries but keeps the size limit. `rename` is not supported and returns `Error::Unsupported`. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.
+`del`, `expire`, `persist` and `rename` apply to all five Redis keys. As in Redisson, `expire` also covers the sorted sets that are created later, and it returns whether the cache itself exists. `clear` deletes the entries but keeps the size limit. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.

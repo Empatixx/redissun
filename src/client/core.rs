@@ -268,6 +268,31 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
                 let _ = client.force_reconnection().await;
             }
         }
+        // The connections that batches gave back are pinged too, as Redisson pings every connection. They are out of the idle list meanwhile, so a `PING` never lands in a transaction, and one that does not answer is closed.
+        let Some(strong) = core.upgrade() else {
+            return;
+        };
+        let idle = std::mem::take(&mut *strong.exclusive.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(strong);
+        for client in idle {
+            let answered = client.is_connected()
+                && matches!(
+                    tokio::time::timeout(wait, client.ping::<()>(None)).await,
+                    Ok(Ok(()))
+                );
+            match core.upgrade() {
+                Some(strong) if answered => strong
+                    .exclusive
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(client),
+                _ => {
+                    tokio::spawn(async move {
+                        let _ = client.quit().await;
+                    });
+                }
+            }
+        }
     }
 }
 

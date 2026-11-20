@@ -3,7 +3,7 @@ use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
 use fred::types::config::Server;
-use fred::types::{Message, MessageKind};
+use fred::types::{KeyspaceEvent, Message, MessageKind};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -175,6 +175,7 @@ impl PubSub {
         let client = base.clone_new();
         client.init().await?;
         let receiver = client.message_rx();
+        let events = client.keyspace_event_rx();
         let reconnects = broadcast::channel(16).0;
         let reconnected = client.reconnect_rx();
         let (activations, requests) = mpsc::unbounded_channel();
@@ -185,7 +186,12 @@ impl PubSub {
             activations,
         });
         tokio::spawn(resubscribe(Arc::downgrade(&pubsub), reconnected));
-        tokio::spawn(dispatch(Arc::downgrade(&pubsub), receiver, requests));
+        tokio::spawn(dispatch(
+            Arc::downgrade(&pubsub),
+            receiver,
+            events,
+            requests,
+        ));
         Ok(pubsub)
     }
 
@@ -340,6 +346,7 @@ struct Burst {
 async fn dispatch(
     pubsub: Weak<PubSub>,
     mut receiver: broadcast::Receiver<Message>,
+    mut events: broadcast::Receiver<KeyspaceEvent>,
     mut activations: mpsc::UnboundedReceiver<Activation>,
 ) {
     let mut burst: Option<Burst> = None;
@@ -347,6 +354,11 @@ async fn dispatch(
         tokio::select! {
             message = receiver.recv() => {
                 if !handle(&pubsub, &mut burst, message).await {
+                    return;
+                }
+            }
+            event = events.recv() => {
+                if !handle_event(&pubsub, &mut burst, event).await {
                     return;
                 }
             }
@@ -362,6 +374,17 @@ async fn dispatch(
                         Err(TryRecvError::Closed) => Err(RecvError::Closed),
                     };
                     if !handle(&pubsub, &mut burst, message).await {
+                        return;
+                    }
+                }
+                loop {
+                    let event = match events.try_recv() {
+                        Ok(event) => Ok(event),
+                        Err(TryRecvError::Lagged(missed)) => Err(RecvError::Lagged(missed)),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Closed) => Err(RecvError::Closed),
+                    };
+                    if !handle_event(&pubsub, &mut burst, event).await {
                         return;
                     }
                 }
@@ -397,17 +420,49 @@ async fn handle(
             true
         }
         Err(RecvError::Lagged(missed)) => {
-            let missed = usize::try_from(missed).unwrap_or(usize::MAX);
-            *burst = None;
-            registry
-                .channels
-                .values()
-                .for_each(|entry| entry.missed(missed));
-            registry
-                .patterns
-                .values()
-                .for_each(|entry| entry.missed(missed));
-            let _ = pubsub.reconnects.send(());
+            lagged(&pubsub, &registry, burst, missed);
+            true
+        }
+        Err(RecvError::Closed) => false,
+    }
+}
+
+fn lagged(pubsub: &PubSub, registry: &Registry, burst: &mut Option<Burst>, missed: u64) {
+    let missed = usize::try_from(missed).unwrap_or(usize::MAX);
+    *burst = None;
+    registry
+        .channels
+        .values()
+        .for_each(|entry| entry.missed(missed));
+    registry
+        .patterns
+        .values()
+        .for_each(|entry| entry.missed(missed));
+    let _ = pubsub.reconnects.send(());
+}
+
+async fn handle_event(
+    pubsub: &Weak<PubSub>,
+    burst: &mut Option<Burst>,
+    event: std::result::Result<KeyspaceEvent, RecvError>,
+) -> bool {
+    let Some(pubsub) = pubsub.upgrade() else {
+        return false;
+    };
+    let registry = pubsub.registry.lock().await;
+    match event {
+        Ok(event) => {
+            let channel = format!("__keyevent@{}__:{}", event.db, event.operation);
+            let payload = Bytes::copy_from_slice(event.key.as_bytes());
+            if let Some(entry) = next_pattern(&registry, burst, &channel, &payload) {
+                entry.deliver((channel, payload));
+            } else if let Some(entry) = registry.channels.get(&channel) {
+                entry.deliver(payload);
+            }
+            true
+        }
+        Err(RecvError::Lagged(missed)) => {
+            lagged(&pubsub, &registry, burst, missed);
             true
         }
         Err(RecvError::Closed) => false,

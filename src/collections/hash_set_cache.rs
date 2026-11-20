@@ -1,7 +1,7 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
-use crate::object::{millis as to_millis, HasKey, Key};
+use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
 use fred::interfaces::SortedSetsInterface;
@@ -220,6 +220,10 @@ impl<V, C: Codec> fmt::Debug for HashSetCache<V, C> {
 impl<V, C: Codec> HasKey for HashSetCache<V, C> {
     fn key(&self) -> &Key {
         &self.key
+    }
+
+    fn renamed_key(&self, new_name: &str) -> String {
+        tagged(new_name)
     }
 }
 
