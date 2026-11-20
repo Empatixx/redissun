@@ -383,7 +383,7 @@ impl<C: Codec> Batch<C> {
         ops: &[Op],
         limits: Option<Limits>,
     ) -> std::result::Result<Replies, Failure> {
-        let lease = Lease::take_pooled(&self.core, limits.map(|limits| limits.wait)).await?;
+        let lease = Lease::take_pooled(&self.core, limits).await?;
         match self.mode {
             Mode::Pipeline => self.run_pipeline(ops, lease, limits).await,
             _ => {

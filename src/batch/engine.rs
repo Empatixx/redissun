@@ -302,21 +302,27 @@ impl Lease {
     /// Takes one of the `pool_size` connections that batches share, as a Redisson batch takes a connection from the pool: it waits while other batches use all of them and gives up after `wait`.
     pub(super) async fn take_pooled(
         core: &Arc<Core>,
-        wait: Option<Duration>,
+        limits: Option<Limits>,
     ) -> std::result::Result<Self, Failure> {
-        let taking = async {
-            let permit = core.batch_connections.clone().acquire_owned().await;
-            let permit = permit.map_err(|_| Failure::Other(malformed()))?;
-            let mut lease = Self::take(core).await?;
-            lease.permit = Some(permit);
-            Ok(lease)
+        // The wait for a free place and the opening of the connection have separate limits: a pause of a few milliseconds between attempts must not fail a connect, and a server that does not answer must not hold the batch longer than a write may take.
+        let waiting = core.batch_connections.clone().acquire_owned();
+        let permit = match limits {
+            Some(limits) => match tokio::time::timeout(limits.wait, waiting).await {
+                Ok(permit) => permit,
+                Err(_) => return Err(Failure::Busy),
+            },
+            None => waiting.await,
         };
-        match wait {
-            Some(wait) => tokio::time::timeout(wait, taking)
-                .await
-                .unwrap_or(Err(Failure::Busy)),
-            None => taking.await,
-        }
+        let permit = permit.map_err(|_| Failure::Other(malformed()))?;
+        let mut lease = match limits {
+            Some(limits) => match tokio::time::timeout(limits.write, Self::take(core)).await {
+                Ok(lease) => lease?,
+                Err(_) => return Err(Failure::Busy),
+            },
+            None => Self::take(core).await?,
+        };
+        lease.permit = Some(permit);
+        Ok(lease)
     }
 
     pub(super) async fn take(core: &Arc<Core>) -> std::result::Result<Self, Failure> {
