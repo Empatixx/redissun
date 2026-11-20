@@ -33,7 +33,7 @@ use tokio::sync::oneshot;
 ///
 /// | Mode | Redisson | What it does |
 /// |---|---|---|
-/// | default | `IN_MEMORY` | the commands are held in memory and pipelined. Other clients' commands can run between them. |
+/// | default | `IN_MEMORY` | the commands are held in memory and pipelined on a connection that only this batch uses until it is answered. Other clients' commands can run between them. |
 /// | [`atomic`](Batch::atomic) | `IN_MEMORY_ATOMIC` | held in memory and run in one `MULTI`/`EXEC` per node on a connection that only this batch uses |
 /// | [`stored_in_redis`](Batch::stored_in_redis) | `REDIS_WRITE_ATOMIC` | each command is sent to Redis at once and waits in a `MULTI` transaction per node on a connection that only this batch uses, until `execute` runs `EXEC`. Nothing is held in memory, and nothing is applied if the batch is dropped. |
 ///
@@ -99,7 +99,7 @@ impl<C: Codec> Batch<C> {
         self
     }
 
-    /// How long one attempt may wait for the answers of Redis before it fails with `Error::Timeout` or is retried. The time starts when the connection takes the batch, not while the batch waits behind other commands of the client; that wait has the same limit, or the sum of the retry pauses when that is longer. In the atomic modes the time starts when the commands are written, as in Redisson. With [`sync`](Batch::sync) the sync timeout is added. The default is the client's [`timeout`](crate::ClientBuilder::timeout), 3 seconds unless changed, as in Redisson; zero waits forever.
+    /// How long one attempt may wait for the answers of Redis before it fails with `Error::Timeout` or is retried. As in Redisson, the time starts when the batch is written, so a big batch is not timed while it is being sent. A batch uses a connection of its own until it is answered and at most [`pool_size`](crate::ClientBuilder::pool_size) batches do so at once; another batch waits for a connection as long as this timeout, or as long as the retry pause when it is retried, and the same time is how long the connection may write nothing of the batch. With [`sync`](Batch::sync) the sync timeout is added. The default is the client's [`timeout`](crate::ClientBuilder::timeout), 3 seconds unless changed, as in Redisson; zero waits forever.
     pub fn response_timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
         self
@@ -327,23 +327,25 @@ impl<C: Codec> Batch<C> {
         self.response_timeout + self.sync.map_or(Duration::ZERO, |sync| sync.timeout)
     }
 
-    /// The time until the connection has taken the commands and the time for the answers. As in Redisson, the first is the sum of the retry pauses when the batch is retried and the response timeout when it is not; here it is never less than the response timeout.
-    fn limits(&self) -> Option<Limits> {
+    /// The limits of an attempt whose retry pause would be `pause`. As in Redisson, a batch that is retried waits for a connection as long as that pause and one that is not as long as the response timeout.
+    fn limits_for(&self, pause: Duration) -> Option<Limits> {
         if self.response_timeout.is_zero() {
             return None;
         }
-        let mut pause = Duration::ZERO;
-        let mut pauses = Duration::ZERO;
-        if self.retry_attempts > 0 {
-            for attempt in 0..=self.retry_attempts.min(64) {
-                pause = self.retry_delay.delay(attempt, pause);
-                pauses = pauses.saturating_add(pause);
-            }
-        }
+        let wait = if self.retry_attempts == 0 || pause.is_zero() {
+            self.response_timeout
+        } else {
+            pause
+        };
         Some(Limits {
-            write: pauses.max(self.response_timeout),
+            wait,
+            write: wait.max(self.response_timeout),
             response: self.attempt_timeout(),
         })
+    }
+
+    fn limits(&self) -> Option<Limits> {
+        self.limits_for(Duration::ZERO)
     }
 
     async fn with_timeout<T>(
@@ -362,11 +364,13 @@ impl<C: Codec> Batch<C> {
         let mut attempt = 0;
         let mut pause = Duration::ZERO;
         loop {
-            let outcome = self.run_once(ops).await;
+            pause = self.retry_delay.delay(attempt, pause);
+            let outcome = self.run_once(ops, self.limits_for(pause)).await;
             match outcome {
                 Err(failure) if failure.retryable() && attempt < self.retry_attempts => {
-                    pause = self.retry_delay.delay(attempt, pause);
-                    tokio::time::sleep(pause).await;
+                    if !matches!(failure, Failure::Busy) {
+                        tokio::time::sleep(pause).await;
+                    }
                     attempt += 1;
                 }
                 other => return other,
@@ -374,78 +378,137 @@ impl<C: Codec> Batch<C> {
         }
     }
 
-    async fn run_once(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
+    async fn run_once(
+        &self,
+        ops: &[Op],
+        limits: Option<Limits>,
+    ) -> std::result::Result<Replies, Failure> {
+        let lease = Lease::take_pooled(&self.core, limits.map(|limits| limits.wait)).await?;
         match self.mode {
-            Mode::Pipeline => self.run_pipeline(ops).await,
+            Mode::Pipeline => self.run_pipeline(ops, lease, limits).await,
             _ => {
-                let mut session = Session::begin(&self.core).await?;
+                let mut session = Session::over(lease);
                 for op in ops {
                     session.send(op.name, op.args.clone(), op.key_offset);
                 }
-                let finish = session
-                    .finish(self.replication_command(), self.limits())
-                    .await?;
+                let finish = session.finish(self.replication_command(), limits).await?;
                 self.follow_moved(ops, finish).await
             }
         }
     }
 
-    async fn run_pipeline(&self, ops: &[Op]) -> std::result::Result<Replies, Failure> {
-        let client = self.core.redis();
-        let routing = routing(client);
+    /// Sends the commands as one pipeline on a connection that only this batch uses until it is answered, as a Redisson batch does with a connection of the pool. Every command is sent once: when the connection fails the whole batch is retried, and a command that Redis redirects is sent again by [`follow_redirected`](Self::follow_redirected).
+    async fn run_pipeline(
+        &self,
+        ops: &[Op],
+        mut lease: Lease,
+        limits: Option<Limits>,
+    ) -> std::result::Result<Replies, Failure> {
+        let routing = routing(&lease.client);
         let options = Options {
+            max_attempts: Some(1),
             timeout: Some(Duration::ZERO),
             ..Default::default()
         };
         let mut nodes: Vec<(Option<Server>, Option<u16>)> = Vec::new();
-        let mut commands = Vec::with_capacity(ops.len());
-        for op in ops {
+        let mut pending = Vec::with_capacity(ops.len());
+        for (at, op) in ops.iter().enumerate() {
             let (server, slot) = locate(routing.as_ref(), &op.args, op.key_offset);
             if !nodes.iter().any(|(known, _)| *known == server) {
                 nodes.push((server, slot));
             }
-            let hash = ClusterHash::Offset(op.key_offset);
-            commands.push((op.name, hash, op.args.clone()));
+            let hash = hashed(slot, ClusterHash::Offset(op.key_offset));
+            let args = op.args.clone();
+            pending.push(hand_over(&lease.client, &options, op.name, args, hash));
+            if at % HANDED_AT_ONCE == HANDED_AT_ONCE - 1 {
+                tokio::task::yield_now().await;
+            }
         }
         if let Some((name, args)) = self.replication_command() {
             for (_, slot) in &nodes {
-                commands.push((name, hashed(*slot, ClusterHash::Random), args.clone()));
+                let hash = hashed(*slot, ClusterHash::Random);
+                pending.push(hand_over(&lease.client, &options, name, args.clone(), hash));
             }
         }
-        let expected = commands.len();
-        let pipeline = Pipeline::from(client.with_options(&options));
-        for (name, hash, args) in commands {
-            let command = CustomCommand::new_static(name, hash, false);
-            let _: Value = pipeline.custom(command, args).await?;
-        }
-        let (sending, early) = hand_over_pipeline(pipeline);
-        let replies = answered(client, self.limits(), async {
-            Ok(match early {
-                Some(outcome) => outcome,
-                None => sending.await,
-            })
+        let answers = answered(&lease.client, limits, async {
+            let mut answers = Vec::with_capacity(pending.len());
+            for (sending, early) in pending {
+                answers.push(match early {
+                    Some(outcome) => outcome,
+                    None => sending.await,
+                });
+            }
+            Ok(answers)
         })
         .await?;
-        if replies.len() != expected
-            || replies
-                .iter()
-                .any(|reply| matches!(reply, Err(error) if transport(error)))
-        {
-            return Err(match replies.into_iter().find_map(|reply| reply.err()) {
-                Some(error) => Failure::Fred(error),
-                None => Failure::Other(malformed()),
-            });
+        let mut replies = Vec::with_capacity(answers.len());
+        let mut redirected = Vec::new();
+        for (at, answer) in answers.into_iter().enumerate() {
+            match answer {
+                Err(error) if transport(&error) => return Err(Failure::Fred(error)),
+                Err(error) if redirection(&error) && at < ops.len() => {
+                    redirected.push(at);
+                    replies.push(Err(Error::from(error)));
+                }
+                answer => replies.push(answer.map_err(Error::from).and_then(frame_value)),
+            }
         }
-        let mut replies: Vec<Result<Value>> = replies
-            .into_iter()
-            .map(|reply| reply.map_err(Error::from))
-            .collect();
+        lease.reusable = true;
+        drop(lease);
         let synced = replies
             .split_off(ops.len())
             .into_iter()
             .map(|reply| synced_from(reply.ok()))
             .sum();
+        self.follow_redirected(ops, redirected, &mut replies, limits)
+            .await?;
         Ok((replies, synced))
+    }
+
+    /// Sends the commands that Redis answered with `MOVED` or `ASK` again, as Redisson sends them to the node the answer names. They go through a shared connection of the client, which follows both.
+    async fn follow_redirected(
+        &self,
+        ops: &[Op],
+        redirected: Vec<usize>,
+        replies: &mut [Result<Value>],
+        limits: Option<Limits>,
+    ) -> std::result::Result<(), Failure> {
+        if redirected.is_empty() {
+            return Ok(());
+        }
+        let client = self.core.redis();
+        let routing = routing(client);
+        let pipeline = Pipeline::from(client.with_options(&Options {
+            timeout: Some(Duration::ZERO),
+            ..Default::default()
+        }));
+        for &at in &redirected {
+            let op = &ops[at];
+            let (_, slot) = locate(routing.as_ref(), &op.args, op.key_offset);
+            let hash = hashed(slot, ClusterHash::Offset(op.key_offset));
+            let command = CustomCommand::new_static(op.name, hash, false);
+            let _: Value = pipeline.custom(command, op.args.clone()).await?;
+        }
+        let sending = pipeline.try_all::<Value>();
+        let answers = match limits {
+            Some(limits) => tokio::time::timeout(limits.response, sending)
+                .await
+                .map_err(|_| Failure::Timeout)?,
+            None => sending.await,
+        };
+        if answers.len() != redirected.len() {
+            return Err(match answers.into_iter().find_map(|answer| answer.err()) {
+                Some(error) => Failure::Fred(error),
+                None => Failure::Other(malformed()),
+            });
+        }
+        for (at, answer) in redirected.into_iter().zip(answers) {
+            match answer {
+                Err(error) if transport(&error) => return Err(Failure::Fred(error)),
+                answer => replies[at] = answer.map_err(Error::from),
+            }
+        }
+        Ok(())
     }
 
     fn replication_command(&self) -> Replication {

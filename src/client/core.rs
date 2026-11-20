@@ -3,9 +3,7 @@ use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool, WithOptions};
-use fred::interfaces::{
-    ClientInterface, ClientLike, ClusterInterface, EventInterface, LuaInterface,
-};
+use fred::interfaces::{ClientInterface, ClientLike, ClusterInterface, EventInterface};
 use fred::prelude::{Builder, FromValue, Options};
 use fred::types::client::ClientKillFilter;
 use fred::types::config::PerformanceConfig;
@@ -44,6 +42,8 @@ pub(crate) struct Core {
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
     pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
+    /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
+    pub(crate) batch_connections: Arc<tokio::sync::Semaphore>,
 }
 
 impl Core {
@@ -76,6 +76,7 @@ impl Core {
             pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
             exclusive: std::sync::Mutex::new(Vec::new()),
+            batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
         });
         for client in core.pool.clients() {
             core.keep_named(client).await?;
@@ -194,6 +195,7 @@ impl Core {
         Ok(script.evalsha_with_reload(self.redis(), keys, args).await?)
     }
 
+    /// Runs a script that must reach Redis at most once. `EVALSHA` goes out as a custom command: fred's own `evalsha` sends the script again after a reconnection even when it may send it only once, so a script whose reply was lost ran twice.
     pub(crate) async fn eval_no_retry<R: FromValue>(
         &self,
         script: &Script,
@@ -201,16 +203,38 @@ impl Core {
         args: Vec<Bytes>,
     ) -> Result<R> {
         let client = self.redis();
-        let once = no_retry(client);
-        let sha = script.sha1().clone();
-        match once.evalsha(sha.clone(), keys.clone(), args.clone()).await {
+        match evalsha_once(client, script, &keys, &args).await {
             Err(error) if error.details().starts_with("NOSCRIPT") => {
                 script.load(client).await?;
-                Ok(once.evalsha(sha, keys, args).await?)
+                Ok(evalsha_once(client, script, &keys, &args).await?)
             }
             result => Ok(result?),
         }
     }
+}
+
+async fn evalsha_once<R: FromValue>(
+    client: &RedisClient,
+    script: &Script,
+    keys: &[String],
+    args: &[Bytes],
+) -> std::result::Result<R, fred::error::Error> {
+    // fred routes a custom command only by an explicit slot, not by a key offset.
+    let hash = keys
+        .first()
+        .map_or(fred::types::ClusterHash::Random, |key| {
+            fred::types::ClusterHash::Custom(fred::util::redis_keyslot(key.as_bytes()))
+        });
+    let command = fred::types::CustomCommand::new_static("EVALSHA", hash, false);
+    let mut values: Vec<fred::types::Value> = Vec::with_capacity(2 + keys.len() + args.len());
+    values.push(script.sha1().to_string().into());
+    values.push((keys.len() as i64).into());
+    values.extend(
+        keys.iter()
+            .map(|key| fred::types::Value::from(key.as_str())),
+    );
+    values.extend(args.iter().cloned().map(fred::types::Value::Bytes));
+    no_retry(client).custom(command, values).await
 }
 
 async fn set_name(

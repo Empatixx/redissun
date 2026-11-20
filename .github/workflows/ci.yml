@@ -44,5 +44,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: docker pull redis:7.4
       - run: cargo test --test sentinel --test cluster -- --ignored
+      - run: cargo test --test batch --test hash_map_cache -- --ignored
       - run: cargo test --test chaos -- --ignored --nocapture
       - run: cargo test --features tls-rustls --test tls -- --include-ignored
