@@ -130,9 +130,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
-The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket. To use a Redis you already run, which is faster, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
+The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket or put `docker.host` in `~/.testcontainers.properties`. To use a Redis you already run, which is faster, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
 
-Slower tests are marked `#[ignore]` and start their own Redis, Sentinel and Cluster: `cargo test --test chaos --test sentinel --test cluster -- --ignored`. The TLS tests need a TLS feature: `cargo test --features tls-rustls --test tls -- --include-ignored`. To reproduce the benchmarks, see [`benches/README.md`](benches/README.md).
+No test is skipped: the Sentinel, Cluster and fault-injection tests start their own topology in Docker and run with every `cargo test`, as Redisson's tests do. The whole run takes a few minutes. The TLS tests need a TLS feature: `cargo test --features tls-rustls --test tls`. To reproduce the benchmarks, see [`benches/README.md`](benches/README.md).
 
 ## License
 

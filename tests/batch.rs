@@ -1096,6 +1096,77 @@ async fn batch_ping_after_failed_discard() {
     container.rm().await.unwrap();
 }
 
+/// The connection of a batch signs in like the other connections of the client: with its password and in its database.
+#[tokio::test]
+async fn batches_use_the_password_and_the_database_of_the_client() {
+    let (container, url, plain) = own_redis().await;
+    assert_eq!(
+        raw_reply(&url, "CONFIG SET requirepass secret").await,
+        "+OK"
+    );
+    drop(plain);
+    let client = redissun::Client::builder()
+        .url(url)
+        .password("secret")
+        .database(3)
+        .build()
+        .await
+        .unwrap();
+    for batch in [
+        client.batch(),
+        client.batch().atomic(),
+        client.batch().stored_in_redis(),
+    ] {
+        let name = unique("batch");
+        let written = batch.atomic_i64(name.clone()).add_and_get(7);
+        assert_eq!(batch.execute().await.unwrap().commands, 1);
+        assert_eq!(written.await.unwrap(), 7);
+        assert_eq!(client.atomic_i64(name).get().await.unwrap(), 7);
+    }
+    drop(client);
+    container.rm().await.unwrap();
+}
+
+/// The connection of a batch speaks TLS like the other connections of the client, also with a client certificate.
+#[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+#[tokio::test]
+async fn batches_work_over_tls() {
+    use common::tls::{Authority, TlsRedis};
+    let authority = Authority::new("redissun batch test CA");
+    let server = authority.server(&["127.0.0.1"]);
+    let identity = authority.client();
+    let redis = TlsRedis::start(&authority, &server, true).await;
+    let mut connected = None;
+    for _ in 0..50 {
+        let built = redissun::Client::builder()
+            .url(redis.url())
+            .tls_ca_pem(authority.pem.clone())
+            .tls_client_auth_pem(identity.cert.clone(), identity.key.clone())
+            .build()
+            .await;
+        if let Ok(client) = built {
+            connected = Some(client);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let client = connected.expect("could not connect to redis over TLS");
+    for batch in [
+        client.batch(),
+        client.batch().atomic(),
+        client.batch().stored_in_redis(),
+    ] {
+        let counter = batch.atomic_i64(unique("batch"));
+        let handles: Vec<_> = (0..2000).map(|_| counter.incr()).collect();
+        assert_eq!(batch.execute().await.unwrap().commands, 2000);
+        let mut last = 0;
+        for handle in handles {
+            last = handle.await.unwrap();
+        }
+        assert_eq!(last, 2000);
+    }
+}
+
 mod cluster {
     use super::common::topology::Topology;
     use super::common::unique;
@@ -1103,6 +1174,9 @@ mod cluster {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    // Each of these tests starts its own cluster and some of them are timed, as in Redisson, where the tests of one class run one after another.
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn connect(topology: &Topology) -> Client {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -1135,8 +1209,8 @@ mod cluster {
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn memory_atomic_in_cluster() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
         let (a, b) = (
@@ -1170,8 +1244,8 @@ mod cluster {
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn sync_slaves_aof() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
         for batch in [client.batch(), client.batch().stored_in_redis()] {
@@ -1185,8 +1259,8 @@ mod cluster {
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn sync_slaves() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
         for batch in [client.batch(), client.batch().stored_in_redis()] {
@@ -1202,8 +1276,8 @@ mod cluster {
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn atomic_sync_slaves() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
         let batch = client.batch().atomic().sync(1, Duration::from_secs(1));
@@ -1219,8 +1293,8 @@ mod cluster {
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn atomic_and_stored_batches_span_several_nodes() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
         for batch in [client.batch().atomic(), client.batch().stored_in_redis()] {
@@ -1276,6 +1350,7 @@ mod cluster {
     }
 
     async fn slot_migration(stored: bool) {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
         let name = "test{kaO}";
@@ -1340,13 +1415,11 @@ mod cluster {
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn slot_migration_in_cluster() {
         slot_migration(false).await;
     }
 
     #[tokio::test]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn slot_migration_in_cluster_in_stored_mode() {
         slot_migration(true).await;
     }
@@ -1359,9 +1432,85 @@ mod cluster {
         batch.execute().await
     }
 
+    /// Behind sentinels the connection of a batch goes to the master that the client uses.
+    #[tokio::test]
+    async fn batches_work_through_sentinel() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let topology = Topology::sentinel().await;
+        let client = Client::builder()
+            .url(topology.sentinel_url())
+            .build()
+            .await
+            .expect("could not connect through the sentinels");
+        for batch in [
+            client.batch(),
+            client.batch().atomic(),
+            client.batch().stored_in_redis(),
+        ] {
+            let name = unique("batch");
+            let counter = batch.atomic_i64(name.clone());
+            let first = counter.incr();
+            let second = counter.add_and_get(10);
+            assert_eq!(batch.execute().await.unwrap().commands, 2);
+            assert_eq!(first.await.unwrap(), 1);
+            assert_eq!(second.await.unwrap(), 11);
+            assert_eq!(client.atomic_i64(name).get().await.unwrap(), 11);
+        }
+    }
+
+    /// A slot that is being moved answers `ASK` for a key that is not on the old node any more. As in Redisson, a transaction then goes to the node that imports the slot, after `ASKING`. A pipelined batch is not covered: fred 10.1 sends a single command back to the old node after `ASKING`.
+    #[tokio::test]
+    async fn ask_is_followed_in_the_atomic_modes() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let topology = Topology::cluster().await;
+        let client = connect(&topology).await;
+        let slot = topology
+            .cli(topology.base, &["CLUSTER", "KEYSLOT", "{ask}"])
+            .await;
+        let slot = slot.trim();
+        let masters = masters(&topology).await;
+        let source = topology.cluster_master_of("{ask}").await;
+        let destination = *masters.iter().find(|port| **port != source).unwrap();
+        let source_id = topology.cli(source, &["CLUSTER", "MYID"]).await;
+        let destination_id = topology.cli(destination, &["CLUSTER", "MYID"]).await;
+        let (source_id, destination_id) = (source_id.trim(), destination_id.trim());
+        let importing = ["CLUSTER", "SETSLOT", slot, "IMPORTING", source_id];
+        assert_eq!(topology.cli(destination, &importing).await.trim(), "OK");
+        let migrating = ["CLUSTER", "SETSLOT", slot, "MIGRATING", destination_id];
+        assert_eq!(topology.cli(source, &migrating).await.trim(), "OK");
+
+        let modes = [
+            ("atomic", client.batch().atomic()),
+            ("stored", client.batch().stored_in_redis()),
+        ];
+        for (mode, batch) in modes {
+            let counter = batch.atomic_i64(format!("{{ask}}{mode}"));
+            let first = counter.incr();
+            let second = counter.add_and_get(10);
+            let read = counter.get();
+            let result = batch.execute().await;
+            assert_eq!(result.unwrap().commands, 3, "{mode}");
+            assert_eq!(first.await.unwrap(), 1, "{mode}");
+            assert_eq!(second.await.unwrap(), 11, "{mode}");
+            assert_eq!(read.await.unwrap(), 11, "{mode}");
+        }
+        assert_eq!(topology.cli(source, &["DBSIZE"]).await.trim(), "0");
+        assert_eq!(topology.cli(destination, &["DBSIZE"]).await.trim(), "2");
+
+        for master in &masters {
+            let node = ["CLUSTER", "SETSLOT", slot, "NODE", destination_id];
+            topology.cli(*master, &node).await;
+        }
+        assert_eq!(topology.cluster_master_of("{ask}").await, destination);
+        for mode in ["atomic", "stored"] {
+            let counter = client.atomic_i64(format!("{{ask}}{mode}"));
+            assert_eq!(counter.get().await.unwrap(), 11, "{mode}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn connection_leak() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = Client::builder()
             .url(topology.cluster_url())
@@ -1399,8 +1548,8 @@ mod cluster {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn failover() {
+        let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         wait_for_replicas(&topology).await;
         let client = connect(&topology).await;

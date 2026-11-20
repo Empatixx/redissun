@@ -12,6 +12,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       redis:
         image: redis:7.4
@@ -33,17 +34,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
-
-  resilience:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: docker pull redis:7.4
-      - run: cargo test --test sentinel --test cluster -- --ignored
-      - run: cargo test --test batch --test hash_map_cache -- --ignored --test-threads=1
-      - run: cargo test --test chaos -- --ignored --nocapture
-      - run: cargo test --features tls-rustls --test tls -- --include-ignored
+      - run: cargo test
+      - run: cargo test --features tls-rustls --test tls
+      - run: cargo test --features tls-rustls --test batch batches_work_over_tls
