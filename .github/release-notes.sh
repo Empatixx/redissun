@@ -11,6 +11,7 @@ gh pr list --state merged --base main --search "merged:>$since" --limit 200 --js
     | reduce .[] as $line ({on: false, out: []};
         if ($line | test("^## Changelog\\s*$")) then .on = true
         elif ($line | test("^## ")) then .on = false
+        elif ($line | test("Generated with \\[Claude Code\\]")) then .
         elif .on and ($line | test("\\S")) then .out += [$line]
         else . end)
     | .out | join("\n");
