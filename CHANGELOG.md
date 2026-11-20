@@ -1,5 +1,7 @@
 # Changelog
 
+The notes of version 0.18.0 and later are on the [releases page](https://github.com/Empatixx/redissun/releases). They are generated from the pull requests of each release: every pull request lists its changes in a `## Changelog` section. The versions below were written by hand.
+
 ## [0.17.0] - 2026-10-09
 
 ### Added
