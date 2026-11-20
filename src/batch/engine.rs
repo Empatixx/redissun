@@ -1,13 +1,16 @@
 use super::synced_from;
-use super::wire::{encode, Frame, Wire};
 use crate::client::core::Core;
-use crate::client::retry::DelayStrategy;
 use crate::error::{Error, Result};
 use crate::reply::{bytes, malformed};
-use fred::interfaces::{ClientLike, ClusterInterface};
+use fred::clients::Client as RedisClient;
+use fred::error::ErrorKind;
+use fred::interfaces::{ClientLike, ClusterInterface, MetricsInterface, TransactionInterface};
+use fred::prelude::Options;
 use fred::types::cluster::ClusterRouting;
-use fred::types::config::{Server, ServerConfig};
-use fred::types::Value;
+use fred::types::config::Server;
+use fred::types::{ClusterHash, CustomCommand, Resp3Frame, Value};
+use fred::util::redis_keyslot;
+use futures::FutureExt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,16 +20,20 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
 
 pub(super) type Complete = Box<dyn FnOnce(Result<Value>) + Send>;
-/// The answers of commands by their place in the batch, and the replicas that had the writes.
-pub(super) type Answers = (Vec<(usize, Result<Value>)>, usize);
+/// What the engine returns: a [`Failure`] says whether the batch is tried again.
+pub(super) type Outcome<T> = std::result::Result<T, Failure>;
 pub(super) type Replication = Option<(&'static str, Vec<Value>)>;
+type Answer<T> = std::result::Result<T, fred::error::Error>;
+type Sending = Pin<Box<dyn Future<Output = Answer<Resp3Frame>> + Send>>;
+type Pending = Vec<(Role, Sending, Option<Answer<Resp3Frame>>)>;
 
-/// How many idle connections of batches a client keeps for each node.
 const IDLE_CONNECTIONS: usize = 8;
-/// How often commands are sent again to the node that Redis names in `MOVED` or `ASK`.
-const MAX_REDIRECTIONS: usize = 5;
+/// How often the client is asked whether it has written a batch. A response timeout too short for this is checked at every turn of the runtime instead.
+const POLL: Duration = Duration::from_millis(1);
+/// How many commands a batch hands to its connection before it lets other tasks run.
+pub(super) const HANDED_AT_ONCE: usize = 1024;
 
-/// How long a batch may wait, as in Redisson: `wait` for a connection, `write` until the batch is written, and `response` for the answers once it is written.
+/// How long a batch may wait, as in Redisson: `wait` for a connection, `write` while the connection writes nothing of the batch, and `response` for the answers once the batch is written.
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub(super) wait: Duration,
@@ -34,10 +41,31 @@ pub(super) struct Limits {
     pub(super) response: Duration,
 }
 
+impl Limits {
+    pub(super) const fn all(limit: Duration) -> Self {
+        Self {
+            wait: limit,
+            write: limit,
+            response: limit,
+        }
+    }
+}
+
+/// The limits of a batch that has none.
+pub(super) const FOREVER: Limits = Limits::all(Duration::from_secs(1 << 30));
+
+#[derive(Clone)]
 pub(super) struct Op {
     pub(super) name: &'static str,
     pub(super) args: Vec<Value>,
     pub(super) key_offset: usize,
+}
+
+impl Op {
+    fn slot(&self) -> Option<u16> {
+        let key = self.args.get(self.key_offset).and_then(bytes)?;
+        Some(redis_keyslot(&key))
+    }
 }
 
 /// The reply to one command of a [`Batch`]. Await it after [`Batch::execute`]. Awaiting it earlier waits for an execution that has not started.
@@ -85,6 +113,42 @@ pub(super) struct Replicas {
     pub(super) local_aof: Option<u64>,
 }
 
+pub(super) fn frame_value(frame: Resp3Frame) -> Result<Value> {
+    Ok(match frame {
+        Resp3Frame::Null => Value::Null,
+        Resp3Frame::SimpleString { data, .. }
+        | Resp3Frame::BlobString { data, .. }
+        | Resp3Frame::VerbatimString { data, .. }
+        | Resp3Frame::BigNumber { data, .. } => Value::Bytes(data),
+        Resp3Frame::Number { data, .. } => Value::Integer(data),
+        Resp3Frame::Double { data, .. } => Value::Double(data),
+        Resp3Frame::Boolean { data, .. } => Value::Boolean(data),
+        Resp3Frame::SimpleError { data, .. } => return Err(Error::Redis(data.to_string())),
+        Resp3Frame::BlobError { data, .. } => {
+            return Err(Error::Redis(String::from_utf8_lossy(&data).into_owned()))
+        }
+        Resp3Frame::Array { data, .. } => Value::Array(
+            data.into_iter()
+                .map(frame_value)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Resp3Frame::Set { data, .. } => Value::Array(
+            data.into_iter()
+                .map(frame_value)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        _ => return Err(malformed()),
+    })
+}
+
+pub(super) fn exec_items(frame: Resp3Frame) -> Result<Vec<Result<Value>>> {
+    match frame {
+        Resp3Frame::Array { data, .. } => Ok(data.into_iter().map(frame_value).collect()),
+        Resp3Frame::Null => Err(Error::Redis("the transaction was aborted".into())),
+        other => Err(frame_value(other).err().unwrap_or_else(malformed)),
+    }
+}
+
 pub(super) fn duplicate(error: &Error) -> Error {
     match error {
         Error::Timeout => Error::Timeout,
@@ -96,30 +160,34 @@ pub(super) fn duplicate(error: &Error) -> Error {
 }
 
 pub(super) enum Failure {
-    /// No connection could be opened.
-    Connect(String),
-    /// The connection failed while the batch used it.
-    Io(String),
+    /// The connection failed or could not be opened. The batch is tried again.
+    Failed(Error),
     /// No connection was free in time. As in Redisson, the wait takes the place of the pause before the next attempt.
     Busy,
     Timeout,
-    /// Redis refused a whole transaction for now, as with `TRYAGAIN` while a slot is moved. Redisson retries these too.
-    Again(String),
     Other(Error),
 }
 
 impl Failure {
-    pub(super) fn retryable(&self) -> bool {
-        !matches!(self, Failure::Other(_))
-    }
-
     pub(super) fn into_error(self) -> Error {
         match self {
-            Failure::Connect(message) | Failure::Io(message) | Failure::Again(message) => {
-                Error::Redis(message)
-            }
+            Failure::Failed(error) | Failure::Other(error) => error,
             Failure::Busy | Failure::Timeout => Error::Timeout,
-            Failure::Other(error) => error,
+        }
+    }
+}
+
+impl From<fred::error::Error> for Failure {
+    /// A command failed with its connection when fred says so; fred 10 answers a command that has no connection to its node with the last of these.
+    fn from(error: fred::error::Error) -> Self {
+        let lost = match error.kind() {
+            ErrorKind::IO | ErrorKind::Timeout | ErrorKind::Canceled => true,
+            ErrorKind::Unknown => error.details() == "Failed to route command.",
+            _ => false,
+        };
+        match lost {
+            true => Failure::Failed(error.into()),
+            false => Failure::Other(error.into()),
         }
     }
 }
@@ -130,649 +198,367 @@ impl From<Error> for Failure {
     }
 }
 
-/// How the commands of a node are sent: as they are, or in one `MULTI`/`EXEC`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Kind {
-    Pipeline,
-    Transaction,
-}
-
-/// The commands of a batch that go to one node, by their place in the batch. `asking` is set when Redis sent them here with `ASK`: they are then sent after `ASKING`, as Redisson does.
-pub(super) struct Group {
-    pub(super) server: Server,
-    pub(super) asking: bool,
-    pub(super) ops: Vec<usize>,
-}
-
-fn routing(core: &Core) -> Option<ClusterRouting> {
-    let client = core.redis();
-    if client.is_clustered() {
-        client.cached_cluster_state()
-    } else {
-        None
+/// Splits what fred returned for a command into the answer of Redis and the failure of the connection.
+fn answer<T>(answer: Answer<T>) -> Outcome<Result<T>> {
+    match answer.map_err(Failure::from) {
+        Ok(value) => Ok(Ok(value)),
+        Err(Failure::Other(error)) => Ok(Err(error)),
+        Err(failure) => Err(failure),
     }
 }
 
-/// The node that a command goes to: the owner of its slot in a cluster, the master otherwise.
-fn locate(
-    core: &Core,
-    routing: Option<&ClusterRouting>,
-    op: &Op,
-) -> std::result::Result<Server, Failure> {
-    let unknown = || Failure::Connect("no Redis node is known for the command".into());
-    let client = core.redis();
-    if client.is_clustered() {
-        let routing = routing.ok_or_else(unknown)?;
-        let slot = op.args.get(op.key_offset).and_then(bytes);
-        let slot = slot.map(|key| fred::util::redis_keyslot(&key));
-        let owner = slot.and_then(|slot| routing.get_server(slot).cloned());
-        return owner
-            .or_else(|| routing.unique_primary_nodes().into_iter().next())
-            .ok_or_else(unknown);
-    }
-    if let Some(master) = client.active_connections().into_iter().next() {
-        return Ok(master);
-    }
-    match client.client_config().server {
-        ServerConfig::Centralized { server } => Ok(server),
-        _ => Err(unknown()),
-    }
-}
-
-/// Sorts the commands `todo` by the node they go to, in the order of the batch.
-fn plan(core: &Core, ops: &[Op], todo: &[usize]) -> std::result::Result<Vec<Group>, Failure> {
-    let routing = routing(core);
-    let mut groups: Vec<Group> = Vec::new();
-    for &at in todo {
-        let server = locate(core, routing.as_ref(), &ops[at])?;
-        match groups.iter_mut().find(|group| group.server == server) {
-            Some(group) => group.ops.push(at),
-            None => groups.push(Group {
-                server,
-                asking: false,
-                ops: vec![at],
-            }),
-        }
-    }
-    Ok(groups)
-}
-
-fn gate_name(server: &Server) -> String {
-    format!("{}:{}", server.host, server.port)
-}
-
-/// A connection of a node while one batch uses it, like a connection a Redisson batch takes from the pool of that node: at most `pool_size` batches use a node at once.
-struct Place {
-    wire: Wire,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Place {
-    /// Waits for a free place at `server` for `limits.wait` and opens the connection within `limits.write` when no idle one is left.
-    async fn take(
-        core: &Arc<Core>,
-        server: &Server,
-        limits: Option<Limits>,
-    ) -> std::result::Result<Self, Failure> {
-        let waiting = core.batch_gate(&gate_name(server)).acquire_owned();
-        let permit = match limits {
-            Some(limits) => match tokio::time::timeout(limits.wait, waiting).await {
-                Ok(permit) => permit,
-                Err(_) => return Err(Failure::Busy),
-            },
-            None => waiting.await,
-        };
-        let permit = permit.map_err(|_| Failure::Other(malformed()))?;
-        let wire = connect(core, server, limits).await?;
-        Ok(Self {
-            wire,
-            _permit: permit,
-        })
-    }
-}
-
-/// Takes an idle connection to `server` or opens one. A server that does not answer must not hold the batch longer than a write may take.
-async fn connect(
-    core: &Arc<Core>,
-    server: &Server,
-    limits: Option<Limits>,
-) -> std::result::Result<Wire, Failure> {
-    let idle = {
-        let mut idle = core.exclusive.lock().unwrap_or_else(|e| e.into_inner());
-        let found = idle.iter().rposition(|wire| wire.server == *server);
-        found.map(|at| idle.swap_remove(at))
-    };
-    if let Some(wire) = idle {
-        return Ok(wire);
-    }
-    match limits {
-        Some(limits) => match tokio::time::timeout(limits.write, Wire::open(core, server)).await {
-            Ok(wire) => wire,
-            Err(_) => Err(Failure::Busy),
-        },
-        None => Wire::open(core, server).await,
-    }
-}
-
-/// Gives a connection back that was read to the end of its answers.
-fn release(core: &Core, wire: Wire) {
-    let mut idle = core.exclusive.lock().unwrap_or_else(|e| e.into_inner());
-    let same = idle.iter().filter(|other| other.server == wire.server);
-    if same.count() < IDLE_CONNECTIONS {
-        idle.push(wire);
-    }
-}
-
-/// Closes the idle connections to a node whose connection has just failed: they are most likely as dead.
-fn forget(core: &Core, server: &Server) {
-    let mut idle = core.exclusive.lock().unwrap_or_else(|e| e.into_inner());
-    idle.retain(|wire| wire.server != *server);
-}
-
-/// Where Redis sends a command with `MOVED` or `ASK`.
-fn redirect(message: &str, from: &Server) -> Option<(Server, bool)> {
-    let mut parts = message.split(' ');
-    let asking = match parts.next()? {
-        "MOVED" => false,
-        "ASK" => true,
-        _ => return None,
-    };
-    let (host, port) = parts.nth(1)?.rsplit_once(':')?;
-    let port = port.parse().ok()?;
-    if host.is_empty() || host == &*from.host {
-        let mut server = from.clone();
-        server.port = port;
-        return Some((server, asking));
-    }
-    Some((Server::new(host, port), asking))
-}
-
-/// What a node answered to a [`Group`].
-struct Answered {
-    replies: Vec<(usize, Result<Value>)>,
-    synced: usize,
-    /// The commands that Redis sent to another node, and the error it sent them with.
-    redirected: Vec<(usize, Server, bool, String)>,
-    /// The error of a transaction that Redis refused for now and applied nothing of.
-    again: Option<String>,
-}
-
-fn request(
-    kind: Kind,
-    ops: &[Op],
-    group: &Group,
-    replication: &Replication,
-) -> Result<(Vec<u8>, usize)> {
-    let mut out = Vec::with_capacity(group.ops.len() * 48);
-    let mut expected = group.ops.len();
-    let ask = |out: &mut Vec<u8>, expected: &mut usize| {
-        if group.asking {
-            *expected += 1;
-            encode(out, "ASKING", &[])
-        } else {
-            Ok(())
-        }
-    };
-    if kind == Kind::Transaction {
-        ask(&mut out, &mut expected)?;
-        encode(&mut out, "MULTI", &[])?;
-        expected += 2;
-    }
-    for &at in &group.ops {
-        if kind == Kind::Pipeline {
-            ask(&mut out, &mut expected)?;
-        }
-        encode(&mut out, ops[at].name, &ops[at].args)?;
-    }
-    if kind == Kind::Transaction {
-        encode(&mut out, "EXEC", &[])?;
-    }
-    if let Some((name, args)) = replication {
-        encode(&mut out, name, args)?;
-        expected += 1;
-    }
-    Ok((out, expected))
-}
-
-/// Reads the answers to a transaction: `MULTI`, one for each command, `EXEC`. When Redis refused the transaction with `MOVED` or `ASK`, all its commands go to the node it names; Redis applied none of them.
-fn transaction(frames: &mut impl Iterator<Item = Frame>, group: &Group) -> Answered {
-    let mut answered = Answered {
-        replies: Vec::with_capacity(group.ops.len()),
-        synced: 0,
-        redirected: Vec::new(),
-        again: None,
-    };
-    let opened = frames.next().map(Frame::value);
-    let queued: Vec<Option<String>> = group
-        .ops
-        .iter()
-        .map(|_| match frames.next() {
-            Some(Frame::Error(message)) => Some(message),
-            _ => None,
-        })
-        .collect();
-    let refused = match (opened, frames.next()) {
-        (Some(Ok(_)), Some(Frame::Array(items))) if items.len() == group.ops.len() => {
-            let items = items.into_iter().map(Frame::value);
-            answered
-                .replies
-                .extend(group.ops.iter().copied().zip(items));
-            return answered;
-        }
-        (Some(Err(Error::Redis(message))), _) | (_, Some(Frame::Error(message))) => message,
-        (_, Some(Frame::Null)) => "the transaction was aborted".to_string(),
-        _ => malformed().to_string(),
-    };
-    let again = std::iter::once(&refused)
-        .chain(queued.iter().flatten())
-        .find(|message| temporary(message));
-    if let Some(message) = again {
-        answered.again = Some(message.clone());
-        return answered;
-    }
-    let moved = std::iter::once(&refused)
-        .chain(queued.iter().flatten())
-        .find_map(|message| Some((redirect(message, &group.server)?, message)));
-    for (&at, queued) in group.ops.iter().zip(&queued) {
-        match &moved {
-            Some(((server, asking), message)) => {
-                let moved = (at, server.clone(), *asking, message.to_string());
-                answered.redirected.push(moved);
-            }
-            None => {
-                let message = queued.clone().unwrap_or_else(|| refused.clone());
-                answered.replies.push((at, Err(Error::Redis(message))));
-            }
-        }
-    }
-    answered
-}
-
-/// Whether Redis refuses commands only for now: while a slot is moved, a node loads its data, the cluster is down or a master has just become a replica. Redisson tries again after these.
-fn temporary(message: &str) -> bool {
-    ["TRYAGAIN", "CLUSTERDOWN", "LOADING", "READONLY"]
-        .iter()
-        .any(|kind| message.starts_with(kind))
-}
-
-fn pipeline(frames: &mut impl Iterator<Item = Frame>, group: &Group) -> Answered {
-    let mut answered = Answered {
-        replies: Vec::with_capacity(group.ops.len()),
-        synced: 0,
-        redirected: Vec::new(),
-        again: None,
-    };
-    for &at in &group.ops {
-        if group.asking {
-            frames.next();
-        }
-        match frames.next() {
-            Some(Frame::Error(message)) => match redirect(&message, &group.server) {
-                Some((server, asking)) => answered.redirected.push((at, server, asking, message)),
-                None => {
-                    if temporary(&message) && answered.again.is_none() {
-                        answered.again = Some(message.clone());
-                    }
-                    answered.replies.push((at, Err(Error::Redis(message))))
-                }
-            },
-            Some(frame) => answered.replies.push((at, frame.value())),
-            None => answered.replies.push((at, Err(malformed()))),
-        }
-    }
-    answered
-}
-
-fn read(kind: Kind, frames: Vec<Frame>, group: &Group, replication: &Replication) -> Answered {
-    let mut frames = frames.into_iter();
-    let mut answered = match kind {
-        Kind::Transaction => {
-            if group.asking {
-                frames.next();
-            }
-            transaction(&mut frames, group)
-        }
-        Kind::Pipeline => pipeline(&mut frames, group),
-    };
-    if replication.is_some() {
-        answered.synced = synced_from(frames.next().and_then(|frame| frame.value().ok()));
-    }
-    answered
-}
-
-/// What became of the commands of a [`Group`].
-pub(super) struct Settled {
-    replies: Vec<(usize, Result<Value>)>,
-    synced: usize,
-}
-
-/// Sends a group to its node as one pipeline on a connection of its own and follows `MOVED` and `ASK` as Redisson does: the commands that Redis sent elsewhere go to the node it named, after `ASKING` when it said `ASK`.
-async fn settle(
-    core: &Arc<Core>,
-    kind: Kind,
-    ops: &[Op],
-    group: Group,
-    replication: &Replication,
-    limits: Option<Limits>,
-) -> std::result::Result<Settled, Failure> {
-    let mut settled = Settled {
-        replies: Vec::with_capacity(group.ops.len()),
-        synced: 0,
-    };
-    let mut pending = vec![group];
-    for round in 0..=MAX_REDIRECTIONS {
-        let mut next: Vec<Group> = Vec::new();
-        for group in pending {
-            let (out, expected) = request(kind, ops, &group, replication)?;
-            let mut place = Place::take(core, &group.server, limits).await?;
-            let frames = match place.wire.exchange(&out, expected, limits).await {
-                Ok(frames) => frames,
-                Err(failure) => {
-                    forget(core, &group.server);
-                    return Err(failure);
-                }
-            };
-            release(core, place.wire);
-            let answered = read(kind, frames, &group, replication);
-            if let Some(message) = answered.again {
-                forget(core, &group.server);
-                return Err(Failure::Again(message));
-            }
-            settled.replies.extend(answered.replies);
-            settled.synced += answered.synced;
-            for (at, server, asking, message) in answered.redirected {
-                if round == MAX_REDIRECTIONS {
-                    settled.replies.push((at, Err(Error::Redis(message))));
-                    continue;
-                }
-                if !asking {
-                    core.refresh_cluster();
-                }
-                let known = next
-                    .iter_mut()
-                    .find(|group| group.server == server && group.asking == asking);
-                match known {
-                    Some(group) => group.ops.push(at),
-                    None => next.push(Group {
-                        server,
-                        asking,
-                        ops: vec![at],
-                    }),
-                }
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        pending = next;
-    }
-    Ok(settled)
-}
-
-/// How a batch is retried.
-#[derive(Clone, Copy)]
-pub(super) struct Retries {
-    pub(super) attempts: u32,
-    pub(super) delay: DelayStrategy,
-}
-
-/// Runs the commands `first` of a batch. As in Redisson, every node gets its commands on a connection of its own, at the same time as the other nodes, and only the nodes that failed are tried again.
-pub(super) async fn run(
-    core: &Arc<Core>,
-    kind: Kind,
-    ops: &[Op],
-    first: Vec<Group>,
-    replication: &Replication,
-    retries: Retries,
-    limits: impl Fn(Duration) -> Option<Limits>,
-) -> std::result::Result<Answers, Failure> {
-    let mut replies = Vec::new();
-    let mut synced = 0;
-    let mut groups = first;
-    let mut attempt = 0;
-    let mut pause = Duration::ZERO;
+/// Waits until the client has written everything it was given. Fails when the client writes nothing for `limit`.
+async fn written(client: &RedisClient, precise: bool, limit: Duration) -> Outcome<()> {
+    let (mut last, mut progress) = (usize::MAX, std::time::Instant::now());
     loop {
-        pause = retries.delay.delay(attempt, pause);
-        let limits = limits(pause);
-        let todo: Vec<Vec<usize>> = groups.iter().map(|group| group.ops.clone()).collect();
-        let settling = groups
-            .into_iter()
-            .map(|group| settle(core, kind, ops, group, replication, limits));
-        let outcomes = futures::future::join_all(settling).await;
-        let mut again = Vec::new();
-        let mut failure = None;
-        for (todo, outcome) in todo.into_iter().zip(outcomes) {
-            match outcome {
-                Ok(settled) => {
-                    replies.extend(settled.replies);
-                    synced += settled.synced;
-                }
-                Err(failed) if failed.retryable() && attempt < retries.attempts => {
-                    again.extend(todo);
-                    if !matches!(failure, Some(Failure::Connect(_) | Failure::Io(_))) {
-                        failure = Some(failed);
-                    }
-                }
-                Err(failed) => return Err(failed),
+        let queued = client.command_queue_len();
+        if queued == 0 {
+            return Ok(());
+        }
+        if queued < last {
+            progress = std::time::Instant::now();
+        } else if progress.elapsed() >= limit {
+            return Err(Failure::Timeout);
+        }
+        last = queued;
+        match precise {
+            true => tokio::task::yield_now().await,
+            false => tokio::time::sleep(POLL).await,
+        }
+    }
+}
+
+/// A connection that only one batch uses at a time, like a connection Redisson takes from its pool. It goes back to the client's idle list when the batch finished cleanly and is closed otherwise.
+struct Lease {
+    core: Arc<Core>,
+    client: RedisClient,
+    reusable: bool,
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Lease {
+    /// Takes one of the `pool_size` connections that batches share, as a Redisson batch takes a connection from the pool: it waits while other batches use all of them and gives up after `limits.wait`.
+    async fn take_pooled(core: &Arc<Core>, limits: Limits) -> Outcome<Self> {
+        // The wait for a free place and the opening of the connection have separate limits: a pause of a few milliseconds between attempts must not fail a connect, and a server that does not answer must not hold the batch longer than a write may take.
+        let waiting = core.batch_connections.clone().acquire_owned();
+        let permit = tokio::time::timeout(limits.wait, waiting).await;
+        let permit = permit
+            .map_err(|_| Failure::Busy)?
+            .map_err(|_| malformed())?;
+        let lease = tokio::time::timeout(limits.write, Self::take(core)).await;
+        let mut lease = lease.map_err(|_| Failure::Busy)??;
+        lease._permit = Some(permit);
+        Ok(lease)
+    }
+
+    async fn take(core: &Arc<Core>) -> Outcome<Self> {
+        let lease = |client| Self {
+            core: core.clone(),
+            client,
+            reusable: false,
+            _permit: None,
+        };
+        let idle = || {
+            core.exclusive
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop()
+        };
+        while let Some(client) = idle() {
+            if client.is_connected() {
+                return Ok(lease(client));
             }
+            tokio::spawn(async move { client.quit().await });
         }
-        match failure {
-            None => return Ok((replies, synced)),
-            Some(Failure::Busy) => {}
-            Some(_) => tokio::time::sleep(pause).await,
+        // Dropped unfinished, the lease closes the connection.
+        let lease = lease(core.redis().clone_new());
+        let opened = lease.client.init().await;
+        opened.map_err(|error| Failure::Failed(error.into()))?;
+        core.name(&lease.client).await?;
+        Ok(lease)
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let mut idle = self
+            .core
+            .exclusive
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.reusable && self.client.is_connected() && idle.len() < IDLE_CONNECTIONS {
+            idle.push(self.client.clone());
+        } else if let Ok(runtime) = Handle::try_current() {
+            let client = self.client.clone();
+            runtime.spawn(async move { client.quit().await });
         }
-        core.refresh_cluster();
-        again.sort_unstable();
-        // A cluster that has no node for a slot yet, as during a failover, is asked once more after the pause.
-        groups = match plan(core, ops, &again) {
-            Ok(groups) => groups,
-            Err(_) => {
-                tokio::time::sleep(pause).await;
-                plan(core, ops, &again)?
+    }
+}
+
+enum Role {
+    Multi,
+    Op {
+        op: usize,
+        group: usize,
+    },
+    /// `EXEC`, or `DISCARD` when the batch is discarded.
+    End(usize),
+    Wait,
+}
+
+struct Group {
+    server: Option<Server>,
+    slot: Option<u16>,
+    ops: Vec<usize>,
+}
+
+/// What a [`Session`] got back.
+pub(super) struct Finish {
+    pub(super) replies: Vec<Result<Value>>,
+    pub(super) synced: usize,
+    /// The commands of the transactions that Redis refused with `MOVED` or `ASK`. It applied nothing of them.
+    moved: Vec<usize>,
+    /// Whether fred sent every command. It may have closed a connection on which it could not.
+    clean: bool,
+}
+
+/// The commands of a batch on a leased connection: as they are, or for every node in one `MULTI`/`EXEC` when the session is `atomic`. Each command is handed to the connection as it is added, in order, and the answers are read at the end, so the batch is one pipeline on the wire.
+pub(super) struct Session {
+    lease: Lease,
+    atomic: bool,
+    routing: Option<ClusterRouting>,
+    groups: Vec<Group>,
+    pending: Pending,
+    ops: usize,
+}
+
+impl Session {
+    /// Starts a session on one of the `pool_size` connections of batches, or on a connection outside that limit when `limits` is `None`, as the transactions of a stored batch are.
+    pub(super) async fn begin(
+        core: &Arc<Core>,
+        atomic: bool,
+        limits: Option<Limits>,
+    ) -> Outcome<Self> {
+        let lease = match limits {
+            Some(limits) => Lease::take_pooled(core, limits).await?,
+            None => Lease::take(core).await?,
+        };
+        let client = &lease.client;
+        let routing = client.is_clustered().then(|| client.cached_cluster_state());
+        Ok(Self {
+            routing: routing.flatten(),
+            lease,
+            atomic,
+            groups: Vec::new(),
+            pending: Vec::new(),
+            ops: 0,
+        })
+    }
+
+    /// Hands a command to the connection at once, so commands go out in the order they are handed over.
+    fn enqueue(&mut self, role: Role, name: &'static str, args: Vec<Value>, slot: Option<u16>) {
+        // A command of a transaction is sent once: when the connection fails the whole batch is retried, and after `MOVED` or `ASK` the whole transaction is sent again by [`follow`]. In a cluster a command outside a transaction may be sent a second time, which is how fred follows `MOVED` for it.
+        let redirected = !self.atomic && self.lease.client.is_clustered();
+        let client = self.lease.client.with_options(&Options {
+            max_attempts: Some(if redirected { 2 } else { 1 }),
+            timeout: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        // fred routes a custom command by its key only when it is given the slot.
+        let hash = slot.map_or(ClusterHash::Random, ClusterHash::Custom);
+        let command = CustomCommand::new_static(name, hash, false);
+        let mut sending: Sending = Box::pin(async move { client.custom_raw(command, args).await });
+        let early = sending.as_mut().now_or_never();
+        self.pending.push((role, sending, early));
+    }
+
+    pub(super) fn send(&mut self, op: Op) {
+        let slot = op.slot();
+        let routing = self.routing.as_ref();
+        let server = slot.and_then(|slot| routing?.get_server(slot).cloned());
+        let group = match self.groups.iter().position(|group| group.server == server) {
+            Some(group) => group,
+            None => {
+                let ops = Vec::new();
+                self.groups.push(Group { server, slot, ops });
+                if self.atomic {
+                    self.enqueue(Role::Multi, "MULTI", Vec::new(), slot);
+                }
+                self.groups.len() - 1
             }
         };
-        attempt += 1;
+        self.groups[group].ops.push(self.ops);
+        self.enqueue(
+            Role::Op {
+                op: self.ops,
+                group,
+            },
+            op.name,
+            op.args,
+            slot,
+        );
+        self.ops += 1;
+    }
+
+    /// Ends the transactions with `EXEC`, or with `DISCARD` as Redisson does for a batch that is discarded, and reads all the answers. As in Redisson, the response timeout starts when the batch is written, so a big batch is not timed while it is being sent.
+    pub(super) async fn end(
+        mut self,
+        discard: bool,
+        replication: Replication,
+        limits: Limits,
+    ) -> Outcome<Finish> {
+        for group in 0..self.groups.len() {
+            let slot = self.groups[group].slot;
+            if self.atomic {
+                let name = if discard { "DISCARD" } else { "EXEC" };
+                self.enqueue(Role::End(group), name, Vec::new(), slot);
+            }
+            if let Some((name, args)) = replication.as_ref().filter(|_| !discard) {
+                self.enqueue(Role::Wait, name, args.clone(), slot);
+            }
+        }
+        let pending = std::mem::take(&mut self.pending);
+        let finish = {
+            let collecting = collect(pending, &self.groups, self.ops, self.atomic, discard);
+            tokio::pin!(collecting);
+            let precise = limits.response < POLL * 32;
+            tokio::select! {
+                biased;
+                finish = &mut collecting => finish,
+                sent = written(&self.lease.client, precise, limits.write) => match sent {
+                    Ok(()) => tokio::time::timeout(limits.response, collecting).await,
+                    Err(failure) => Ok(Err(failure)),
+                }
+                .unwrap_or(Err(Failure::Timeout)),
+            }
+        }?;
+        self.lease.reusable = finish.clean;
+        Ok(finish)
     }
 }
 
-/// The first plan of a batch that was not sent yet.
-pub(super) fn first(core: &Core, ops: &[Op]) -> std::result::Result<Vec<Group>, Failure> {
-    let all: Vec<usize> = (0..ops.len()).collect();
-    plan(core, ops, &all)
-}
-
-/// Puts the answers in the order of the batch.
-pub(super) fn ordered(count: usize, replies: Vec<(usize, Result<Value>)>) -> Vec<Result<Value>> {
-    let mut ordered: Vec<Option<Result<Value>>> = (0..count).map(|_| None).collect();
-    for (at, reply) in replies {
-        ordered[at] = Some(reply);
+async fn collect(
+    pending: Pending,
+    groups: &[Group],
+    ops: usize,
+    atomic: bool,
+    discard: bool,
+) -> Outcome<Finish> {
+    let mut outcomes: Vec<Option<Result<Value>>> = (0..ops).map(|_| None).collect();
+    let mut redirected = vec![false; groups.len()];
+    let (mut moved, mut synced, mut clean) = (Vec::new(), 0, true);
+    for (role, sending, early) in pending {
+        let frame = match early {
+            Some(outcome) => outcome,
+            None => sending.await,
+        };
+        // Redis's own errors come as answers, so an error here is fred's: it could not send the command, or would have had to send it again after `MOVED` or `ASK`.
+        let reply = answer(frame)?;
+        let unsent = reply.is_err();
+        clean &= !unsent;
+        match role {
+            Role::Multi => drop(reply.and_then(frame_value)?),
+            Role::Op { op, group } => {
+                let reply = reply.and_then(frame_value);
+                redirected[group] |= unsent;
+                if !atomic || reply.is_err() {
+                    outcomes[op] = Some(reply);
+                }
+            }
+            Role::End(_) if discard => drop(reply.and_then(frame_value)?),
+            Role::End(group) => {
+                let ops = &groups[group].ops;
+                match reply.and_then(exec_items) {
+                    Ok(items) => {
+                        for (&op, item) in ops.iter().zip(items) {
+                            outcomes[op].get_or_insert(item);
+                        }
+                    }
+                    Err(error) => {
+                        if redirected[group] || unsent {
+                            moved.extend_from_slice(ops);
+                        }
+                        for &op in ops {
+                            outcomes[op].get_or_insert_with(|| Err(duplicate(&error)));
+                        }
+                    }
+                }
+            }
+            Role::Wait => synced += synced_from(reply.and_then(frame_value).ok()),
+        }
     }
-    ordered
+    let replies = outcomes
         .into_iter()
-        .map(|reply| reply.unwrap_or_else(|| Err(malformed())))
-        .collect()
+        .map(|outcome| outcome.unwrap_or_else(|| Err(malformed())));
+    Ok(Finish {
+        replies: replies.collect(),
+        synced,
+        moved,
+        clean,
+    })
 }
 
-/// A transaction that a stored batch keeps open on a node.
-struct Open {
-    wire: Wire,
-    group: Group,
-}
-
-/// What the stored transactions answered. The commands in `redirected` were refused with `MOVED` or `ASK` and applied nowhere; they are sent again by [`run`].
-pub(super) struct Finished {
-    pub(super) replies: Vec<(usize, Result<Value>)>,
-    pub(super) synced: usize,
-    pub(super) redirected: Vec<Group>,
+/// Sends the transactions again that Redis refused with `MOVED` or `ASK`, as fred's own transactions, which follow both: after `ASKING` when Redis said `ASK`. Redis applied nothing of a transaction it refused, so nothing runs twice.
+pub(super) async fn follow(core: &Core, ops: &[Op], finish: &mut Finish) -> Outcome<()> {
+    let mut moved = std::mem::take(&mut finish.moved);
+    // The keys of a transaction share a slot in a cluster, so each slot is a transaction of its own.
+    moved.sort_by_key(|&at| ops[at].slot());
+    for slot in moved.chunk_by(|&a, &b| ops[a].slot() == ops[b].slot()) {
+        let transaction = core.redis().multi();
+        for op in slot.iter().map(|&at| &ops[at]) {
+            let hash = op.slot().map_or(ClusterHash::Random, ClusterHash::Custom);
+            let command = CustomCommand::new_static(op.name, hash, false);
+            let _: Value = transaction.custom(command, op.args.clone()).await?;
+        }
+        // fred returns the answers of a transaction only when all its commands succeeded.
+        let executed = answer(transaction.exec::<Vec<Value>>(true).await)?;
+        for (at, &op) in slot.iter().enumerate() {
+            let value = executed.as_ref().map(|values| values[at].clone());
+            finish.replies[op] = value.map_err(duplicate);
+        }
+    }
+    Ok(())
 }
 
 pub(super) enum Command {
     Op(Op),
-    Finish {
+    End {
+        discard: bool,
         replication: Replication,
-        limits: Option<Limits>,
-        reply: oneshot::Sender<std::result::Result<Finished, Failure>>,
-    },
-    Discard {
-        limits: Option<Limits>,
-        reply: oneshot::Sender<std::result::Result<(), Failure>>,
+        limits: Limits,
+        reply: oneshot::Sender<Outcome<Finish>>,
     },
 }
 
-/// The transactions of a batch whose commands wait in Redis, as in Redisson's `REDIS_WRITE_ATOMIC`: every command is written when it is queued, after a `MULTI` on a connection that the batch keeps for that node.
-pub(super) struct Stored {
-    pub(super) sender: mpsc::UnboundedSender<Command>,
-}
-
-impl Stored {
-    pub(super) fn start(core: Arc<Core>) -> Option<Self> {
-        let runtime = Handle::try_current().ok()?;
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        runtime.spawn(async move {
-            let mut open: Vec<Open> = Vec::new();
-            let mut stored = 0;
-            let mut failure = None;
-            while let Some(command) = receiver.recv().await {
-                match command {
-                    Command::Op(op) => {
-                        if failure.is_none() {
-                            failure = store(&core, &mut open, &op, stored).await.err();
-                        }
-                        stored += 1;
-                    }
-                    Command::Finish {
-                        replication,
-                        limits,
-                        reply,
-                    } => {
-                        let finished = match failure {
-                            Some(failure) => Err(failure),
-                            None => finish(&core, open, &replication, limits).await,
-                        };
-                        let _ = reply.send(finished);
-                        return;
-                    }
-                    Command::Discard { limits, reply } => {
-                        let discarded = match failure {
-                            Some(failure) => Err(failure),
-                            None => discard(&core, open, limits).await,
-                        };
-                        let _ = reply.send(discarded);
-                        return;
+/// Starts the transactions of a batch whose commands wait in Redis, as in Redisson's `REDIS_WRITE_ATOMIC`: every command is sent when it is queued, after a `MULTI` on a connection that the batch keeps until it ends.
+pub(super) fn store_in_redis(core: Arc<Core>) -> Option<mpsc::UnboundedSender<Command>> {
+    let runtime = Handle::try_current().ok()?;
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    runtime.spawn(async move {
+        let mut session = Session::begin(&core, true, None).await;
+        while let Some(command) = receiver.recv().await {
+            match command {
+                Command::Op(op) => {
+                    if let Ok(session) = &mut session {
+                        session.send(op);
                     }
                 }
+                Command::End {
+                    discard,
+                    replication,
+                    limits,
+                    mut reply,
+                } => {
+                    let ending = async { session?.end(discard, replication, limits).await };
+                    // A caller that gave up drops the session, which closes its connection.
+                    tokio::select! {
+                        ended = ending => drop(reply.send(ended)),
+                        _ = reply.closed() => {}
+                    }
+                    return;
+                }
             }
-        });
-        Some(Self { sender })
-    }
-}
-
-async fn store(
-    core: &Arc<Core>,
-    open: &mut Vec<Open>,
-    op: &Op,
-    at: usize,
-) -> std::result::Result<(), Failure> {
-    let server = locate(core, routing(core).as_ref(), op)?;
-    let mut out = Vec::new();
-    let known = open.iter().position(|open| open.group.server == server);
-    let known = match known {
-        Some(known) => known,
-        None => {
-            let wire = connect(core, &server, None).await?;
-            encode(&mut out, "MULTI", &[])?;
-            open.push(Open {
-                wire,
-                group: Group {
-                    server,
-                    asking: false,
-                    ops: Vec::new(),
-                },
-            });
-            open.len() - 1
-        }
-    };
-    encode(&mut out, op.name, &op.args)?;
-    open[known].group.ops.push(at);
-    open[known].wire.send(&out).await
-}
-
-async fn finish(
-    core: &Arc<Core>,
-    open: Vec<Open>,
-    replication: &Replication,
-    limits: Option<Limits>,
-) -> std::result::Result<Finished, Failure> {
-    let mut finished = Finished {
-        replies: Vec::new(),
-        synced: 0,
-        redirected: Vec::new(),
-    };
-    let finishing = open.into_iter().map(|mut open| async move {
-        let mut out = Vec::new();
-        encode(&mut out, "EXEC", &[])?;
-        let mut expected = open.group.ops.len() + 2;
-        if let Some((name, args)) = replication {
-            encode(&mut out, name, args)?;
-            expected += 1;
-        }
-        let frames = open.wire.exchange(&out, expected, limits).await?;
-        release(core, open.wire);
-        let answered = read(Kind::Transaction, frames, &open.group, replication);
-        Ok::<_, Failure>((answered, open.group))
-    });
-    for answered in futures::future::join_all(finishing).await {
-        let (mut answered, group) = answered?;
-        if answered.again.take().is_some() {
-            // Nothing of the transaction was applied, so it is sent again like one that Redis sent elsewhere.
-            finished.redirected.push(group);
-            continue;
-        }
-        finished.replies.extend(answered.replies);
-        finished.synced += answered.synced;
-        for (at, server, asking, _) in answered.redirected {
-            if !asking {
-                core.refresh_cluster();
-            }
-            let known = finished
-                .redirected
-                .iter_mut()
-                .find(|group| group.server == server && group.asking == asking);
-            match known {
-                Some(group) => group.ops.push(at),
-                None => finished.redirected.push(Group {
-                    server,
-                    asking,
-                    ops: vec![at],
-                }),
-            }
-        }
-    }
-    Ok(finished)
-}
-
-/// Ends every open transaction with `DISCARD`, as Redisson does for a batch whose commands wait in Redis. A connection is used again only when its `DISCARD` was answered.
-async fn discard(
-    core: &Arc<Core>,
-    open: Vec<Open>,
-    limits: Option<Limits>,
-) -> std::result::Result<(), Failure> {
-    let discarding = open.into_iter().map(|mut open| async move {
-        let mut out = Vec::new();
-        encode(&mut out, "DISCARD", &[])?;
-        let expected = open.group.ops.len() + 2;
-        let frames = open.wire.exchange(&out, expected, limits).await?;
-        match frames.into_iter().next_back().map(Frame::value) {
-            Some(Ok(_)) => {
-                release(core, open.wire);
-                Ok(())
-            }
-            Some(Err(error)) => Err(Failure::Other(error)),
-            None => Err(Failure::Other(malformed())),
         }
     });
-    for discarded in futures::future::join_all(discarding).await {
-        discarded?;
-    }
-    Ok(())
+    Some(sender)
 }
