@@ -954,7 +954,8 @@ async fn ping_during_long_batch_execution() {
             batch = batch.skip_result();
         }
         let prefix = unique("pingDuringBatch");
-        let size = 300_000;
+        // Redisson's test sends 300000 commands. A debug build on a CI runner needs more than the 5 second response timeout for that, and 100000 still keep the connection busy for many ping intervals.
+        let size = 100_000;
         for i in 0..size {
             drop(batch.bucket::<String>(format!("{prefix}:{i}")).set("v"));
         }
