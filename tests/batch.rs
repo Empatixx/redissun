@@ -345,12 +345,38 @@ async fn sync_also_works_in_the_atomic_modes() {
     }
 }
 
+/// A Redis of its own for a test that stops the server from answering with `CLIENT PAUSE`, which the shared one must not suffer.
+async fn own_redis() -> (
+    testcontainers::ContainerAsync<Redis>,
+    String,
+    redissun::Client,
+) {
+    let container = Redis::default().with_tag("7.4").start().await.unwrap();
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    let url = format!("redis://127.0.0.1:{port}");
+    for _ in 0..50 {
+        if let Ok(client) = redissun::Client::builder().url(url.clone()).build().await {
+            return (container, url, client);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("could not connect to redis");
+}
+
+/// Opens the connection that the next batch of `client` uses, so the batch is written before Redis stops answering.
+async fn open_batch_connection(client: &redissun::Client) {
+    let batch = client.batch();
+    drop(batch.atomic_i64(unique("batch")).incr());
+    batch.execute().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_response_timeout_fails_the_execution_after_the_retries() {
-    let client = client().await;
+    let (container, url, client) = own_redis().await;
+    open_batch_connection(&client).await;
     let batch = client
         .batch()
-        .response_timeout(Duration::from_nanos(1))
+        .response_timeout(Duration::from_millis(100))
         .retry_attempts(2)
         .retry_interval(Duration::from_millis(150));
     let name = unique("batch");
@@ -358,29 +384,36 @@ async fn a_response_timeout_fails_the_execution_after_the_retries() {
     let _reads: std::vec::Vec<_> = (0..5000)
         .map(|_| batch.atomic_i64(name.clone()).get())
         .collect();
+    assert_eq!(raw_reply(&url, "CLIENT PAUSE 10000").await, "+OK");
     let started = std::time::Instant::now();
     assert!(matches!(batch.execute().await, Err(Error::Timeout)));
     let elapsed = started.elapsed();
     assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
     assert!(matches!(handle.await, Err(Error::Timeout)));
+    drop(client);
+    container.rm().await.unwrap();
 }
 
 #[tokio::test]
 async fn by_default_a_batch_is_retried_four_times_with_jitter_like_redisson() {
-    let client = client().await;
-    let batch = client.batch().response_timeout(Duration::from_nanos(1));
+    let (container, url, client) = own_redis().await;
+    open_batch_connection(&client).await;
+    let batch = client.batch().response_timeout(Duration::from_millis(10));
     let name = unique("batch");
     let handle = batch.atomic_i64(name.clone()).incr();
     let _reads: std::vec::Vec<_> = (0..5000)
         .map(|_| batch.atomic_i64(name.clone()).get())
         .collect();
+    assert_eq!(raw_reply(&url, "CLIENT PAUSE 30000").await, "+OK");
     let started = std::time::Instant::now();
     assert!(matches!(batch.execute().await, Err(Error::Timeout)));
     let elapsed = started.elapsed();
     assert!(elapsed >= Duration::from_millis(3500), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
     assert!(matches!(handle.await, Err(Error::Timeout)));
+    drop(client);
+    container.rm().await.unwrap();
 }
 
 #[tokio::test]
@@ -954,17 +987,29 @@ async fn ping_during_long_batch_execution() {
             batch = batch.skip_result();
         }
         let prefix = unique("pingDuringBatch");
-        // Redisson's test sends 300000 commands. A debug build on a CI runner needs more than the 5 second response timeout for that, and 100000 still keep the connection busy for many ping intervals.
-        let size = 100_000;
+        let size = 300_000;
         for i in 0..size {
             drop(batch.bucket::<String>(format!("{prefix}:{i}")).set("v"));
         }
         batch.execute().await.unwrap();
 
-        let first = client.bucket::<String>(format!("{prefix}:0"));
-        assert!(first.exists().await.unwrap());
-        let last = client.bucket::<String>(format!("{prefix}:{}", size - 1));
-        assert!(last.exists().await.unwrap());
+        assert!(exists_soon(&client, format!("{prefix}:0")).await);
+        assert!(exists_soon(&client, format!("{prefix}:{}", size - 1)).await);
+    }
+}
+
+/// `exists` with the 50 ms timeout of the client above. Queueing 300000 commands keeps the test's only thread busy for longer than that, so a ping or this call can time out for a reason that is not Redis; it is asked again until Redis answers.
+async fn exists_soon(client: &redissun::Client, name: String) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match client.bucket::<String>(name.clone()).exists().await {
+            Ok(exists) => return exists,
+            Err(error) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "redis does not answer after the batch: {error:?}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -1315,7 +1360,7 @@ mod cluster {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "differs from Redisson: the last batch of 100000 GETs fails with Error::Timeout. The client cannot tell when a pipeline is written, so the 100 ms response timeout still covers writing it, and a batch that gave up stays queued in the connection; needs a cluster in docker"]
+    #[ignore = "starts a redis cluster in docker; run with --ignored"]
     async fn connection_leak() {
         let topology = Topology::cluster().await;
         let client = Client::builder()

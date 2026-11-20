@@ -2,7 +2,7 @@ use super::synced_from;
 use crate::client::core::Core;
 use crate::error::{Error, Result};
 use crate::reply::{bytes, malformed};
-use fred::clients::{Client as RedisClient, Pipeline, WithOptions};
+use fred::clients::Client as RedisClient;
 use fred::error::ErrorKind;
 use fred::interfaces::{ClientLike, ClusterInterface, MetricsInterface};
 use fred::prelude::Options;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
 
 pub(super) type Complete = Box<dyn FnOnce(Result<Value>) + Send>;
 pub(super) type FredResult<T> = std::result::Result<T, fred::error::Error>;
@@ -31,9 +31,13 @@ pub(super) const MAX_REDIRECTIONS: usize = 5;
 /// How often the client is asked whether it has written a batch. A response timeout too short for this is checked at every turn of the runtime instead.
 const POLL: Duration = Duration::from_millis(1);
 
-/// How long a batch may wait: `write` until the connection has taken its commands and then `response` for the answers.
+/// How many commands a pipelined batch hands to its connection before it lets other tasks run.
+pub(super) const HANDED_AT_ONCE: usize = 1024;
+
+/// How long a batch may wait, as in Redisson: `wait` for a connection, `write` while the connection writes nothing of the batch, and `response` for the answers once the batch is written.
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
+    pub(super) wait: Duration,
     pub(super) write: Duration,
     pub(super) response: Duration,
 }
@@ -62,20 +66,25 @@ pub(super) fn hand_over(
     (sending, early)
 }
 
-pub(super) type SendingMany = Pin<Box<dyn Future<Output = Vec<FredResult<Value>>> + Send>>;
-
-/// Hands a pipeline to the connection at once and returns the future of its answers.
-pub(super) fn hand_over_pipeline(
-    pipeline: Pipeline<WithOptions<RedisClient>>,
-) -> (SendingMany, Option<Vec<FredResult<Value>>>) {
-    let mut sending: SendingMany = Box::pin(async move { pipeline.try_all::<Value>().await });
-    let early = sending.as_mut().now_or_never();
-    (sending, early)
-}
-
-/// Waits until the client has taken everything it was given: single commands are written then, a pipeline is being written.
-async fn written(client: &RedisClient, precise: bool) {
-    while client.command_queue_len() > 0 {
+/// Waits until the client has written everything it was given. Fails when the client writes nothing for `limit`.
+async fn written(
+    client: &RedisClient,
+    precise: bool,
+    limit: Duration,
+) -> std::result::Result<(), Failure> {
+    let mut last = usize::MAX;
+    let mut progress = std::time::Instant::now();
+    loop {
+        let queued = client.command_queue_len();
+        if queued == 0 {
+            return Ok(());
+        }
+        if queued < last {
+            progress = std::time::Instant::now();
+        } else if progress.elapsed() >= limit {
+            return Err(Failure::Timeout);
+        }
+        last = queued;
         if precise {
             tokio::task::yield_now().await;
         } else {
@@ -84,7 +93,7 @@ async fn written(client: &RedisClient, precise: bool) {
     }
 }
 
-/// Waits for the answers to commands that were handed to `client`. The response timeout starts when the client has taken everything it was given, so a batch is not timed while it waits to be sent.
+/// Waits for the answers to commands that were handed to `client`, a connection that only this batch uses. As in Redisson, the response timeout starts when the batch is written, so a big batch is not timed while it is being sent.
 pub(super) async fn answered<T>(
     client: &RedisClient,
     limits: Option<Limits>,
@@ -98,11 +107,7 @@ pub(super) async fn answered<T>(
     tokio::select! {
         biased;
         outcome = &mut work => return outcome,
-        sent = tokio::time::timeout(limits.write, written(client, precise)) => {
-            if sent.is_err() {
-                return Err(Failure::Timeout);
-            }
-        }
+        sent = written(client, precise, limits.write) => sent?,
     }
     tokio::time::timeout(limits.response, work)
         .await
@@ -206,16 +211,21 @@ pub(super) fn duplicate(error: &Error) -> Error {
     }
 }
 
+/// Whether a command failed because its connection did. fred 10 answers a command that has no connection to its node with the last of these.
 pub(super) fn transport(error: &fred::error::Error) -> bool {
-    use fred::error::ErrorKind;
-    matches!(
-        error.kind(),
-        ErrorKind::IO | ErrorKind::Timeout | ErrorKind::Canceled
-    )
+    match error.kind() {
+        ErrorKind::IO | ErrorKind::Timeout | ErrorKind::Canceled => true,
+        ErrorKind::Unknown => error.details() == "Failed to route command.",
+        _ => false,
+    }
 }
 
 pub(super) enum Failure {
     Fred(fred::error::Error),
+    /// No connection could be opened.
+    Connect(fred::error::Error),
+    /// No connection was free in time. As in Redisson, the wait takes the place of the pause before the next attempt.
+    Busy,
     Timeout,
     Other(Error),
 }
@@ -224,15 +234,15 @@ impl Failure {
     pub(super) fn retryable(&self) -> bool {
         match self {
             Failure::Fred(error) => transport(error),
-            Failure::Timeout => true,
+            Failure::Connect(_) | Failure::Busy | Failure::Timeout => true,
             Failure::Other(_) => false,
         }
     }
 
     pub(super) fn into_error(self) -> Error {
         match self {
-            Failure::Fred(error) => error.into(),
-            Failure::Timeout => Error::Timeout,
+            Failure::Fred(error) | Failure::Connect(error) => error.into(),
+            Failure::Busy | Failure::Timeout => Error::Timeout,
             Failure::Other(error) => error,
         }
     }
@@ -285,9 +295,36 @@ pub(super) struct Lease {
     pub(super) core: Arc<Core>,
     pub(super) client: RedisClient,
     pub(super) reusable: bool,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Lease {
+    /// Takes one of the `pool_size` connections that batches share, as a Redisson batch takes a connection from the pool: it waits while other batches use all of them and gives up after `wait`.
+    pub(super) async fn take_pooled(
+        core: &Arc<Core>,
+        limits: Option<Limits>,
+    ) -> std::result::Result<Self, Failure> {
+        // The wait for a free place and the opening of the connection have separate limits: a pause of a few milliseconds between attempts must not fail a connect, and a server that does not answer must not hold the batch longer than a write may take.
+        let waiting = core.batch_connections.clone().acquire_owned();
+        let permit = match limits {
+            Some(limits) => match tokio::time::timeout(limits.wait, waiting).await {
+                Ok(permit) => permit,
+                Err(_) => return Err(Failure::Busy),
+            },
+            None => waiting.await,
+        };
+        let permit = permit.map_err(|_| Failure::Other(malformed()))?;
+        let mut lease = match limits {
+            Some(limits) => match tokio::time::timeout(limits.write, Self::take(core)).await {
+                Ok(lease) => lease?,
+                Err(_) => return Err(Failure::Busy),
+            },
+            None => Self::take(core).await?,
+        };
+        lease.permit = Some(permit);
+        Ok(lease)
+    }
+
     pub(super) async fn take(core: &Arc<Core>) -> std::result::Result<Self, Failure> {
         loop {
             let idle = core
@@ -301,6 +338,7 @@ impl Lease {
                         core: core.clone(),
                         client,
                         reusable: false,
+                        permit: None,
                     })
                 }
                 Some(client) => {
@@ -314,7 +352,7 @@ impl Lease {
         let client = core.redis().clone_new();
         if let Err(error) = client.init().await {
             let _ = client.quit().await;
-            return Err(error.into());
+            return Err(Failure::Connect(error));
         }
         if let Err(error) = core.name(&client).await {
             let _ = client.quit().await;
@@ -324,6 +362,7 @@ impl Lease {
             core: core.clone(),
             client,
             reusable: false,
+            permit: None,
         })
     }
 }
@@ -375,15 +414,18 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) async fn begin(core: &Arc<Core>) -> std::result::Result<Self, Failure> {
-        let lease = Lease::take(core).await?;
+        Ok(Self::over(Lease::take(core).await?))
+    }
+
+    pub(super) fn over(lease: Lease) -> Self {
         let routing = routing(&lease.client);
-        Ok(Self {
+        Self {
             lease,
             routing,
             groups: Vec::new(),
             pending: Vec::new(),
             ops: 0,
-        })
+        }
     }
 
     pub(super) fn enqueue(
@@ -486,7 +528,7 @@ impl Session {
 }
 
 /// Whether Redis answered a command of a transaction with `MOVED` or `ASK`. The commands of a [`Session`] are sent once, and fred 10 then ends a command it would have to send again to another node with this error, after it has read the new slots.
-fn redirection(error: &fred::error::Error) -> bool {
+pub(super) fn redirection(error: &fred::error::Error) -> bool {
     match error.kind() {
         ErrorKind::Routing => true,
         ErrorKind::Unknown => error.details() == "Too many failed write attempts.",

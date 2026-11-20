@@ -142,7 +142,8 @@ async fn release_inner(
             ],
         ),
     };
-    let outcome: Option<i64> = synced_eval(key, script, keys, args, false).await?;
+    // The unlock latch makes the script safe to send again: a second run returns what the first one stored, as in Redisson.
+    let outcome: Option<i64> = synced_eval(key, script, keys, args, true).await?;
     let client = key.core.redis().clone();
     tokio::spawn(async move {
         let _: std::result::Result<i64, _> = client.del(latch).await;
