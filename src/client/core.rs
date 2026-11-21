@@ -42,6 +42,8 @@ pub(crate) struct Core {
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
     pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
+    /// The adders of this client by name, so that one name is one counter.
+    pub(crate) adders: crate::coordination::adder::Registry,
     /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
     pub(crate) batch_connections: Arc<tokio::sync::Semaphore>,
 }
@@ -76,6 +78,7 @@ impl Core {
             pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
             exclusive: std::sync::Mutex::new(Vec::new()),
+            adders: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
         });
         for client in core.pool.clients() {

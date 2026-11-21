@@ -1,0 +1,30 @@
+---
+title: IdGenerator
+description: Unique, growing ids.
+---
+
+An `IdGenerator` hands out `i64` ids that are unique across all programs.
+
+```rust
+let orders = client.id_generator("order-ids");
+orders.try_init(1000, 500).await?;
+
+let id = orders.next_id().await?;
+```
+
+## Methods
+
+| Method | What it does |
+|---|---|
+| `try_init(first, allocation_size)` | sets the first id and the block size, only if they are not set yet. Returns `true` if it set the block size. |
+| `next_id()` | returns the next id |
+
+Without `try_init` the ids start at 1 and a block holds 5000 ids.
+
+## How it works
+
+- The generator takes a block of ids from Redis with one Lua script and hands them out from memory. Most calls need no round trip.
+- Ids grow inside one program. Across programs they are unique, but not ordered by time.
+- A program that stops throws away the rest of its block, so there can be gaps.
+- The next free id is in the string `name` and the block size in `{name}:allocation`. `del`, `rename`, `expire` and `persist` cover both keys.
+- Clones of one generator share one block.

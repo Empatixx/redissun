@@ -1,6 +1,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod adder;
+mod atomic_f64;
 mod atomic_i64;
 mod bit_set;
 mod bucket;
@@ -11,6 +13,7 @@ mod geo;
 mod hash_map;
 mod hash_set;
 mod hyper_log_log;
+mod id_generator;
 mod multi_lock;
 mod script;
 mod sorted_set;

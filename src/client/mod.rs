@@ -14,6 +14,7 @@ use crate::collections::hash_map_cache::HashMapCache;
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
 use crate::collections::sorted_set::SortedSet;
+use crate::coordination::adder::{Adder, Summable};
 use crate::coordination::latch::CountDownLatch;
 use crate::coordination::rate_limiter::RateLimiter;
 use crate::coordination::semaphore::Semaphore;
@@ -28,12 +29,14 @@ use crate::messaging::stream::Stream;
 use crate::messaging::topic::{PatternTopic, Topic};
 use crate::object::{tagged, Key};
 use crate::script::{Function, Script};
+use crate::values::atomic_f64::AtomicF64;
 use crate::values::atomic_i64::AtomicI64;
 use crate::values::bit_set::BitSet;
 use crate::values::bloom_filter::BloomFilter;
 use crate::values::bucket::Bucket;
 use crate::values::geo::Geo;
 use crate::values::hyper_log_log::HyperLogLog;
+use crate::values::id_generator::IdGenerator;
 use std::fmt;
 use std::sync::Arc;
 
@@ -93,6 +96,21 @@ impl<C: Codec> Client<C> {
     /// Returns the [`AtomicI64`] stored under `name`.
     pub fn atomic_i64(&self, name: impl Into<Arc<str>>) -> AtomicI64 {
         AtomicI64::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`AtomicF64`] stored under `name`.
+    pub fn atomic_f64(&self, name: impl Into<Arc<str>>) -> AtomicF64 {
+        AtomicF64::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`IdGenerator`] stored under `name`.
+    pub fn id_generator(&self, name: impl Into<Arc<str>>) -> IdGenerator {
+        IdGenerator::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Joins the [`Adder`] named `name`: `client.adder::<i64>("hits").await?`. Every adder of one name in this client is the same counter.
+    pub async fn adder<N: Summable>(&self, name: impl Into<Arc<str>>) -> Result<Adder<N>> {
+        Adder::open(Key::new(self.core.clone(), name)).await
     }
 
     /// Returns the [`BitSet`] stored under `name`.

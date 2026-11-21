@@ -33,6 +33,9 @@ description: How Redisson names and behaviour map to redissun.
 | `RStream` | `Stream` |
 | `RGeo` | `Geo` |
 | `RAtomicLong` | `AtomicI64` |
+| `RAtomicDouble` | `AtomicF64` |
+| `RLongAdder`, `RDoubleAdder` | `Adder<i64>`, `Adder<f64>` (`client.adder::<i64>("x").await?`); `destroy()` is dropping it |
+| `RIdGenerator` | `IdGenerator` |
 | `RSemaphore` | `Semaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
