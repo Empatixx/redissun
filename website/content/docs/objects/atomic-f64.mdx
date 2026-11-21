@@ -1,0 +1,35 @@
+---
+title: AtomicF64
+description: A shared decimal number.
+---
+
+An `AtomicF64` is an `f64` in a Redis string. A missing number reads as 0.
+
+```rust
+let total = client.atomic_f64("total");
+
+total.add_and_get(2.5).await?;
+let now = total.get().await?;
+```
+
+## Methods
+
+Every method is `async` and returns `redissun::Result<T>`. The **Returns** column shows `T`.
+
+| Method | Redis command | Returns |
+|---|---|---|
+| `get()` | `GET` | the value, 0 if missing |
+| `set(v)` | `SET` | `()` |
+| `get_and_set(v)` | `GETSET` | the old value |
+| `get_and_delete()` | Lua script | the old value |
+| `compare_and_set(expected, update)` | Lua script | `true` if the value was changed |
+| `compare_and_delete(comparison, threshold)` | Lua script | `true` if the number was deleted |
+| `set_if_less(less, v)` and `set_if_greater(greater, v)` | Lua script | `true` if the value was changed |
+| `add_and_get(delta)` | `INCRBYFLOAT` | the new value |
+| `get_and_add(delta)` | `INCRBYFLOAT` | the value before |
+| `incr()` and `decr()` | `INCRBYFLOAT` | the new value |
+| `get_and_incr()` and `get_and_decr()` | `INCRBYFLOAT` | the value before |
+
+`compare_and_set` treats a missing number as 0, like Redisson.
+
+The value is stored as a plain number, not through the codec. Redis refuses `NaN` and infinity, so those calls return an error.

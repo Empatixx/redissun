@@ -31,6 +31,9 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `Stream` | stream | `RStream` |
 | `Geo` | sorted set | `RGeo` |
 | `AtomicI64` | string | `RAtomicLong` |
+| `AtomicF64` | string | `RAtomicDouble` |
+| `Adder` | local memory, pub/sub | `RLongAdder`, `RDoubleAdder` |
+| `IdGenerator` | strings | `RIdGenerator` |
 | `Semaphore` | string and pub/sub | `RSemaphore` |
 | `CountDownLatch` | string and pub/sub | `RCountDownLatch` |
 | `RateLimiter` | hash, string and sorted set | `RRateLimiter` |

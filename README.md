@@ -79,6 +79,9 @@ async fn main() -> redissun::Result<()> {
 | [`Stream`](https://empatixx.github.io/redissun/docs/objects/stream) | stream | stable |
 | [`Geo`](https://empatixx.github.io/redissun/docs/objects/geo) | sorted set | stable |
 | [`AtomicI64`](https://empatixx.github.io/redissun/docs/objects/atomic-i64) | string | stable |
+| [`AtomicF64`](https://empatixx.github.io/redissun/docs/objects/atomic-f64) | string | experimental |
+| [`Adder`](https://empatixx.github.io/redissun/docs/objects/adder) | local memory and pub/sub | experimental |
+| [`IdGenerator`](https://empatixx.github.io/redissun/docs/objects/id-generator) | strings | experimental |
 | [`Semaphore`](https://empatixx.github.io/redissun/docs/objects/semaphore) | string and pub/sub | stable |
 | [`CountDownLatch`](https://empatixx.github.io/redissun/docs/objects/count-down-latch) | string and pub/sub | stable |
 | [`RateLimiter`](https://empatixx.github.io/redissun/docs/objects/rate-limiter) | hash, string and sorted set | stable |

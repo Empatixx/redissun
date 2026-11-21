@@ -17,7 +17,7 @@ static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "local current = redis.call('GET', KEYS[1])
         if current == false then
@@ -42,7 +42,7 @@ static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static GET_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static GET_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "local current = redis.call('GET', KEYS[1])
         redis.call('DEL', KEYS[1])
@@ -50,7 +50,7 @@ static GET_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "local current = redis.call('GET', KEYS[1])
         current = current == false and 0 or tonumber(current)
@@ -62,7 +62,7 @@ static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET_IF_GREATER: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static SET_IF_GREATER: LazyLock<Script> = LazyLock::new(|| {
     Script::from_lua(
         "local current = redis.call('GET', KEYS[1])
         current = current == false and 0 or tonumber(current)
@@ -74,7 +74,7 @@ static SET_IF_GREATER: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-/// How [`AtomicI64::compare_and_delete`] compares the stored value with the threshold.
+/// How `compare_and_delete` of [`AtomicI64`] and [`AtomicF64`](crate::AtomicF64) compares the stored value with the threshold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Comparison {
@@ -93,7 +93,7 @@ pub enum Comparison {
 }
 
 impl Comparison {
-    fn operator(self) -> &'static str {
+    pub(crate) fn operator(self) -> &'static str {
         match self {
             Comparison::Less => "<",
             Comparison::LessOrEqual => "<=",

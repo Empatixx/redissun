@@ -1,0 +1,41 @@
+---
+title: Adder
+description: A counter that is cheap to add to.
+---
+
+An `Adder` counts in the memory of each program. Adding never talks to Redis. Reading the total asks every program for its number.
+
+Use it when you add often and read rarely. `Adder<i64>` is Redisson's `RLongAdder` and `Adder<f64>` is its `RDoubleAdder`.
+
+```rust
+let hits = client.adder::<i64>("hits").await?;
+
+hits.incr();
+hits.add(10);
+
+let total = hits.sum().await?;
+```
+
+## Methods
+
+| Method | What it does |
+|---|---|
+| `add(n)` | adds `n` to this program's number. No round trip. |
+| `incr()` and `decr()` | add 1 and subtract 1 |
+| `sum()` | adds up the numbers of every program |
+| `reset()` | sets the number of every program to 0 |
+| `name()` | the name of the adder |
+
+`sum()` waits at most 60 seconds for every program to answer and then fails with a timeout error, like Redisson. `reset()` waits without a limit. Add `.timeout(wait)` to either to set the limit yourself; the call then gives `None` when the time runs out.
+
+```rust
+let total = hits.sum().timeout(Duration::from_secs(5)).await?;
+```
+
+## How it works
+
+- Each client listens on the channel `redissun_adder:{name}`.
+- `sum()` publishes a request. Every client adds its number to a temporary key and confirms through a temporary semaphore. Both are deleted when the call ends.
+- Every adder of one name in one client is the same counter.
+- Dropping the last adder of a name leaves the group. The number it counted is gone.
+- One name counts one number type. Asking for `adder::<f64>` under a name that already counts `i64` in the same client is an error.
