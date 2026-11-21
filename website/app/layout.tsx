@@ -9,10 +9,10 @@ const inter = Inter({ subsets: ['latin'] })
 export const metadata: Metadata = {
   title: {
     template: '%s | redissun',
-    default: 'redissun — distributed objects on Redis for Rust',
+    default: "redissun — Rust's std collections and locks, shared through Redis",
   },
   description:
-    'Redisson-inspired distributed objects on Redis for Rust: maps, queues, locks, caches, streams and more, on tokio and serde.',
+    "Rust's std collections and locks, shared through Redis. Inspired by Redisson: maps, queues, locks, caches and streams on tokio and serde.",
   openGraph: {
     images: ['https://empatixx.github.io/redissun/logo.png'],
   },

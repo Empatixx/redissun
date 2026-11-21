@@ -1,4 +1,4 @@
-//! Distributed objects on Redis, inspired by Redisson.
+//! Rust's std collections and locks, shared through Redis. Inspired by Redisson.
 //!
 //! ```no_run
 //! use redissun::Client;

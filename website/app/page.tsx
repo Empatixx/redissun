@@ -109,8 +109,8 @@ export default function Home() {
           <Logo className="size-40 drop-shadow-md" />
           <h1 className="text-5xl font-bold tracking-tight sm:text-6xl">redissun</h1>
           <p className="max-w-2xl text-lg text-fd-muted-foreground">
-            Distributed objects on Redis for Rust, closely inspired by Redisson: maps, queues,
-            locks, caches, streams and more, as ordinary async Rust types.
+            Rust&apos;s std collections and locks, shared through Redis. Inspired by Redisson: maps,
+            queues, locks, caches and streams as ordinary async Rust types.
           </p>
           <div className="flex flex-wrap justify-center gap-2">
             <Badge href="https://crates.io/crates/redissun" alt="crates.io" src="https://img.shields.io/crates/v/redissun?color=c2461f" />
