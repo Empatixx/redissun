@@ -15,6 +15,7 @@ mod hash_set;
 mod hyper_log_log;
 mod id_generator;
 mod multi_lock;
+mod pinned_version;
 mod script;
 mod sorted_set;
 mod sorted_set_blocking;

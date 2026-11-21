@@ -4,14 +4,14 @@
 
 # redissun
 
-Shared objects on Redis for Rust. It is inspired by [Redisson](https://github.com/redisson/redisson).
+Rust's std collections and locks, shared through Redis. Inspired by [Redisson](https://github.com/redisson/redisson).
 
 [![CI](https://github.com/Empatixx/redissun/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redissun/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/redissun.svg)](https://crates.io/crates/redissun)
 [![docs.rs](https://img.shields.io/docsrs/redissun)](https://docs.rs/redissun)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-With redissun you use a `HashMap`, a `Bucket` or a `Lock` in your code. The data lives in Redis, so every program that uses the same name sees the same object. It works with tokio, and it is easy to use.
+With redissun you use a `HashMap`, a `VecDeque` or a `Lock` in your code, with the names and methods you know from `std`. The data lives in Redis, so every program that uses the same name sees the same object. Every call is async on tokio.
 
 ## Install
 
@@ -25,7 +25,7 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = "0.17"
+redissun = "0.19"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -110,8 +110,6 @@ redissun runs the same operations as hand-written code on [redis-rs](https://cra
 Median of three runs on an Apple M5 Pro with Redis 8.10 on the same machine, which was not idle. How it was measured, what the hand-written code does, and how to run it yourself: [Benchmarks](https://empatixx.github.io/redissun/docs/guides/benchmarks).
 
 ## Documentation
-
-Everything else lives in the guides, so this page stays short.
 
 - [Getting started](https://empatixx.github.io/redissun/docs/getting-started/quick-start) and [one page per object](https://empatixx.github.io/redissun/docs)
 - [Configuration](https://empatixx.github.io/redissun/docs/guides/configuration): every setting and its default, Redisson's names, TLS, Sentinel and Cluster
