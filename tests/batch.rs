@@ -1535,7 +1535,8 @@ mod cluster {
                 }
             }));
         }
-        tokio::time::timeout(Duration::from_secs(14), async {
+        // Redisson waits 14 seconds, but here the other tests of this file run at the same time on a debug build and a slow machine needs longer. A leaked connection never finishes, so a longer limit still catches it.
+        tokio::time::timeout(Duration::from_secs(60), async {
             for task in tasks {
                 task.await.unwrap();
             }
