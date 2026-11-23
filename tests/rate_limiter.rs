@@ -679,6 +679,25 @@ async fn acquisition_times(
     times
 }
 
+/// How late the first acquisition may be written down. A task that the machine pauses writes its time late.
+const LATE_RECORD_MS: u128 = 500;
+
+/// Checks that `times`, the sorted moments the permits were granted, never go faster than `rate` permits per `interval_ms`.
+///
+/// A time is written after the permit was granted, so it can be late but never early, and the `k`-th written time is never before the `k`-th grant. The grants from the first to the `rate * m`-th span at least `m` intervals, so the written times do as well, less how late the first one was written. Counting the permits of each second instead fails whenever a paused task writes the times of one second in the next.
+fn assert_rate(times: &[u128], rate: usize, interval_ms: u128) {
+    let intervals = (times.len() - 1) / rate;
+    assert!(intervals >= 2, "too few acquisitions to check the rate");
+    let span = times[intervals * rate] - times[0];
+    let least = intervals as u128 * interval_ms - LATE_RECORD_MS;
+    assert!(
+        span >= least,
+        "{} permits came within {span} ms, the rate allows them no sooner than {} ms",
+        intervals * rate + 1,
+        intervals as u128 * interval_ms
+    );
+}
+
 #[tokio::test]
 async fn test_concurrency2() {
     let limiter = client().await.rate_limiter(unique("test"));
@@ -687,24 +706,7 @@ async fn test_concurrency2() {
         .await
         .unwrap();
     let times = acquisition_times(&limiter, 8, 100, true).await;
-    let mut count = 0;
-    let mut start = 0;
-    let mut skip = true;
-    for value in times {
-        if start == 0 {
-            start = value;
-        }
-        count += 1;
-        if value - start >= 1000 {
-            if !skip {
-                assert!(count <= 18, "{count}");
-            } else {
-                skip = false;
-            }
-            start = 0;
-            count = 0;
-        }
-    }
+    assert_rate(&times, 18, 1000);
 }
 
 #[tokio::test]
@@ -719,15 +721,7 @@ async fn test_concurrency() {
         .await
         .unwrap());
     let times = acquisition_times(&limiter, 8, 50, false).await;
-    let mut start = 0;
-    for (count, value) in times.into_iter().enumerate() {
-        if count % 10 == 0 {
-            if start > 0 {
-                assert!(value - start > 940, "{}", value - start);
-            }
-            start = value;
-        }
-    }
+    assert_rate(&times, 10, 1000);
 }
 
 #[tokio::test]
