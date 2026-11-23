@@ -45,8 +45,10 @@ pub(crate) enum Subscription {
 /// Why a command did not get its reply.
 #[derive(Debug)]
 pub(crate) enum Failure {
-    /// The connection failed or could not be opened; the command may be sent again.
+    /// The connection failed while the command was out; it may have run, so only a command that may run twice is sent again.
     Connection(String),
+    /// The connection could not be opened, or was closed before the command was written: Redis never saw it, so even a command sent once may go again.
+    Unsent(String),
     /// Redis Cluster answered `MOVED` (`ask: false`) or `ASK` (`ask: true`): the slot is served by `address`.
     Redirect { ask: bool, address: Address },
     /// Redis answered with an error, or something else went wrong; sending it again does not help.
@@ -56,7 +58,7 @@ pub(crate) enum Failure {
 impl From<Failure> for Error {
     fn from(failure: Failure) -> Self {
         match failure {
-            Failure::Connection(message) => Error::Redis(message),
+            Failure::Connection(message) | Failure::Unsent(message) => Error::Redis(message),
             Failure::Redirect { ask, address } => Error::Redis(format!(
                 "{} to {address} not followed",
                 if ask { "ASK" } else { "MOVED" }
@@ -67,7 +69,12 @@ impl From<Failure> for Error {
 }
 
 pub(crate) fn is_connection_failure(failure: &Failure) -> bool {
-    matches!(failure, Failure::Connection(_))
+    matches!(failure, Failure::Connection(_) | Failure::Unsent(_))
+}
+
+/// Whether the command never reached Redis: the connection was refused. redis-rs reports a write on a closed socket and a reply lost on a closed one alike (`broken pipe`), so neither counts.
+fn never_sent(error: &redis::RedisError) -> bool {
+    error.is_connection_refusal()
 }
 
 /// `host:port` as Redis writes it in `MOVED`, `ASK` and `CLUSTER SLOTS`; the last colon separates the port, so an IPv6 host keeps its own.
@@ -101,7 +108,9 @@ fn failure(error: redis::RedisError) -> Failure {
             return Failure::Redirect { ask, address };
         }
     }
-    if error.is_io_error() || error.is_connection_dropped() || error.is_connection_refusal() {
+    if never_sent(&error) {
+        Failure::Unsent(error.to_string())
+    } else if error.is_io_error() || error.is_connection_dropped() {
         Failure::Connection(error.to_string())
     } else {
         Failure::Other(Error::Redis(error.to_string()))
@@ -186,7 +195,11 @@ impl Node {
             Err(error) => {
                 state.failures = state.failures.saturating_add(1);
                 state.failed_at = Some(Instant::now());
-                Err(error)
+                // Opening failed before the caller's command was written, so Redis never saw it.
+                Err(match error {
+                    Failure::Connection(message) => Failure::Unsent(message),
+                    other => other,
+                })
             }
         }
     }
@@ -198,7 +211,7 @@ impl Node {
         let settings = &self.settings;
         let stream = connect(&self.address, &settings.stream)
             .await
-            .map_err(|error| Failure::Connection(error.to_string()))?;
+            .map_err(|error| Failure::Unsent(error.to_string()))?;
         let credentials = match &settings.credentials {
             NodeCredentials::None => Credentials::default(),
             NodeCredentials::Fixed(credentials) => credentials.clone(),
@@ -230,21 +243,20 @@ impl Node {
                 .await
                 .map_err(failure)?;
         let driver = tokio::spawn(driver);
+        // An error reply (`BUSY` while a script runs) fails the opening, so no connection is kept without its name.
+        let mut setup = async |cmd: redis::Cmd| match connection.send_packed_command(&cmd).await {
+            Ok(redis::Value::ServerError(error)) => Err(server_failure(error)),
+            Ok(value) => Ok(value),
+            Err(error) => Err(failure(error)),
+        };
         if let Some(name) = &settings.client_name {
             let mut cmd = redis::cmd("CLIENT");
             cmd.arg("SETNAME").arg(name);
-            connection
-                .send_packed_command(&cmd)
-                .await
-                .map_err(failure)?;
+            setup(cmd).await?;
         }
         let mut cmd = redis::cmd("CLIENT");
         cmd.arg("ID");
-        let id = match connection
-            .send_packed_command(&cmd)
-            .await
-            .map_err(failure)?
-        {
+        let id = match setup(cmd).await? {
             redis::Value::Int(id) => id,
             _ => 0,
         };
@@ -352,6 +364,33 @@ mod tests {
     use testcontainers::ContainerAsync;
     use testcontainers::ImageExt;
     use testcontainers_modules::redis::Redis;
+
+    #[test]
+    fn a_refused_connection_never_reached_redis() {
+        let error =
+            redis::RedisError::from(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(matches!(super::failure(error), super::Failure::Unsent(_)));
+    }
+
+    #[test]
+    fn a_closed_connection_may_have_run_the_command() {
+        // redis-rs answers every command in flight on a closed connection with this.
+        let error = redis::RedisError::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(matches!(
+            super::failure(error),
+            super::Failure::Connection(_)
+        ));
+    }
+
+    #[test]
+    fn a_reset_connection_may_have_run_the_command() {
+        let error =
+            redis::RedisError::from(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(matches!(
+            super::failure(error),
+            super::Failure::Connection(_)
+        ));
+    }
 
     async fn redis() -> (ContainerAsync<Redis>, Address) {
         let container = Redis::default().with_tag("7.4").start().await.unwrap();
@@ -478,6 +517,24 @@ mod tests {
         }
         assert!(reconnected, "the node never reconnected");
         assert_eq!(names(&admin).await, vec!["named-node".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_connection_closed_while_it_opens_leaves_the_command_unsent() {
+        // A server that accepts and hangs up, as an old master does during a failover.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        let node = Node::new(
+            Address::new("127.0.0.1", port),
+            Arc::new(settings(Some("worker"), NodeCredentials::None)),
+        );
+        let sent = node.send(&command("INCR", &["counter"])).await;
+        assert!(matches!(sent, Err(super::Failure::Unsent(_))), "{sent:?}");
     }
 
     #[tokio::test]

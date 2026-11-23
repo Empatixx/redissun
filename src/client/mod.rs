@@ -1,7 +1,6 @@
 pub(crate) mod config;
 pub(crate) mod core;
 pub(crate) mod credentials;
-pub(crate) mod fred_adapter;
 pub(crate) mod request;
 pub(crate) mod retry;
 pub(crate) mod slot;

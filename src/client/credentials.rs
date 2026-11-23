@@ -1,6 +1,4 @@
 use crate::error::Result;
-use fred::error::{Error as FredError, ErrorKind};
-use fred::types::config::{CredentialProvider, Server};
 use futures::future::BoxFuture;
 use std::fmt;
 use std::future::Future;
@@ -68,23 +66,5 @@ impl fmt::Debug for Resolver {
         f.debug_struct("Resolver")
             .field("refresh", &self.refresh)
             .finish_non_exhaustive()
-    }
-}
-
-#[async_trait::async_trait]
-impl CredentialProvider for Resolver {
-    async fn fetch(
-        &self,
-        server: Option<&Server>,
-    ) -> std::result::Result<(Option<String>, Option<String>), FredError> {
-        let address = server.map(|server| server.to_string()).unwrap_or_default();
-        let credentials = (self.resolve)(address)
-            .await
-            .map_err(|error| FredError::new(ErrorKind::Auth, error.to_string()))?;
-        Ok((credentials.username, credentials.password))
-    }
-
-    fn refresh_interval(&self) -> Option<Duration> {
-        self.refresh
     }
 }

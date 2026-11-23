@@ -48,12 +48,6 @@ impl From<redis::ParsingError> for Error {
     }
 }
 
-impl From<fred::error::Error> for Error {
-    fn from(error: fred::error::Error) -> Self {
-        Error::Redis(error.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

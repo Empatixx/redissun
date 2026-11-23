@@ -147,7 +147,9 @@ impl Failure {
 impl From<NodeFailure> for Failure {
     fn from(failure: NodeFailure) -> Self {
         match failure {
-            NodeFailure::Connection(message) => Failure::Failed(Error::Redis(message)),
+            NodeFailure::Connection(message) | NodeFailure::Unsent(message) => {
+                Failure::Failed(Error::Redis(message))
+            }
             other => Failure::Other(other.into()),
         }
     }
@@ -435,7 +437,7 @@ impl Session {
                 Ok(values) => groups_replies.push(values),
                 Err(failure) => {
                     // A lost connection after a failover: the next attempt goes to the node that serves the slots now.
-                    if matches!(failure, NodeFailure::Connection(_)) {
+                    if crate::net::node::is_connection_failure(&failure) {
                         self.lease.core.topology().refresh().await;
                     }
                     return Err(failure.into());

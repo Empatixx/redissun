@@ -1,5 +1,4 @@
 use crate::error::{Error, Result};
-use fred::types::config::{TlsConfig, TlsConnector, TlsHostMapping};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
@@ -51,14 +50,6 @@ impl TlsSettings {
         self.verification == TlsVerification::Strict
             && self.ca.is_none()
             && self.client_auth.is_none()
-    }
-
-    /// fred's TLS settings, made from [`client_config`](TlsSettings::client_config); goes with fred.
-    pub(crate) fn config(&self) -> Result<TlsConfig> {
-        Ok(TlsConfig {
-            connector: TlsConnector::from(Arc::unwrap_or_clone(self.client_config()?)),
-            hostnames: TlsHostMapping::None,
-        })
     }
 
     /// The rustls configuration of every TLS connection of the client.

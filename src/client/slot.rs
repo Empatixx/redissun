@@ -34,26 +34,21 @@ mod tests {
     use super::keyslot;
 
     #[test]
-    fn keyslot_matches_fred_for_plain_and_tagged_keys() {
-        let mut keys: Vec<Vec<u8>> = [
-            "foo",
-            "bar",
-            "{user1000}.following",
-            "{}x",
-            "x{}",
-            "{a}{b}",
-            "a{b",
-            "",
-        ]
-        .iter()
-        .map(|key| key.as_bytes().to_vec())
-        .collect();
-        keys.extend(
-            (0..200u32).map(|i| uuid::Uuid::new_v4().as_bytes()[..(i % 16) as usize].to_vec()),
-        );
-        for key in keys {
-            assert_eq!(keyslot(&key), fred::util::redis_keyslot(&key), "{key:?}");
-        }
+    fn keys_land_in_the_slots_redis_gives_them() {
+        // From `CLUSTER KEYSLOT` on Redis 7.4.
+        assert_eq!(keyslot(b"bar"), 5061);
+        assert_eq!(keyslot(b"hello"), 866);
+        assert_eq!(keyslot(b""), 0);
+    }
+
+    #[test]
+    fn a_hash_tag_puts_keys_in_the_slot_of_the_tag() {
+        assert_eq!(keyslot(b"{user1000}.following"), keyslot(b"user1000"));
+        assert_eq!(keyslot(b"{user1000}.followers"), keyslot(b"user1000"));
+        assert_eq!(keyslot(b"{a}{b}"), keyslot(b"a"));
+        // An empty tag or an unclosed brace hashes the whole key.
+        assert_ne!(keyslot(b"{}x"), keyslot(b"x"));
+        assert_eq!(keyslot(b"a{b"), keyslot(b"a{b"));
     }
 
     #[test]

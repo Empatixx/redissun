@@ -2,7 +2,7 @@
 
 use crate::client::slot::keyslot;
 use crate::error::Error;
-use crate::net::node::{Failure, Node, NodeSettings};
+use crate::net::node::{is_connection_failure, Failure, Node, NodeSettings};
 use crate::net::stream::Address;
 use redis::Value;
 use std::collections::HashMap;
@@ -127,10 +127,6 @@ impl Pool {
         self.nodes[index].clone()
     }
 
-    pub(crate) fn nodes(&self) -> &[Arc<Node>] {
-        &self.nodes
-    }
-
     pub(crate) fn address(&self) -> &Address {
         self.nodes[0].address()
     }
@@ -178,13 +174,22 @@ impl Topology {
         }
     }
 
-    /// The address of every master: the one server, Sentinel's master, or every master of a cluster.
-    pub(crate) async fn masters(&self) -> Result<Vec<Address>, Failure> {
-        match self {
-            Topology::Single(pool) => Ok(vec![pool.address().clone()]),
-            Topology::Sentinel(sentinel) => Ok(vec![sentinel.pool().await?.address().clone()]),
-            Topology::Cluster(cluster) => Ok(cluster.map().masters()),
+    /// Sends `cmd` to every master and returns their replies in order; the first failure ends it.
+    pub(crate) async fn send_to_masters(&self, cmd: &redis::Cmd) -> Result<Vec<Value>, Failure> {
+        let pools: Vec<Arc<Pool>> = match self {
+            Topology::Single(_) | Topology::Sentinel(_) => vec![self.pool_for(None).await?],
+            Topology::Cluster(cluster) => cluster
+                .map()
+                .masters()
+                .iter()
+                .map(|master| cluster.open_pool(master))
+                .collect(),
+        };
+        let mut replies = Vec::with_capacity(pools.len());
+        for pool in pools {
+            replies.push(pool.next().send(cmd).await?);
         }
+        Ok(replies)
     }
 
     /// The settings every node of this client connects with.
@@ -205,10 +210,6 @@ impl Topology {
         }
     }
 
-    pub(crate) fn is_cluster(&self) -> bool {
-        matches!(self, Topology::Cluster(_))
-    }
-
     /// The slot map of a cluster, `None` otherwise.
     pub(crate) fn slot_map(&self) -> Option<SlotMap> {
         match self {
@@ -221,7 +222,7 @@ impl Topology {
 /// Answers whether a failure says the master moved, after a Sentinel failover.
 fn master_moved(failure: &Failure) -> bool {
     match failure {
-        Failure::Connection(_) => true,
+        Failure::Connection(_) | Failure::Unsent(_) => true,
         Failure::Other(Error::Redis(message)) => message.contains("READONLY"),
         _ => false,
     }
@@ -467,9 +468,9 @@ impl Cluster {
                     asking = ask;
                     pool = self.pool(&address);
                 }
-                Err(Failure::Connection(message)) => {
+                Err(failure) if is_connection_failure(&failure) => {
                     let _ = self.refresh().await;
-                    return Err(Failure::Connection(message));
+                    return Err(failure);
                 }
                 other => return other,
             }

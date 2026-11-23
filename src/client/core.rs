@@ -6,9 +6,6 @@ use crate::net::node::{Failure, Node};
 use crate::net::topology::Topology;
 use crate::pubsub::PubSub;
 use bytes::Bytes;
-use fred::clients::{Client as RedisClient, Pool, WithOptions};
-use fred::interfaces::{ClientInterface, ClientLike, ClusterInterface, EventInterface};
-use fred::prelude::{Builder, Options};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -27,22 +24,17 @@ pub(crate) struct Startup {
     pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) retry: Retry,
     pub(crate) ping_interval: Duration,
-    pub(crate) client_name: Option<String>,
 }
 
 pub(crate) struct Core {
     /// The servers and the connections to them; every command of `query` goes through it.
     topology: Arc<Topology>,
-    pool: Pool,
-    /// Builds the connections that only redissun uses: a batch's, the pub/sub one and those of blocking calls. They have no `command_queue_limit`, because a batch and a resubscription hand many commands over at once and a limit would fail part of them. They have no `unresponsive_timeout` either, because a blocking read or a `WAIT` for replicas waits for its reply on purpose.
-    own_connections: Builder,
     id: String,
     pub(crate) lock_lease: Duration,
     pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) eviction_interval: Duration,
     pub(crate) retry: Retry,
     pub(crate) read_only_scripts: std::sync::atomic::AtomicBool,
-    client_name: Option<String>,
     background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
@@ -57,7 +49,6 @@ pub(crate) struct Core {
 
 impl Core {
     pub(crate) async fn connect(
-        builder: Builder,
         topology: Topology,
         check_slots_coverage: bool,
         startup: Startup,
@@ -72,37 +63,14 @@ impl Core {
             Ok(opened) => opened?,
             Err(_) => return Err(Error::Timeout),
         }
-        let pool = builder
-            .build_pool(startup.pool_size)
-            .map_err(|e| Error::Config(e.to_string()))?;
-        let mut own_connections = builder.clone();
-        own_connections.with_connection_config(|connection| {
-            connection.max_command_buffer_len = 0;
-            connection.unresponsive.max_timeout = None;
-        });
-        match tokio::time::timeout(startup.connect_timeout, pool.init()).await {
-            Ok(connected) => {
-                connected?;
-            }
-            Err(_) => {
-                let abandoned = pool.clone();
-                tokio::spawn(async move {
-                    let _ = abandoned.quit().await;
-                });
-                return Err(Error::Timeout);
-            }
-        }
         let core = Arc::new(Self {
             topology,
-            pool,
-            own_connections,
             id: Uuid::new_v4().to_string(),
             lock_lease: startup.lock_lease,
             lock_settings: startup.lock_settings,
             eviction_interval: startup.eviction_interval,
             retry: startup.retry,
             read_only_scripts: std::sync::atomic::AtomicBool::new(true),
-            client_name: startup.client_name,
             background: std::sync::Mutex::new(Vec::new()),
             pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -110,9 +78,6 @@ impl Core {
             adders: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
         });
-        for client in core.pool.clients() {
-            core.keep_named(client).await?;
-        }
         if !startup.ping_interval.is_zero() {
             let ping = tokio::spawn(ping_loop(Arc::downgrade(&core), startup.ping_interval));
             core.spawned(ping);
@@ -127,36 +92,6 @@ impl Core {
             .push(handle);
     }
 
-    pub(crate) async fn name(&self, client: &RedisClient) -> Result<()> {
-        if let Some(name) = &self.client_name {
-            set_name(client, name, None).await?;
-        }
-        Ok(())
-    }
-
-    async fn keep_named(&self, client: &RedisClient) -> Result<()> {
-        let Some(name) = self.client_name.clone() else {
-            return Ok(());
-        };
-        set_name(client, &name, None).await?;
-        let mut reconnected = client.reconnect_rx();
-        let watched = client.clone();
-        self.spawned(tokio::spawn(async move {
-            loop {
-                match reconnected.recv().await {
-                    Ok(server) => {
-                        let _ = set_name(&watched, &name, Some(server)).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = set_name(&watched, &name, None).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                }
-            }
-        }));
-        Ok(())
-    }
-
     pub(crate) async fn pubsub(&self) -> Result<&Arc<PubSub>> {
         self.pubsub
             .get_or_try_init(|| async { PubSub::start(self.topology.clone()).await })
@@ -165,13 +100,6 @@ impl Core {
 
     pub(crate) fn pubsub_started(&self) -> Option<&Arc<PubSub>> {
         self.pubsub.get()
-    }
-
-    /// A new client, not connected yet, for a connection that only redissun uses. See `own_connections`.
-    pub(crate) fn own_connection(&self) -> Result<RedisClient> {
-        self.own_connections
-            .build()
-            .map_err(|e| Error::Config(e.to_string()))
     }
 
     /// Sends `request` and reads the reply as `T`. Every command outside the connection layer, pub/sub and the batch engine goes through here.
@@ -184,11 +112,8 @@ impl Core {
     ///
     /// A command whose connection failed is sent again up to `retry_attempts` times, unless the request is `once`; each attempt waits for the reconnection delay of its node. The `timeout` limits the whole call; zero waits forever.
     pub(crate) async fn query_value(&self, request: Request) -> Result<redis::Value> {
-        let attempts = if request.is_once() {
-            0
-        } else {
-            self.retry.attempts
-        };
+        let once = request.is_once();
+        let attempts = self.retry.attempts;
         let send = async {
             let mut attempt = 0;
             loop {
@@ -197,7 +122,9 @@ impl Core {
                     .send(request.cmd(), request.routing_key())
                     .await
                 {
-                    Err(Failure::Connection(_)) if attempt < attempts => attempt += 1,
+                    // A command sent once goes again only when Redis never saw it.
+                    Err(Failure::Unsent(_)) if attempt < attempts => attempt += 1,
+                    Err(Failure::Connection(_)) if !once && attempt < attempts => attempt += 1,
                     result => return result.map_err(Error::from),
                 }
             }
@@ -212,10 +139,6 @@ impl Core {
 
     pub(crate) fn topology(&self) -> &Arc<Topology> {
         &self.topology
-    }
-
-    pub(crate) fn redis(&self) -> &RedisClient {
-        self.pool.next()
     }
 
     /// Sends a blocking command (`BLPOP`, `BZMPOP`, `XREAD BLOCK`…) once, without the command timeout, on a connection of its own to the master that serves `key`, as Redisson does. When the caller stops waiting, the connection is killed with `CLIENT KILL ID`, so the command takes nothing after that.
@@ -312,30 +235,6 @@ impl Core {
     }
 }
 
-async fn set_name(
-    client: &RedisClient,
-    name: &str,
-    server: Option<fred::types::config::Server>,
-) -> Result<()> {
-    if !client.is_clustered() {
-        return Ok(client.client_setname(name.to_string()).await?);
-    }
-    let servers = match server {
-        Some(server) => vec![server],
-        None => client
-            .cached_cluster_state()
-            .map(|state| state.unique_primary_nodes())
-            .unwrap_or_default(),
-    };
-    for server in servers {
-        client
-            .with_cluster_node(server)
-            .client_setname(name.to_string())
-            .await?;
-    }
-    Ok(())
-}
-
 async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     loop {
@@ -348,7 +247,6 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
         } else {
             strong.retry.timeout
         };
-        let clients: Vec<RedisClient> = strong.pool.clients().to_vec();
         let mut nodes = strong.topology.nodes();
         if let Some(pubsub) = strong.pubsub_started() {
             nodes.push(pubsub.node().await);
@@ -359,20 +257,6 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
             let answered = tokio::time::timeout(wait, node.send(&redis::cmd("PING"))).await;
             if !matches!(answered, Ok(Ok(_))) {
                 node.reset().await;
-            }
-        }
-        for client in clients {
-            if !client.is_connected() {
-                continue;
-            }
-            let answered = tokio::time::timeout(wait, client.ping::<()>(None)).await;
-            let silent = match answered {
-                Err(_) => true,
-                Ok(Err(error)) => *error.kind() == fred::error::ErrorKind::Timeout,
-                Ok(Ok(())) => false,
-            };
-            if silent {
-                let _ = client.force_reconnection().await;
             }
         }
         // The connections that batches gave back are pinged too, as Redisson pings every connection. They are out of the idle list meanwhile, so a `PING` never lands in a transaction, and one that does not answer is closed.
@@ -400,13 +284,6 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
             }
         }
     }
-}
-
-pub(crate) fn no_retry<C: ClientLike>(client: &C) -> WithOptions<C> {
-    client.with_options(&Options {
-        max_attempts: Some(1),
-        ..Default::default()
-    })
 }
 
 /// Closes the connection of a blocking command; one the caller stopped waiting on is killed first, so the server drops the command.
@@ -444,11 +321,13 @@ impl Drop for Core {
         let Ok(runtime) = Handle::try_current() else {
             return;
         };
-        let pool = self.pool.clone();
+        let nodes = self.topology.nodes();
         let pubsub = self.pubsub.take();
         let exclusive = std::mem::take(self.exclusive.get_mut().unwrap_or_else(|e| e.into_inner()));
         runtime.spawn(async move {
-            let _ = pool.quit().await;
+            for node in nodes {
+                node.reset().await;
+            }
             if let Some(pubsub) = pubsub {
                 pubsub.quit().await;
             }
