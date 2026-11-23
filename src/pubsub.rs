@@ -233,6 +233,24 @@ impl PubSub {
         self: &Arc<Self>,
         name: &str,
     ) -> Result<(Subscription<T>, broadcast::Receiver<T>)> {
+        // Subscribing runs to its end on a task of its own, even when the caller stops waiting (a lock wait that times out), so a channel Redis subscribed always gets its entry. A subscription nobody took comes back here, and dropping it unsubscribes.
+        let (handoff, taken) = oneshot::channel();
+        let this = self.clone();
+        let owned = name.to_string();
+        tokio::spawn(async move {
+            let _ = handoff.send(this.enter::<T>(&owned).await);
+        });
+        let (subscription, receiver) = taken
+            .await
+            .map_err(|_| Error::Redis("the subscription was abandoned".into()))??;
+        self.activate(&subscription.entry.active).await;
+        Ok((subscription, receiver))
+    }
+
+    async fn enter<T: Delivery>(
+        self: &Arc<Self>,
+        name: &str,
+    ) -> Result<(Subscription<T>, broadcast::Receiver<T>)> {
         let (subscription, receiver) = {
             let mut registry = self.registry.lock().await;
             let existing = T::entries(&mut registry).get(name).cloned();
@@ -262,7 +280,6 @@ impl PubSub {
             };
             (subscription, receiver)
         };
-        self.activate(&subscription.entry.active).await;
         Ok((subscription, receiver))
     }
 

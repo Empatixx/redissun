@@ -284,6 +284,7 @@ enum Role {
 struct Group {
     address: Address,
     ops: Vec<usize>,
+    /// The commands to send: all of them at the end, or in a stored batch those queued since the last [`Session::flush`].
     pipe: redis::Pipeline,
     roles: Vec<Role>,
     /// The replies of commands already sent, by a stored batch, in the order of `roles`.
@@ -349,17 +350,35 @@ impl Session {
 
     /// Adds `cmd` to its group; a stored session sends it at once.
     async fn add(&mut self, group: usize, role: Role, cmd: redis::Cmd) -> Outcome<()> {
-        if self.stored {
-            let node = self.lease.node(&self.groups[group].address);
-            let mut pipe = redis::pipe();
-            pipe.add_command(cmd);
-            let mut replies = node.send_pipeline(&pipe, 0, 1).await?;
-            let reply = replies.pop().unwrap_or(Value::Nil);
-            self.groups[group].sent.push(reply);
-        } else {
-            self.groups[group].pipe.add_command(cmd);
-        }
+        self.groups[group].pipe.add_command(cmd);
         self.groups[group].roles.push(role);
+        Ok(())
+    }
+
+    /// Sends what a stored batch queued since the last flush, one pipeline per node, as Redisson writes the commands of `REDIS_WRITE_ATOMIC` without waiting for each `QUEUED`.
+    pub(super) async fn flush(&mut self) -> Outcome<()> {
+        if !self.stored {
+            return Ok(());
+        }
+        let pending: Vec<(usize, Arc<Node>, redis::Pipeline)> = self
+            .groups
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, group)| !group.pipe.is_empty())
+            .map(|(at, group)| {
+                let pipe = std::mem::replace(&mut group.pipe, redis::pipe());
+                (at, self.lease.node(&group.address), pipe)
+            })
+            .collect();
+        let sent = futures::future::join_all(
+            pending
+                .iter()
+                .map(|(_, node, pipe)| node.send_pipeline(pipe, 0, pipe.len())),
+        )
+        .await;
+        for ((group, _, _), replies) in pending.iter().zip(sent) {
+            self.groups[*group].sent.extend(replies?);
+        }
         Ok(())
     }
 
@@ -409,7 +428,8 @@ impl Session {
                     .await?;
             }
         }
-        // A stored session sent everything already; the others send each node's pipeline now.
+        // A stored session sends what is left and has its replies; the others send each node's pipeline now.
+        self.flush().await?;
         let addresses: Vec<Address> = self
             .groups
             .iter()
@@ -650,13 +670,33 @@ pub(super) fn store_in_redis(core: Arc<Core>) -> Option<mpsc::UnboundedSender<Co
     let (sender, mut receiver) = mpsc::unbounded_channel();
     runtime.spawn(async move {
         let mut session = Session::begin(&core, true, None).await;
-        while let Some(command) = receiver.recv().await {
+        let mut next = receiver.recv().await;
+        while let Some(command) = next.take() {
             match command {
                 Command::Op(op) => {
+                    // The commands queued meanwhile go out together, as one pipeline per node.
+                    let mut ops = vec![op];
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(Command::Op(op)) => ops.push(op),
+                            Ok(other) => {
+                                next = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     if let Ok(open) = &mut session {
-                        if let Err(failure) = open.send(op).await {
+                        let mut sent = Ok(());
+                        for op in ops {
+                            sent = sent.and(open.send(op).await);
+                        }
+                        if let Err(failure) = sent.and(open.flush().await) {
                             session = Err(failure);
                         }
+                    }
+                    if next.is_none() {
+                        next = receiver.recv().await;
                     }
                 }
                 Command::End {
