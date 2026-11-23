@@ -176,9 +176,9 @@ pub(crate) async fn synced_eval<R: redis::FromRedisValue>(
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
                     tokio::time::sleep(pause.min(left)).await;
                 }
-                Some(_) => return Err(Error::Timeout),
-                None if attempt >= retry_settings.attempts => return Err(error),
-                None => {
+                // After `timeout` the attempts count, so it never waits less than they allow.
+                _ if attempt >= retry_settings.attempts => return Err(error),
+                _ => {
                     key.core.topology().refresh().await;
                     pause = retry_settings.delay.delay(attempt, pause);
                     attempt += 1;
