@@ -860,7 +860,8 @@ where
                 ZCmp::Max => "MAX",
             });
             cmd.arg("COUNT").arg(count);
-            Some(self.key.query_once::<Value>(cmd).await?)
+            // Retried after a lost connection, as fred's zmpop was; only the blocking BZMPOP is sent once.
+            Some(self.key.query::<Value>(cmd).await?)
         } else {
             // Blocking pops stay on fred's blocking connection until the transport moves to redis-rs.
             let seconds = timeout.map_or(0.0, block_seconds);

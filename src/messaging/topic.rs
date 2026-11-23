@@ -78,11 +78,15 @@ where
         M: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let channel = self.key.redis_key();
         let mut cmd = redis::cmd("PUBLISH");
-        cmd.arg(self.key.redis_key())
-            .arg(&self.codec.encode(message)?[..]);
-        // A channel has no slot; Redis Cluster passes a message on to every node.
-        let receivers: usize = self.key.core.query(Request::new(cmd)).await?;
+        cmd.arg(&channel).arg(&self.codec.encode(message)?[..]);
+        // Routed by the channel's slot, as fred did: in Redis Cluster a reply counts only the receivers on the node that got it.
+        let receivers: usize = self
+            .key
+            .core
+            .query(Request::new(cmd).key(channel.as_bytes()))
+            .await?;
         Ok(receivers)
     }
 
@@ -109,7 +113,12 @@ where
         let channel = self.key.redis_key();
         let mut cmd = redis::cmd("PUBSUB");
         cmd.arg("NUMSUB").arg(&channel);
-        let counts: HashMap<String, usize> = self.key.core.query(Request::new(cmd)).await?;
+        // Routed by the channel's slot, the node a subscriber of this client listens on.
+        let counts: HashMap<String, usize> = self
+            .key
+            .core
+            .query(Request::new(cmd).key(channel.as_bytes()))
+            .await?;
         Ok(counts.get(&channel).copied().unwrap_or(0))
     }
 }

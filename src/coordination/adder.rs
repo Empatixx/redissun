@@ -214,10 +214,14 @@ impl<N: Summable> Adder<N> {
     async fn ask(&self, kind: &str, wait: Option<Duration>) -> Result<Option<String>> {
         let key = &self.shared.key;
         let id = Uuid::new_v4().simple().to_string();
+        let channel = channel(key.name());
         let mut cmd = redis::cmd("PUBLISH");
-        cmd.arg(channel(key.name())).arg(format!("{kind}:{id}"));
-        // A channel has no slot; Redis Cluster passes a message on to every node.
-        let listeners: u64 = key.core.query(Request::new(cmd)).await?;
+        cmd.arg(&channel).arg(format!("{kind}:{id}"));
+        // Routed by the channel's slot, as fred did: in Redis Cluster a reply counts only the receivers on the node that got it, and the adder waits for that many answers.
+        let listeners: u64 = key
+            .core
+            .query(Request::new(cmd).key(channel.as_bytes()))
+            .await?;
         let semaphore = Semaphore::new(part(key, &id, "semaphore"));
         let answered = match wait {
             Some(wait) => semaphore.acquire(listeners).timeout(wait).await?,

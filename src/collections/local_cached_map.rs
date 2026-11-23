@@ -825,11 +825,16 @@ where
     /// Empties the local cache of this instance and tells every other instance to empty theirs, like Redisson's `clearLocalCache`. Redis is not changed. It returns once the message is published, without waiting for the others.
     pub async fn clear_local_everywhere(&self) -> Result<()> {
         self.local.forget_all();
+        let channel = channel(&self.key);
         let mut cmd = redis::cmd("PUBLISH");
-        cmd.arg(channel(&self.key))
+        cmd.arg(&channel)
             .arg(&message(&self.local.id, CLEAR, &[])[..]);
-        // A channel has no slot; Redis Cluster passes a message on to every node.
-        let _: i64 = self.key.core.query(Request::new(cmd)).await?;
+        // Routed by the channel's slot, as fred did.
+        let _: i64 = self
+            .key
+            .core
+            .query(Request::new(cmd).key(channel.as_bytes()))
+            .await?;
         Ok(())
     }
 
