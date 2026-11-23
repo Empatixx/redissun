@@ -38,6 +38,8 @@ pub(crate) struct NodeSettings {
 pub(crate) enum Failure {
     /// The connection failed or could not be opened; the command may be sent again.
     Connection(String),
+    /// Redis Cluster answered `MOVED` (`ask: false`) or `ASK` (`ask: true`): the slot is served by `address`.
+    Redirect { ask: bool, address: Address },
     /// Redis answered with an error, or something else went wrong; sending it again does not help.
     Other(Error),
 }
@@ -46,6 +48,10 @@ impl From<Failure> for Error {
     fn from(failure: Failure) -> Self {
         match failure {
             Failure::Connection(message) => Error::Redis(message),
+            Failure::Redirect { ask, address } => Error::Redis(format!(
+                "{} to {address} not followed",
+                if ask { "ASK" } else { "MOVED" }
+            )),
             Failure::Other(error) => error,
         }
     }
@@ -55,7 +61,25 @@ pub(crate) fn is_connection_failure(failure: &Failure) -> bool {
     matches!(failure, Failure::Connection(_))
 }
 
+/// `host:port` as Redis writes it in `MOVED`, `ASK` and `CLUSTER SLOTS`; the last colon separates the port, so an IPv6 host keeps its own.
+pub(crate) fn parse_address(text: &str) -> Option<Address> {
+    let (host, port) = text.rsplit_once(':')?;
+    Some(Address::new(
+        host.trim_matches(['[', ']']),
+        port.parse().ok()?,
+    ))
+}
+
 fn failure(error: redis::RedisError) -> Failure {
+    if let Some((address, _)) = error.redirect_node() {
+        if let Some(address) = parse_address(address) {
+            let ask = matches!(
+                error.kind(),
+                redis::ErrorKind::Server(redis::ServerErrorKind::Ask)
+            );
+            return Failure::Redirect { ask, address };
+        }
+    }
     if error.is_io_error() || error.is_connection_dropped() || error.is_connection_refusal() {
         Failure::Connection(error.to_string())
     } else {
@@ -96,6 +120,10 @@ impl Node {
 
     pub(crate) fn address(&self) -> &Address {
         &self.address
+    }
+
+    pub(crate) fn settings_ref(&self) -> &Arc<NodeSettings> {
+        &self.settings
     }
 
     /// The live connection, opened first when there is none.
@@ -224,6 +252,26 @@ impl Node {
         }
     }
 
+    /// Sends `count` commands of `pipe` from `offset` on one connection and returns their replies; a pipeline whose commands answer with errors is still one `Ok` when `pipe` ignores errors.
+    pub(crate) async fn send_pipeline(
+        &self,
+        pipe: &redis::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> std::result::Result<Vec<redis::Value>, Failure> {
+        let (mut connection, generation) = self.live().await?;
+        match connection.send_packed_commands(pipe, offset, count).await {
+            Ok(values) => Ok(values),
+            Err(error) => {
+                let failure = failure(error);
+                if is_connection_failure(&failure) {
+                    self.broken(generation).await;
+                }
+                Err(failure)
+            }
+        }
+    }
+
     /// The `CLIENT ID` of the live connection, `None` while there is none.
     pub(crate) async fn client_id(&self) -> Option<i64> {
         self.state.lock().await.live.as_ref().map(|live| live.id)
@@ -294,6 +342,19 @@ mod tests {
             .filter(|name| !name.is_empty())
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn addresses_are_read_like_redis_writes_them() {
+        assert_eq!(
+            super::parse_address("127.0.0.1:6381"),
+            Some(Address::new("127.0.0.1", 6381))
+        );
+        assert_eq!(
+            super::parse_address("[::1]:7000"),
+            Some(Address::new("::1", 7000))
+        );
+        assert_eq!(super::parse_address("host"), None);
     }
 
     #[tokio::test]
