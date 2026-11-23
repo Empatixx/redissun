@@ -2,7 +2,7 @@
 
 use crate::client::credentials::{Credentials, Resolver};
 use crate::client::retry::DelayStrategy;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::net::stream::{connect, Address, StreamSettings};
 use redis::aio::MultiplexedConnection;
 use std::sync::Arc;
