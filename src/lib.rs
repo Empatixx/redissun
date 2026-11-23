@@ -36,6 +36,7 @@ mod eviction;
 mod locks;
 mod lua;
 mod messaging;
+mod net;
 mod object;
 mod pending;
 mod pubsub;
