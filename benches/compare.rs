@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 const CONCURRENCY: usize = 64;
 const POOL: usize = 4;
-const WARMUP: Duration = Duration::from_secs(1);
+const WARMUP: Duration = Duration::from_secs(3);
 const MEASURE: Duration = Duration::from_secs(3);
 const BATCH: usize = 100;
 const FIELD: &str = "field";
@@ -265,16 +265,10 @@ async fn fred_ops(url: &str, run: &str) -> Ops {
         let (p, u, run_id) = (p.clone(), u.clone(), run_id.clone());
         async move {
             let pipeline = p.next().pipeline();
-            let json = serde_json::to_string(&*u).unwrap();
             for i in 0..BATCH {
+                let json = serde_json::to_string(&*u).unwrap();
                 let () = pipeline
-                    .set(
-                        key(&run_id, "fred", "batch", i),
-                        json.clone(),
-                        None,
-                        None,
-                        false,
-                    )
+                    .set(key(&run_id, "fred", "batch", i), json, None, None, false)
                     .await
                     .unwrap();
             }
@@ -385,11 +379,11 @@ async fn redis_rs_ops(url: &str, run: &str) -> Ops {
     let batch = op(move |_| {
         let (mut c, u, run_id) = (c.clone(), u.clone(), run_id.clone());
         async move {
-            let json = serde_json::to_string(&*u).unwrap();
             let mut pipeline = redis::pipe();
             for i in 0..BATCH {
+                let json = serde_json::to_string(&*u).unwrap();
                 pipeline
-                    .set(key(&run_id, "redis", "batch", i), &json)
+                    .set(key(&run_id, "redis", "batch", i), json)
                     .ignore();
             }
             let () = pipeline.query_async(&mut c).await.unwrap();
@@ -475,12 +469,21 @@ async fn main() {
         ("redis-rs", redis_rs_ops(&url, &run).await),
     ];
 
+    // The library measured first runs on a machine that has not warmed up yet, so every operation starts with another library, and a new run with another one again.
+    let names: Vec<&str> = libraries[0].1.iter().map(|(name, _)| *name).collect();
+    let shift = run_seed() % libraries.len();
     let mut results = Vec::new();
-    for (library, ops) in &libraries {
-        for (name, operation) in ops {
-            if only.as_deref().is_some_and(|only| !name.contains(only)) {
-                continue;
-            }
+    for (index, name) in names.iter().enumerate() {
+        if only.as_deref().is_some_and(|only| !name.contains(only)) {
+            continue;
+        }
+        for turn in 0..libraries.len() {
+            let (library, ops) = &libraries[(index + shift + turn) % libraries.len()];
+            let operation = &ops
+                .iter()
+                .find(|(own, _)| own == name)
+                .expect("every library runs every operation")
+                .1;
             let latency = latency(operation).await;
             let per_second = if *name == "batch_100" {
                 None
@@ -519,10 +522,17 @@ async fn main() {
     eprintln!("wrote {out}");
 }
 
-fn uuid_like() -> String {
-    let nanos = std::time::SystemTime::now()
+fn nanos() -> u128 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos();
-    format!("{nanos:x}")
+        .as_nanos()
+}
+
+fn uuid_like() -> String {
+    format!("{:x}", nanos())
+}
+
+fn run_seed() -> usize {
+    (nanos() / 1_000) as usize
 }
