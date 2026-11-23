@@ -1,6 +1,6 @@
 use super::synced_from;
 use crate::client::core::Core;
-use crate::client::request::{command, Arg, Request};
+use crate::client::request::{command, Arg};
 use crate::client::slot::keyslot;
 use crate::error::{Error, Result};
 use crate::net::node::{server_failure, Failure as NodeFailure, Node};
@@ -419,6 +419,26 @@ impl Session {
             .iter()
             .map(|address| (!self.stored).then(|| self.lease.node(address)))
             .collect();
+        // As in Redisson, the answers are timed once the commands are written; while they are written, the connection may stay silent `limits.write` at most.
+        let mut writing = Vec::new();
+        for (group, node) in self.groups.iter().zip(&nodes) {
+            if let Some(node) = node {
+                // Opening a connection waits for the answers to its setup commands, so the response limit applies.
+                let written = match tokio::time::timeout(limits.response, node.written()).await {
+                    Ok(Ok(written)) => written,
+                    Ok(Err(failure)) => {
+                        // A node that cannot be reached after a failover: the next attempt goes to the one that serves the slots now.
+                        if crate::net::node::is_connection_failure(&failure) {
+                            self.lease.core.topology().refresh().await;
+                        }
+                        return Err(failure.into());
+                    }
+                    Err(_) => return Err(Failure::Timeout),
+                };
+                let done = *written.borrow() + group.pipe.get_packed_pipeline().len() as u64;
+                writing.push((written.subscribe(), done));
+            }
+        }
         let sending = futures::future::join_all(self.groups.iter().zip(nodes).map(
             |(group, node)| async move {
                 match node {
@@ -427,9 +447,33 @@ impl Session {
                 }
             },
         ));
-        let replies = match tokio::time::timeout(limits.response, sending).await {
-            Ok(replies) => replies,
-            Err(_) => return Err(Failure::Timeout),
+        tokio::pin!(sending);
+        let mut early = None;
+        for (mut written, done) in writing {
+            while *written.borrow_and_update() < done {
+                tokio::select! {
+                    replies = &mut sending => {
+                        early = Some(replies);
+                        break;
+                    }
+                    progress = tokio::time::timeout(limits.write, written.changed()) => match progress {
+                        Ok(Ok(())) => {}
+                        // The connection ended; its pipeline answers with the failure.
+                        Ok(Err(_)) => break,
+                        Err(_) => return Err(Failure::Timeout),
+                    },
+                }
+            }
+            if early.is_some() {
+                break;
+            }
+        }
+        let replies = match early {
+            Some(replies) => replies,
+            None => match tokio::time::timeout(limits.response, sending).await {
+                Ok(replies) => replies,
+                Err(_) => return Err(Failure::Timeout),
+            },
         };
         let mut groups_replies = Vec::with_capacity(replies.len());
         for reply in replies {
@@ -519,14 +563,38 @@ fn collect(
 }
 
 /// Sends again what Redis Cluster sent elsewhere: a command outside a transaction through the client, which follows `MOVED` and `ASK`; a refused transaction as a whole to the node Redis named, after `ASKING` when it said `ASK`. Redis applied nothing of a refused transaction, so nothing runs twice.
-pub(super) async fn follow(core: &Core, ops: &[Op], finish: &mut Finish) -> Outcome<()> {
+///
+/// A command sent again whose connection fails is tried again with the batch's `retry_attempts` and `retry_delay`, as Redisson does, so it outlasts a failover.
+pub(super) async fn follow(
+    core: &Core,
+    ops: &[Op],
+    finish: &mut Finish,
+    (attempts, delay): (u32, crate::DelayStrategy),
+) -> Outcome<()> {
     for at in std::mem::take(&mut finish.resend) {
         let op = &ops[at];
-        let request = match op.key() {
-            Some(key) => Request::new(op.cmd()).key(key),
-            None => Request::new(op.cmd()),
+        let cmd = op.cmd();
+        let (mut attempt, mut pause) = (0, Duration::ZERO);
+        finish.replies[at] = loop {
+            let sending = core.topology().send(&cmd, op.key());
+            let sent = if core.retry.timeout.is_zero() {
+                sending.await
+            } else {
+                tokio::time::timeout(core.retry.timeout, sending)
+                    .await
+                    .unwrap_or(Err(NodeFailure::Other(Error::Timeout)))
+            };
+            match sent {
+                Err(failure)
+                    if crate::net::node::is_connection_failure(&failure) && attempt < attempts =>
+                {
+                    pause = delay.delay(attempt, pause);
+                    attempt += 1;
+                    tokio::time::sleep(pause).await;
+                }
+                sent => break sent.map_err(Error::from),
+            }
         };
-        finish.replies[at] = core.query_value(request).await;
     }
     for moved in std::mem::take(&mut finish.moved) {
         let node = Node::new(

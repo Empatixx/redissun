@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use socket2::{SockRef, TcpKeepalive};
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -43,7 +44,13 @@ pub(crate) struct StreamSettings {
 }
 
 /// An open connection, plain or TLS.
-pub(crate) enum Stream {
+pub(crate) struct Stream {
+    transport: Transport,
+    /// Every byte written so far, so a batch knows when its pipeline is out and its answers are timed.
+    written: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+enum Transport {
     Tcp(TcpStream),
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
     Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
@@ -80,9 +87,45 @@ async fn open(address: &Address, settings: &StreamSettings) -> Result<Stream> {
             .map_err(|error| {
                 Error::Redis(format!("TLS handshake with {address} failed: {error}"))
             })?;
-        return Ok(Stream::Tls(Box::new(tls)));
+        return Ok(Stream::new(Transport::Tls(Box::new(tls))));
     }
-    Ok(Stream::Tcp(tcp))
+    Ok(Stream::new(Transport::Tcp(tcp)))
+}
+
+impl Stream {
+    fn new(transport: Transport) -> Self {
+        Self {
+            transport,
+            written: Arc::new(tokio::sync::watch::Sender::new(0)),
+        }
+    }
+
+    /// Counts the bytes written to this stream from now on, and those written before.
+    pub(crate) fn written(&self) -> Arc<tokio::sync::watch::Sender<u64>> {
+        self.written.clone()
+    }
+
+    /// A second handle to the socket under this stream, to look at it while redis-rs owns the stream.
+    pub(crate) fn probe(&self) -> Option<socket2::Socket> {
+        let tcp = match &self.transport {
+            Transport::Tcp(tcp) => tcp,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+            Transport::Tls(tls) => tls.get_ref().0,
+        };
+        SockRef::from(tcp).try_clone().ok()
+    }
+}
+
+/// Whether the server closed `socket`: a read would end there (`peek` gives 0 bytes) or fail. Data still to read, or none yet, means open.
+pub(crate) fn closed_by_server(socket: &socket2::Socket) -> bool {
+    let mut byte = [std::mem::MaybeUninit::<u8>::uninit()];
+    match socket.peek(&mut byte) {
+        Ok(read) => read == 0,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ),
+    }
 }
 
 impl AsyncRead for Stream {
@@ -91,10 +134,10 @@ impl AsyncRead for Stream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(tcp) => Pin::new(tcp).poll_read(cx, buf),
+        match &mut self.get_mut().transport {
+            Transport::Tcp(tcp) => Pin::new(tcp).poll_read(cx, buf),
             #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-            Stream::Tls(tls) => Pin::new(tls).poll_read(cx, buf),
+            Transport::Tls(tls) => Pin::new(tls).poll_read(cx, buf),
         }
     }
 }
@@ -105,26 +148,34 @@ impl AsyncWrite for Stream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Stream::Tcp(tcp) => Pin::new(tcp).poll_write(cx, buf),
+        let this = self.get_mut();
+        let written = match &mut this.transport {
+            Transport::Tcp(tcp) => Pin::new(tcp).poll_write(cx, buf),
             #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-            Stream::Tls(tls) => Pin::new(tls).poll_write(cx, buf),
+            Transport::Tls(tls) => Pin::new(tls).poll_write(cx, buf),
+        };
+        if let Poll::Ready(Ok(count)) = &written {
+            let count = *count as u64;
+            if count > 0 {
+                this.written.send_modify(|total| *total += count);
+            }
         }
+        written
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(tcp) => Pin::new(tcp).poll_flush(cx),
+        match &mut self.get_mut().transport {
+            Transport::Tcp(tcp) => Pin::new(tcp).poll_flush(cx),
             #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-            Stream::Tls(tls) => Pin::new(tls).poll_flush(cx),
+            Transport::Tls(tls) => Pin::new(tls).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(tcp) => Pin::new(tcp).poll_shutdown(cx),
+        match &mut self.get_mut().transport {
+            Transport::Tcp(tcp) => Pin::new(tcp).poll_shutdown(cx),
             #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-            Stream::Tls(tls) => Pin::new(tls).poll_shutdown(cx),
+            Transport::Tls(tls) => Pin::new(tls).poll_shutdown(cx),
         }
     }
 }
@@ -144,6 +195,19 @@ mod tests {
             #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
             tls: None,
         }
+    }
+
+    #[tokio::test]
+    async fn the_bytes_written_are_counted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = Address::new("127.0.0.1", listener.local_addr().unwrap().port());
+        let mut stream = connect(&address, &settings(Duration::from_secs(1)))
+            .await
+            .unwrap();
+        let written = stream.written();
+        stream.write_all(b"PING\r\n").await.unwrap();
+        stream.write_all(b"PING\r\n").await.unwrap();
+        assert_eq!(*written.borrow(), 12);
     }
 
     #[tokio::test]

@@ -218,7 +218,12 @@ impl<C: Codec> Batch<C> {
             _ => self.run_with_retries(&ops, atomic).await,
         };
         let followed = match finish {
-            Ok(mut finish) => follow(&self.core, &ops, &mut finish).await.map(|()| finish),
+            Ok(mut finish) => {
+                let retry = (self.retry_attempts, self.retry_delay);
+                follow(&self.core, &ops, &mut finish, retry)
+                    .await
+                    .map(|()| finish)
+            }
             Err(failure) => Err(failure),
         };
         match followed {

@@ -123,6 +123,19 @@ struct Live {
     generation: u64,
     /// The task that reads the connection; it ends when the connection ends, so the next command opens a new one instead of failing on it.
     driver: tokio::task::JoinHandle<()>,
+    /// The socket, to see that the server closed it before the driver did: redis-rs would write the next command to it and then fail it like one in flight.
+    probe: Option<socket2::Socket>,
+    written: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Live {
+    fn ended(&self) -> bool {
+        self.driver.is_finished()
+            || self
+                .probe
+                .as_ref()
+                .is_some_and(crate::net::stream::closed_by_server)
+    }
 }
 
 #[derive(Default)]
@@ -162,7 +175,7 @@ impl Node {
     async fn live(&self) -> std::result::Result<(MultiplexedConnection, u64), Failure> {
         let mut state = self.state.lock().await;
         if let Some(live) = &state.live {
-            if !live.driver.is_finished() {
+            if !live.ended() {
                 return Ok((live.connection.clone(), live.generation));
             }
             state.live = None;
@@ -179,7 +192,7 @@ impl Node {
             }
         }
         match self.open().await {
-            Ok((connection, id, driver)) => {
+            Ok((connection, id, driver, probe, written)) => {
                 state.generation += 1;
                 state.failures = 0;
                 state.failed_at = None;
@@ -189,6 +202,8 @@ impl Node {
                     id,
                     generation,
                     driver,
+                    probe,
+                    written,
                 });
                 Ok((connection, generation))
             }
@@ -206,8 +221,16 @@ impl Node {
 
     async fn open(
         &self,
-    ) -> std::result::Result<(MultiplexedConnection, i64, tokio::task::JoinHandle<()>), Failure>
-    {
+    ) -> std::result::Result<
+        (
+            MultiplexedConnection,
+            i64,
+            tokio::task::JoinHandle<()>,
+            Option<socket2::Socket>,
+            Arc<tokio::sync::watch::Sender<u64>>,
+        ),
+        Failure,
+    > {
         let settings = &self.settings;
         let stream =
             connect(&self.address, &settings.stream)
@@ -242,6 +265,8 @@ impl Node {
         if let Some(push) = &settings.push {
             config = config.set_push_sender(push.clone());
         }
+        let probe = stream.probe();
+        let written = stream.written();
         let (mut connection, driver) =
             MultiplexedConnection::new_with_config(&info, stream, config)
                 .await
@@ -264,7 +289,7 @@ impl Node {
             redis::Value::Int(id) => id,
             _ => 0,
         };
-        Ok((connection, id, driver))
+        Ok((connection, id, driver, probe, written))
     }
 
     /// Forgets the connection of `generation` after it failed, so the next command opens a new one.
@@ -354,7 +379,7 @@ impl Node {
             state
                 .live
                 .as_ref()
-                .filter(|live| !live.driver.is_finished())
+                .filter(|live| !live.ended())
                 .map(|live| (live.connection.clone(), live.generation))
         };
         let Some((mut connection, generation)) = live else {
@@ -382,6 +407,20 @@ impl Node {
                 }
                 Err(failure)
             }
+        }
+    }
+
+    /// Opens the connection if needed and gives the count of bytes written to it, so a batch can tell when its pipeline is out.
+    pub(crate) async fn written(
+        &self,
+    ) -> std::result::Result<Arc<tokio::sync::watch::Sender<u64>>, Failure> {
+        let (_, generation) = self.live().await?;
+        let state = self.state.lock().await;
+        match &state.live {
+            Some(live) if live.generation == generation => Ok(live.written.clone()),
+            _ => Err(Failure::Unsent(
+                "the connection closed while it opened".into(),
+            )),
         }
     }
 
@@ -603,6 +642,29 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         // A command that may be sent only once must not land on the closed connection.
+        node.send(&command("PING", &[])).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_connection_the_server_closed_is_replaced_even_before_its_reader_noticed() {
+        let (_container, address) = redis().await;
+        let node = Node::new(
+            address.clone(),
+            Arc::new(settings(None, NodeCredentials::None)),
+        );
+        node.send(&command("PING", &[])).await.unwrap();
+        // The test runs on one thread and kills the connection without yielding to it, so its reader has not seen the close when the next command is written.
+        let mut admin =
+            std::net::TcpStream::connect((address.host.as_str(), address.port)).unwrap();
+        std::io::Write::write_all(
+            &mut admin,
+            b"*6\r\n$6\r\nCLIENT\r\n$4\r\nKILL\r\n$4\r\nTYPE\r\n$6\r\nnormal\r\n$6\r\nSKIPME\r\n$3\r\nyes\r\n",
+        )
+        .unwrap();
+        let mut reply = [0u8; 16];
+        let read = std::io::Read::read(&mut admin, &mut reply).unwrap();
+        assert!(reply[..read].starts_with(b":") && &reply[..read] != b":0\r\n");
+        std::thread::sleep(Duration::from_millis(200));
         node.send(&command("PING", &[])).await.unwrap();
     }
 
