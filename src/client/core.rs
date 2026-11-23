@@ -215,10 +215,6 @@ impl Core {
         })
     }
 
-    pub(crate) fn redis_no_retry(&self) -> WithOptions<RedisClient> {
-        no_retry(self.redis())
-    }
-
     pub(crate) fn client_id(&self) -> &str {
         &self.id
     }

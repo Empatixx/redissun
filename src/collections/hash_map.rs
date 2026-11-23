@@ -4,7 +4,6 @@ use crate::error::{Error, Result};
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -191,9 +190,12 @@ where
     {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis()
-            .hget(self.key.redis_key(), self.codec.encode(k)?)
+            .query({
+                let mut cmd = redis::cmd("HGET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
             .await?;
         self.decode_value(raw)
     }
@@ -224,16 +226,26 @@ where
     {
         let found: bool = self
             .key
-            .core
-            .redis()
-            .hexists(self.key.redis_key(), self.codec.encode(k)?)
+            .query({
+                let mut cmd = redis::cmd("HEXISTS");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
             .await?;
         Ok(found)
     }
 
     /// Number of entries.
     pub async fn len(&self) -> Result<usize> {
-        let len: usize = self.key.core.redis().hlen(self.key.redis_key()).await?;
+        let len: usize = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HLEN");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         Ok(len)
     }
 
@@ -245,9 +257,11 @@ where
     /// Deletes every entry.
     pub async fn clear(&self) -> Result<()> {
         self.key
-            .core
-            .redis()
-            .del::<(), _>(self.key.redis_key())
+            .query::<()>({
+                let mut cmd = redis::cmd("DEL");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -271,9 +285,12 @@ where
             return Ok(());
         }
         self.key
-            .core
-            .redis()
-            .hset::<(), _, _>(self.key.redis_key(), encoded)
+            .query::<()>({
+                let mut cmd = redis::cmd("HSET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary_pairs(&encoded));
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -293,9 +310,12 @@ where
             .collect::<Result<Vec<Bytes>>>()?;
         let raw: Vec<Option<Bytes>> = self
             .key
-            .core
-            .redis()
-            .hmget(self.key.redis_key(), fields)
+            .query({
+                let mut cmd = redis::cmd("HMGET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&fields));
+                cmd
+            })
             .await?;
         raw.into_iter().map(|r| self.decode_value(r)).collect()
     }
@@ -310,13 +330,13 @@ where
     {
         let inserted: bool = self
             .key
-            .core
-            .redis_no_retry()
-            .hsetnx(
-                self.key.redis_key(),
-                self.codec.encode(k)?,
-                self.codec.encode(v)?,
-            )
+            .query_once({
+                let mut cmd = redis::cmd("HSETNX");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(inserted)
     }
@@ -329,9 +349,13 @@ where
     {
         let value: i64 = self
             .key
-            .core
-            .redis_no_retry()
-            .hincrby(self.key.redis_key(), self.codec.encode(k)?, delta)
+            .query_once({
+                let mut cmd = redis::cmd("HINCRBY");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(delta);
+                cmd
+            })
             .await?;
         Ok(value)
     }
@@ -344,9 +368,13 @@ where
     {
         let value: f64 = self
             .key
-            .core
-            .redis_no_retry()
-            .hincrbyfloat(self.key.redis_key(), self.codec.encode(k)?, delta)
+            .query_once({
+                let mut cmd = redis::cmd("HINCRBYFLOAT");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(delta);
+                cmd
+            })
             .await?;
         Ok(value)
     }
@@ -379,12 +407,12 @@ where
     {
         let added: i64 = self
             .key
-            .core
-            .redis()
-            .hset(
-                self.key.redis_key(),
-                (self.codec.encode(k)?, self.codec.encode(v)?),
-            )
+            .query({
+                let mut cmd = redis::cmd("HSET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg((&self.codec.encode(k)?[..], &self.codec.encode(v)?[..]));
+                cmd
+            })
             .await?;
         Ok(added == 1)
     }
@@ -515,9 +543,12 @@ where
             .collect::<Result<Vec<Bytes>>>()?;
         let removed: usize = self
             .key
-            .core
-            .redis()
-            .hdel(self.key.redis_key(), fields)
+            .query({
+                let mut cmd = redis::cmd("HDEL");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&fields));
+                cmd
+            })
             .await?;
         Ok(removed)
     }
@@ -540,9 +571,12 @@ where
     {
         let size: usize = self
             .key
-            .core
-            .redis()
-            .hstrlen(self.key.redis_key(), self.codec.encode(k)?)
+            .query({
+                let mut cmd = redis::cmd("HSTRLEN");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
             .await?;
         Ok(size)
     }
@@ -550,24 +584,35 @@ where
     /// Returns up to `count` distinct random keys (`HRANDFIELD`).
     pub async fn random_keys(&self, count: usize) -> Result<Vec<K>> {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
-        let raw: Vec<Bytes> = self
-            .key
-            .core
-            .redis()
-            .hrandfield(self.key.redis_key(), Some((count, false)))
-            .await?;
+        let mut cmd = self.key.key_cmd("HRANDFIELD");
+        cmd.arg(count);
+        let raw: Vec<Bytes> = self.key.query(cmd).await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
     /// Returns every key in one call (`HKEYS`).
     pub async fn read_all_keys(&self) -> Result<Vec<K>> {
-        let raw: Vec<Bytes> = self.key.core.redis().hkeys(self.key.redis_key()).await?;
+        let raw: Vec<Bytes> = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HKEYS");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
     /// Returns every value in one call (`HVALS`).
     pub async fn read_all_values(&self) -> Result<Vec<V>> {
-        let raw: Vec<Bytes> = self.key.core.redis().hvals(self.key.redis_key()).await?;
+        let raw: Vec<Bytes> = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HVALS");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 

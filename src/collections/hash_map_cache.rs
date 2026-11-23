@@ -1,3 +1,4 @@
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
@@ -5,7 +6,6 @@ use crate::lua::Lua;
 use crate::object::{millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
-use fred::interfaces::HashesInterface;
 use futures::future::select_all;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
@@ -811,6 +811,15 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
         options_key(&self.key.redis_key())
     }
 
+    /// Sends `cmd`, routed by the options key, which lives in its own slot unless the cache's name has a hash tag.
+    async fn on_options<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        let options = self.options_key();
+        self.key
+            .core
+            .query(Request::new(cmd).key(options.as_bytes()))
+            .await
+    }
+
     fn channel(&self, kind: EventKind) -> String {
         format!("{}:{}", kind.channel_prefix(), self.key.redis_key())
     }
@@ -926,18 +935,12 @@ where
 
     /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client. Only entries written or read while a limit is set are tracked, so older entries are never dropped for space.
     pub async fn set_max_size(&self, max: usize, mode: EvictionMode) -> Result<()> {
-        let _: i64 = self
-            .key
-            .core
-            .redis()
-            .hset(
-                self.options_key(),
-                vec![
-                    ("max-size", max.to_string()),
-                    ("mode", mode.as_str().to_string()),
-                ],
-            )
-            .await?;
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(self.options_key()).arg(vec![
+            ("max-size", max.to_string()),
+            ("mode", mode.as_str().to_string()),
+        ]);
+        let _: i64 = self.on_options(cmd).await?;
         Ok(())
     }
 
@@ -964,12 +967,9 @@ where
     ///
     /// As in Redisson, the first listener marks the cache in Redis, and from then on every write publishes its changes until the cache is deleted with [`Object::del`](crate::Object::del). Expired entries are always published by the clean-up.
     pub async fn events_of(&self, kinds: &[EventKind]) -> Result<Events<K, V, C>> {
-        let _: i64 = self
-            .key
-            .core
-            .redis()
-            .hset(self.options_key(), ("has-listeners", 1))
-            .await?;
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(self.options_key()).arg(("has-listeners", 1));
+        let _: i64 = self.on_options(cmd).await?;
         let mut sources = std::vec::Vec::new();
         for kind in EventKind::ALL {
             if kinds.contains(&kind) {
@@ -1051,7 +1051,14 @@ where
 
     /// Number of entries in Redis. As in Redisson, expired entries count until the clean-up deletes them.
     pub async fn len(&self) -> Result<usize> {
-        let len: usize = self.key.core.redis().hlen(self.key.redis_key()).await?;
+        let len: usize = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HLEN");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         Ok(len)
     }
 

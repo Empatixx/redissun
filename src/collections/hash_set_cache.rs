@@ -5,7 +5,6 @@ use crate::lua::Lua;
 use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
-use fred::interfaces::SortedSetsInterface;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -297,9 +296,12 @@ where
     {
         let removed: i64 = self
             .key
-            .core
-            .redis()
-            .zrem(self.key.redis_key(), self.codec.encode(v)?)
+            .query({
+                let mut cmd = redis::cmd("ZREM");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(removed == 1)
     }

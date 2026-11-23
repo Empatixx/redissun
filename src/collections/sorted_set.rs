@@ -9,10 +9,8 @@ use crate::pending::Pending;
 use crate::reply::{self, malformed};
 use bytes::Bytes;
 use fred::interfaces::SortedSetsInterface;
-use fred::types::scan::Scanner;
-use fred::types::sorted_sets::{Ordering, ZCmp};
-use fred::types::SetOptions;
-use futures::{stream, Stream, StreamExt};
+use fred::types::sorted_sets::ZCmp;
+use futures::{stream, Stream, TryStreamExt};
 use redis::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -254,8 +252,8 @@ where
     async fn zadd<Q>(
         &self,
         entries: Vec<(&Q, f64)>,
-        condition: Option<SetOptions>,
-        ordering: Option<Ordering>,
+        condition: Option<&'static str>,
+        ordering: Option<&'static str>,
         changed: bool,
     ) -> Result<usize>
     where
@@ -268,19 +266,15 @@ where
             .into_iter()
             .map(|(v, score)| Ok((score, self.codec.encode(v)?)))
             .collect::<Result<Vec<(f64, Bytes)>>>()?;
-        let count: usize = self
-            .key
-            .core
-            .redis()
-            .zadd(
-                self.key.redis_key(),
-                condition,
-                ordering,
-                changed,
-                false,
-                encoded,
-            )
-            .await?;
+        let mut cmd = self.key.key_cmd("ZADD");
+        cmd.arg(condition).arg(ordering);
+        if changed {
+            cmd.arg("CH");
+        }
+        for (score, member) in &encoded {
+            cmd.arg(Arg::from(*score)).arg(&member[..]);
+        }
+        let count: usize = self.key.query(cmd).await?;
         Ok(count)
     }
 
@@ -299,10 +293,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(self
-            .zadd(vec![(v, score)], Some(SetOptions::NX), None, false)
-            .await?
-            > 0)
+        Ok(self.zadd(vec![(v, score)], Some("NX"), None, false).await? > 0)
     }
 
     /// Changes the score only when the value is already in the set (`ZADD XX CH`); returns whether the score changed.
@@ -311,10 +302,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(self
-            .zadd(vec![(v, score)], Some(SetOptions::XX), None, true)
-            .await?
-            > 0)
+        Ok(self.zadd(vec![(v, score)], Some("XX"), None, true).await? > 0)
     }
 
     /// Adds the value, or raises its score when `score` is greater (`ZADD GT CH`); returns whether anything changed.
@@ -323,10 +311,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(self
-            .zadd(vec![(v, score)], None, Some(Ordering::GreaterThan), true)
-            .await?
-            > 0)
+        Ok(self.zadd(vec![(v, score)], None, Some("GT"), true).await? > 0)
     }
 
     /// Adds the value, or lowers its score when `score` is less (`ZADD LT CH`); returns whether anything changed.
@@ -335,10 +320,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(self
-            .zadd(vec![(v, score)], None, Some(Ordering::LessThan), true)
-            .await?
-            > 0)
+        Ok(self.zadd(vec![(v, score)], None, Some("LT"), true).await? > 0)
     }
 
     /// Adds many values with scores in one round trip; returns how many were new.
@@ -363,13 +345,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.zadd(
-            entries.into_iter().collect(),
-            Some(SetOptions::NX),
-            None,
-            false,
-        )
-        .await
+        self.zadd(entries.into_iter().collect(), Some("NX"), None, false)
+            .await
     }
 
     /// Changes the scores of the values already in the set (`ZADD XX CH`); returns how many changed.
@@ -381,13 +358,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.zadd(
-            entries.into_iter().collect(),
-            Some(SetOptions::XX),
-            None,
-            true,
-        )
-        .await
+        self.zadd(entries.into_iter().collect(), Some("XX"), None, true)
+            .await
     }
 
     /// Adds new values and raises scores that are lower (`ZADD GT CH`); returns how many were added or changed.
@@ -399,13 +371,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.zadd(
-            entries.into_iter().collect(),
-            None,
-            Some(Ordering::GreaterThan),
-            true,
-        )
-        .await
+        self.zadd(entries.into_iter().collect(), None, Some("GT"), true)
+            .await
     }
 
     /// Adds new values and lowers scores that are higher (`ZADD LT CH`); returns how many were added or changed.
@@ -417,13 +384,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.zadd(
-            entries.into_iter().collect(),
-            None,
-            Some(Ordering::LessThan),
-            true,
-        )
-        .await
+        self.zadd(entries.into_iter().collect(), None, Some("LT"), true)
+            .await
     }
 
     async fn ranked_script<Q>(&self, script: &Lua, v: &Q, score: f64, rank: &str) -> Result<usize>
@@ -473,9 +435,13 @@ where
     {
         let score: f64 = self
             .key
-            .core
-            .redis_no_retry()
-            .zincrby(self.key.redis_key(), delta, self.codec.encode(v)?)
+            .query_once({
+                let mut cmd = redis::cmd("ZINCRBY");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(delta);
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(score)
     }
@@ -508,9 +474,12 @@ where
     {
         let score: Option<f64> = self
             .key
-            .core
-            .redis()
-            .zscore(self.key.redis_key(), self.codec.encode(v)?)
+            .query({
+                let mut cmd = redis::cmd("ZSCORE");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(score)
     }
@@ -524,13 +493,15 @@ where
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        let reply: fred::types::Value = self
+        let reply: Value = self
             .key
-            .core
-            .redis()
-            .zmscore(self.key.redis_key(), self.encode_many(values)?)
+            .query({
+                let mut cmd = redis::cmd("ZMSCORE");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&self.encode_many(values)?));
+                cmd
+            })
             .await?;
-        let reply = from_fred(reply);
         let items = match reply {
             Value::Array(items) => items,
             other => vec![other],
@@ -552,9 +523,12 @@ where
     {
         let removed: i64 = self
             .key
-            .core
-            .redis()
-            .zrem(self.key.redis_key(), self.codec.encode(v)?)
+            .query({
+                let mut cmd = redis::cmd("ZREM");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(removed > 0)
     }
@@ -570,9 +544,12 @@ where
         }
         let removed: usize = self
             .key
-            .core
-            .redis()
-            .zrem(self.key.redis_key(), self.encode_many(values)?)
+            .query({
+                let mut cmd = redis::cmd("ZREM");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&self.encode_many(values)?));
+                cmd
+            })
             .await?;
         Ok(removed)
     }
@@ -637,12 +614,9 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let rank: Option<usize> = self
-            .key
-            .core
-            .redis()
-            .zrank(self.key.redis_key(), self.codec.encode(v)?, false)
-            .await?;
+        let mut cmd = self.key.key_cmd("ZRANK");
+        cmd.arg(&self.codec.encode(v)?[..]);
+        let rank: Option<usize> = self.key.query(cmd).await?;
         Ok(rank)
     }
 
@@ -652,13 +626,9 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let reply: fred::types::Value = self
-            .key
-            .core
-            .redis()
-            .zrank(self.key.redis_key(), self.codec.encode(v)?, true)
-            .await?;
-        let reply = from_fred(reply);
+        let mut cmd = self.key.key_cmd("ZRANK");
+        cmd.arg(&self.codec.encode(v)?[..]).arg("WITHSCORE");
+        let reply: Value = self.key.query(cmd).await?;
         match reply {
             Value::Nil => Ok(None),
             Value::Array(items) => match items.as_slice() {
@@ -681,12 +651,9 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let rank: Option<usize> = self
-            .key
-            .core
-            .redis()
-            .zrevrank(self.key.redis_key(), self.codec.encode(v)?, false)
-            .await?;
+        let mut cmd = self.key.key_cmd("ZREVRANK");
+        cmd.arg(&self.codec.encode(v)?[..]);
+        let rank: Option<usize> = self.key.query(cmd).await?;
         Ok(rank)
     }
 
@@ -716,7 +683,14 @@ where
 
     /// Number of values.
     pub async fn len(&self) -> Result<usize> {
-        let length: usize = self.key.core.redis().zcard(self.key.redis_key()).await?;
+        let length: usize = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("ZCARD");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         Ok(length)
     }
 
@@ -732,12 +706,9 @@ where
     }
 
     async fn at(&self, index: i64) -> Result<Option<(V, f64)>> {
-        let raw: Vec<(Bytes, f64)> = self
-            .key
-            .core
-            .redis()
-            .zrange(self.key.redis_key(), index, index, None, false, None, true)
-            .await?;
+        let mut cmd = self.key.key_cmd("ZRANGE");
+        cmd.arg(index).arg(index).arg("WITHSCORES");
+        let raw: Vec<(Bytes, f64)> = self.key.query(cmd).await?;
         self.decode_one(raw)
     }
 
@@ -765,9 +736,11 @@ where
     pub async fn pop_first(&self) -> Result<Option<(V, f64)>> {
         let raw: Vec<(Bytes, f64)> = self
             .key
-            .core
-            .redis()
-            .zpopmin(self.key.redis_key(), None)
+            .query({
+                let mut cmd = redis::cmd("ZPOPMIN");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode_one(raw)
     }
@@ -776,9 +749,11 @@ where
     pub async fn pop_last(&self) -> Result<Option<(V, f64)>> {
         let raw: Vec<(Bytes, f64)> = self
             .key
-            .core
-            .redis()
-            .zpopmax(self.key.redis_key(), None)
+            .query({
+                let mut cmd = redis::cmd("ZPOPMAX");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode_one(raw)
     }
@@ -876,63 +851,59 @@ where
         timeout: Option<Duration>,
     ) -> Result<Option<Vec<(V, f64)>>> {
         let count = redis_index(count.max(1));
-        let reply: std::result::Result<fred::types::Value, fred::error::Error> =
-            if timeout.is_some_and(|timeout| timeout.is_zero()) {
-                self.key
-                    .core
-                    .redis()
-                    .zmpop(self.key.redis_key(), side, Some(count))
-                    .await
-            } else {
-                let seconds = timeout.map_or(0.0, block_seconds);
-                let connection = self.key.core.blocking_client().await?;
+        // `None` when a blocking wait ran out of time.
+        let reply: Option<Value> = if timeout.is_some_and(|timeout| timeout.is_zero()) {
+            let mut cmd = redis::cmd("ZMPOP");
+            cmd.arg(1).arg(self.key.redis_key());
+            cmd.arg(match side {
+                ZCmp::Min => "MIN",
+                ZCmp::Max => "MAX",
+            });
+            cmd.arg("COUNT").arg(count);
+            Some(self.key.query_once::<Value>(cmd).await?)
+        } else {
+            // Blocking pops stay on fred's blocking connection until the transport moves to redis-rs.
+            let seconds = timeout.map_or(0.0, block_seconds);
+            let connection = self.key.core.blocking_client().await?;
+            let reply: std::result::Result<fred::types::Value, fred::error::Error> =
                 no_retry(&*connection)
                     .bzmpop(seconds, self.key.redis_key(), side, Some(count))
-                    .await
-            };
-        match reply.map(from_fred) {
-            Ok(Value::Nil) => Ok(None),
-            Ok(Value::Array(items)) => match items.as_slice() {
+                    .await;
+            match reply {
+                Ok(value) => Some(from_fred(value)),
+                Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => None,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        match reply {
+            None | Some(Value::Nil) => Ok(None),
+            Some(Value::Array(items)) => match items.as_slice() {
                 [_, entries] => Ok(Some(self.decode_all(scored(entries)?)?)),
                 _ => Err(malformed()),
             },
-            Ok(_) => Err(malformed()),
-            Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => Ok(None),
-            Err(error) => Err(error.into()),
+            Some(_) => Err(malformed()),
         }
     }
 
     /// Returns a random value without removing it.
     pub async fn random(&self) -> Result<Option<V>> {
-        let raw: Option<Bytes> = self
-            .key
-            .core
-            .redis()
-            .zrandmember(self.key.redis_key(), None)
-            .await?;
+        let raw: Option<Bytes> = self.key.query(self.key.key_cmd("ZRANDMEMBER")).await?;
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
     /// Returns up to `count` distinct random values without removing them.
     pub async fn random_many(&self, count: usize) -> Result<Vec<V>> {
-        let raw: Vec<Bytes> = self
-            .key
-            .core
-            .redis()
-            .zrandmember(self.key.redis_key(), Some((redis_index(count), false)))
-            .await?;
+        let mut cmd = self.key.key_cmd("ZRANDMEMBER");
+        cmd.arg(redis_index(count));
+        let raw: Vec<Bytes> = self.key.query(cmd).await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
     /// Returns up to `count` distinct random values with their scores without removing them.
     pub async fn random_entries(&self, count: usize) -> Result<Vec<(V, f64)>> {
-        let reply: fred::types::Value = self
-            .key
-            .core
-            .redis()
-            .zrandmember(self.key.redis_key(), Some((redis_index(count), true)))
-            .await?;
-        let reply = from_fred(reply);
+        let mut cmd = self.key.key_cmd("ZRANDMEMBER");
+        cmd.arg(redis_index(count)).arg("WITHSCORES");
+        let reply: Value = self.key.query(cmd).await?;
         self.decode_all(scored(&reply)?)
     }
 
@@ -940,20 +911,13 @@ where
         if range.start >= range.end {
             return Ok(Vec::new());
         }
-        let raw: Vec<(Bytes, f64)> = self
-            .key
-            .core
-            .redis()
-            .zrange(
-                self.key.redis_key(),
-                redis_index(range.start),
-                redis_end(range.end),
-                None,
-                rev,
-                None,
-                true,
-            )
-            .await?;
+        let mut cmd = self.key.key_cmd("ZRANGE");
+        cmd.arg(redis_index(range.start)).arg(redis_end(range.end));
+        if rev {
+            cmd.arg("REV");
+        }
+        cmd.arg("WITHSCORES");
+        let raw: Vec<(Bytes, f64)> = self.key.query(cmd).await?;
         self.decode_all(raw)
     }
 
@@ -974,13 +938,13 @@ where
         }
         let removed: usize = self
             .key
-            .core
-            .redis()
-            .zremrangebyrank(
-                self.key.redis_key(),
-                redis_index(range.start),
-                redis_end(range.end),
-            )
+            .query({
+                let mut cmd = redis::cmd("ZREMRANGEBYRANK");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(redis_index(range.start));
+                cmd.arg(redis_end(range.end));
+                cmd
+            })
             .await?;
         Ok(removed)
     }
@@ -1197,28 +1161,24 @@ where
     /// Streams every value with its score, reading the set in pages with `ZSCAN` like Redisson's iterator.
     /// The order is not guaranteed. A value that was in the set the whole time is returned at least once, and may be returned twice.
     pub fn iter(&self) -> impl Stream<Item = Result<(V, f64)>> + '_ {
-        let pages = Box::pin(self.key.core.redis().zscan(
-            self.key.redis_key(),
-            "*",
-            Some(SCAN_PAGE),
-        ));
-        pages.flat_map(move |page| {
-            let items: Vec<Result<(V, f64)>> = match page {
-                Ok(mut page) => {
-                    let results = page.take_results();
-                    page.next();
-                    results
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(value, score)| {
-                            let bytes: Bytes = value.convert()?;
-                            Ok((self.codec.decode(&bytes)?, score))
-                        })
-                        .collect()
-                }
-                Err(error) => vec![Err(error.into())],
+        stream::try_unfold(Some(Bytes::from_static(b"0")), move |cursor| async move {
+            let Some(cursor) = cursor else {
+                return Ok::<_, crate::error::Error>(None);
             };
-            stream::iter(items)
+            let mut cmd = self.key.key_cmd("ZSCAN");
+            cmd.arg(&cursor[..])
+                .arg("MATCH")
+                .arg("*")
+                .arg("COUNT")
+                .arg(SCAN_PAGE);
+            let (next, page): (Bytes, Vec<(Bytes, f64)>) = self.key.query(cmd).await?;
+            let next = (next.as_ref() != b"0").then_some(next);
+            let items = page
+                .iter()
+                .map(|(bytes, score)| Ok((self.codec.decode(bytes)?, *score)))
+                .collect::<Vec<_>>();
+            Ok(Some((stream::iter(items), next)))
         })
+        .try_flatten()
     }
 }

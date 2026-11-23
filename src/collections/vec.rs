@@ -4,8 +4,6 @@ use crate::error::{Error, Result};
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::ListInterface;
-use fred::types::lists::ListLocation;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -202,9 +200,12 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         self.key
-            .core
-            .redis_no_retry()
-            .rpush::<(), _, _>(self.key.redis_key(), self.codec.encode(v)?)
+            .query_once::<()>({
+                let mut cmd = redis::cmd("RPUSH");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -220,9 +221,12 @@ where
             return Ok(());
         }
         self.key
-            .core
-            .redis_no_retry()
-            .rpush::<(), _, _>(self.key.redis_key(), encoded)
+            .query_once::<()>({
+                let mut cmd = redis::cmd("RPUSH");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&encoded));
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -231,9 +235,11 @@ where
     pub async fn pop(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis_no_retry()
-            .rpop(self.key.redis_key(), None)
+            .query_once({
+                let mut cmd = redis::cmd("RPOP");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
@@ -245,9 +251,12 @@ where
         };
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis()
-            .lindex(self.key.redis_key(), index)
+            .query({
+                let mut cmd = redis::cmd("LINDEX");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(index);
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
@@ -282,11 +291,15 @@ where
     {
         let index = redis_index(index)?;
         self.key
-            .core
-            .redis()
-            .lset::<(), _, _>(self.key.redis_key(), index, self.codec.encode(v)?)
+            .query::<()>({
+                let mut cmd = redis::cmd("LSET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(index);
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await
-            .map_err(|error| out_of_range(error.into()))
+            .map_err(out_of_range)
     }
 
     /// Inserts a value before the index and moves the rest back. It is atomic, costs O(n) and is sent once without retry.
@@ -318,9 +331,12 @@ where
         if index == 0 {
             encoded.reverse();
             self.key
-                .core
-                .redis_no_retry()
-                .lpush::<(), _, _>(self.key.redis_key(), encoded)
+                .query_once::<()>({
+                    let mut cmd = redis::cmd("LPUSH");
+                    cmd.arg(self.key.redis_key());
+                    cmd.arg(crate::client::request::binary(&encoded));
+                    cmd
+                })
                 .await?;
             return Ok(());
         }
@@ -342,7 +358,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.linsert(ListLocation::Before, pivot, v).await
+        self.linsert("BEFORE", pivot, v).await
     }
 
     /// Inserts a value after the first value equal to `pivot` (`LINSERT`).
@@ -352,23 +368,22 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.linsert(ListLocation::After, pivot, v).await
+        self.linsert("AFTER", pivot, v).await
     }
 
-    async fn linsert<Q>(&self, location: ListLocation, pivot: &Q, v: &Q) -> Result<Option<usize>>
+    async fn linsert<Q>(&self, location: &str, pivot: &Q, v: &Q) -> Result<Option<usize>>
     where
         Q: Serialize + ?Sized + Sync,
     {
         let length: i64 = self
             .key
-            .core
-            .redis()
-            .linsert(
-                self.key.redis_key(),
-                location,
-                self.codec.encode(pivot)?,
-                self.codec.encode(v)?,
-            )
+            .query({
+                let mut cmd = self.key.key_cmd("LINSERT");
+                cmd.arg(location)
+                    .arg(&self.codec.encode(pivot)?[..])
+                    .arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(usize::try_from(length).ok().filter(|length| *length > 0))
     }
@@ -379,9 +394,11 @@ where
         let index = redis_index(index)?;
         let raw: Option<Bytes> = if index == 0 {
             self.key
-                .core
-                .redis_no_retry()
-                .lpop(self.key.redis_key(), None)
+                .query_once({
+                    let mut cmd = redis::cmd("LPOP");
+                    cmd.arg(self.key.redis_key());
+                    cmd
+                })
                 .await?
         } else {
             self.key
@@ -420,9 +437,13 @@ where
         };
         let raw: std::vec::Vec<Bytes> = self
             .key
-            .core
-            .redis()
-            .lrange(self.key.redis_key(), start, stop)
+            .query({
+                let mut cmd = redis::cmd("LRANGE");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(start);
+                cmd.arg(stop);
+                cmd
+            })
             .await?;
         list::decode_all(&self.codec, &raw)
     }
@@ -433,9 +454,13 @@ where
             return self.clear().await;
         };
         self.key
-            .core
-            .redis()
-            .ltrim::<(), _>(self.key.redis_key(), start, stop)
+            .query::<()>({
+                let mut cmd = redis::cmd("LTRIM");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(start);
+                cmd.arg(stop);
+                cmd
+            })
             .await?;
         Ok(())
     }

@@ -110,6 +110,18 @@ impl redis::ToRedisArgs for Arg {
     }
 }
 
+/// Encoded values as command arguments: redis-rs writes `&[u8]`, not `bytes::Bytes`.
+pub(crate) fn binary(items: &[bytes::Bytes]) -> std::vec::Vec<&[u8]> {
+    items.iter().map(|item| &item[..]).collect()
+}
+
+/// Encoded field and value pairs as command arguments, see [`binary`].
+pub(crate) fn binary_pairs(
+    pairs: &[(bytes::Bytes, bytes::Bytes)],
+) -> std::vec::Vec<(&[u8], &[u8])> {
+    pairs.iter().map(|(a, b)| (&a[..], &b[..])).collect()
+}
+
 /// A command named `name` with `args`.
 pub(crate) fn command(name: &str, args: impl IntoIterator<Item = Arg>) -> redis::Cmd {
     let mut cmd = redis::cmd(name);

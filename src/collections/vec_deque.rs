@@ -1,4 +1,5 @@
 use crate::client::core::no_retry;
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::list;
 use crate::error::Result;
@@ -140,14 +141,15 @@ where
         if encoded.is_empty() {
             return list::len(&self.key).await;
         }
-        let redis = self.key.core.redis_no_retry();
-        let key = self.key.redis_key();
-        let length: usize = match (front, if_exists) {
-            (true, false) => redis.lpush(key, encoded).await?,
-            (false, false) => redis.rpush(key, encoded).await?,
-            (true, true) => redis.lpushx(key, encoded).await?,
-            (false, true) => redis.rpushx(key, encoded).await?,
+        let name = match (front, if_exists) {
+            (true, false) => "LPUSH",
+            (false, false) => "RPUSH",
+            (true, true) => "LPUSHX",
+            (false, true) => "RPUSHX",
         };
+        let mut cmd = self.key.key_cmd(name);
+        cmd.arg(crate::client::request::binary(&encoded));
+        let length: usize = self.key.query_once(cmd).await?;
         Ok(length)
     }
 
@@ -155,9 +157,11 @@ where
     pub async fn pop_back(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis_no_retry()
-            .rpop(self.key.redis_key(), None)
+            .query_once({
+                let mut cmd = redis::cmd("RPOP");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
@@ -166,9 +170,11 @@ where
     pub async fn pop_front(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis_no_retry()
-            .lpop(self.key.redis_key(), None)
+            .query_once({
+                let mut cmd = redis::cmd("LPOP");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
@@ -197,26 +203,21 @@ where
     pub async fn pop_back_push_front<D: Codec>(&self, to: &VecDeque<V, D>) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis_no_retry()
-            .rpoplpush(self.key.redis_key(), to.key.redis_key())
+            .query_once({
+                let mut cmd = redis::cmd("RPOPLPUSH");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(to.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
 
     /// Moves the front value to the back of `to` and returns it (`LMOVE LEFT RIGHT`). `to` may be this deque.
     pub async fn pop_front_push_back<D: Codec>(&self, to: &VecDeque<V, D>) -> Result<Option<V>> {
-        let raw: Option<Bytes> = self
-            .key
-            .core
-            .redis()
-            .lmove(
-                self.key.redis_key(),
-                to.key.redis_key(),
-                LMoveDirection::Left,
-                LMoveDirection::Right,
-            )
-            .await?;
+        let mut cmd = self.key.key_cmd("LMOVE");
+        cmd.arg(to.key.redis_key()).arg("LEFT").arg("RIGHT");
+        let raw: Option<Bytes> = self.key.query(cmd).await?;
         self.decode(raw)
     }
 
@@ -285,13 +286,12 @@ where
             .chain(others)
             .collect();
         if timeout.is_some_and(|timeout| timeout.is_zero()) {
-            let redis = self.key.core.redis_no_retry();
             for name in names {
-                let raw: Option<Bytes> = if front {
-                    redis.lpop(name.clone(), None).await?
-                } else {
-                    redis.rpop(name.clone(), None).await?
-                };
+                let mut cmd = redis::cmd(if front { "LPOP" } else { "RPOP" });
+                cmd.arg(&name);
+                // Each pop is routed by the list it takes from, which may be another deque.
+                let request = Request::new(cmd).key(name.as_bytes()).once();
+                let raw: Option<Bytes> = self.key.core.query(request).await?;
                 if let Some(value) = self.decode(raw)? {
                     return Ok(Some((name, value)));
                 }
@@ -330,12 +330,21 @@ where
         if timeout.is_some_and(|timeout| timeout.is_zero()) {
             let raw: Option<Bytes> = if front {
                 self.key
-                    .core
-                    .redis()
-                    .lmove(from, to, source, destination)
+                    .query({
+                        let mut cmd = redis::cmd("LMOVE");
+                        cmd.arg(from).arg(to).arg("LEFT").arg("RIGHT");
+                        cmd
+                    })
                     .await?
             } else {
-                self.key.core.redis_no_retry().rpoplpush(from, to).await?
+                self.key
+                    .query_once({
+                        let mut cmd = redis::cmd("RPOPLPUSH");
+                        cmd.arg(from);
+                        cmd.arg(to);
+                        cmd
+                    })
+                    .await?
             };
             return self.decode(raw);
         }
@@ -367,9 +376,12 @@ where
     async fn peek(&self, index: i64) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis()
-            .lindex(self.key.redis_key(), index)
+            .query({
+                let mut cmd = redis::cmd("LINDEX");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(index);
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
