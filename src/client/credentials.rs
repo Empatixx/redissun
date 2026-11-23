@@ -56,6 +56,13 @@ impl Resolver {
     }
 }
 
+impl Resolver {
+    /// Asks for the credentials of a new connection to `address` (`host:port`).
+    pub(crate) async fn resolve(&self, address: &str) -> Result<Credentials> {
+        (self.resolve)(address.to_string()).await
+    }
+}
+
 impl fmt::Debug for Resolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Resolver")

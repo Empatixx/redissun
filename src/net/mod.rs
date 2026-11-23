@@ -2,4 +2,5 @@
 // Nothing uses the layer until the pooled connections move onto it; this goes then.
 #![allow(dead_code)]
 
+pub(crate) mod node;
 pub(crate) mod stream;
