@@ -150,6 +150,8 @@ enum Step<R> {
     Done(Result<R>),
     /// The write did not run where it should: the connection was lost (and `retry` allows it, or Redis never saw it), the node is no master any more (`READONLY`), or the slot moved. Where the servers are is read again before the next try.
     Again(Error),
+    /// Redis never saw the write: no connection could be opened. It waits for one within `timeout` without using an attempt.
+    Unsent(Error),
 }
 
 pub(crate) async fn synced_eval<R: redis::FromRedisValue>(
@@ -160,11 +162,29 @@ pub(crate) async fn synced_eval<R: redis::FromRedisValue>(
     retry: bool,
 ) -> Result<R> {
     let retry_settings = key.core.retry;
+    let deadline = (!retry_settings.timeout.is_zero())
+        .then(|| std::time::Instant::now() + retry_settings.timeout);
     let mut pause = Duration::ZERO;
     let mut attempt = 0;
     loop {
         match synced_step(key, script, &keys, &args, retry).await {
             Step::Done(result) => return result,
+            Step::Unsent(error) => match deadline {
+                Some(deadline) if std::time::Instant::now() < deadline => {
+                    key.core.topology().refresh().await;
+                    pause = retry_settings.delay.delay(0, pause);
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    tokio::time::sleep(pause.min(left)).await;
+                }
+                Some(_) => return Err(Error::Timeout),
+                None if attempt >= retry_settings.attempts => return Err(error),
+                None => {
+                    key.core.topology().refresh().await;
+                    pause = retry_settings.delay.delay(attempt, pause);
+                    attempt += 1;
+                    tokio::time::sleep(pause).await;
+                }
+            },
             Step::Again(error) if attempt >= retry_settings.attempts => return Err(error),
             Step::Again(_) => {
                 key.core.topology().refresh().await;
@@ -197,6 +217,7 @@ async fn synced_step<R: redis::FromRedisValue>(
     }
     let pool = match topology.pool_for(Some(routing.as_bytes())).await {
         Ok(pool) => pool,
+        Err(failure @ Failure::Unsent(_)) => return Step::Unsent(failure.into()),
         Err(failure) if is_connection_failure(&failure) => return Step::Again(failure.into()),
         Err(failure) => return Step::Done(Err(failure.into())),
     };
@@ -242,7 +263,7 @@ async fn synced_step<R: redis::FromRedisValue>(
         let mut replies = match sent {
             Ok(replies) => replies.into_iter(),
             // Sent once unless `retry`, but always again when Redis never saw it.
-            Err(failure @ Failure::Unsent(_)) => return Step::Again(failure.into()),
+            Err(failure @ Failure::Unsent(_)) => return Step::Unsent(failure.into()),
             Err(failure @ Failure::Connection(_)) if retry => return Step::Again(failure.into()),
             Err(failure) => return Step::Done(Err(failure.into())),
         };

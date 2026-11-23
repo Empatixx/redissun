@@ -100,9 +100,45 @@ pub async fn raw_command(parts: &[&str]) -> String {
         request.push_str(&format!("${}\r\n{}\r\n", part.len(), part));
     }
     stream.write_all(request.as_bytes()).await.unwrap();
+    // A long reply arrives in several reads; read until it is whole.
+    let mut reply = Vec::new();
     let mut buffer = vec![0u8; 16384];
-    let read = stream.read(&mut buffer).await.unwrap();
-    String::from_utf8_lossy(&buffer[..read]).to_string()
+    while resp_end(&reply, 0).is_none() {
+        let read = stream.read(&mut buffer).await.unwrap();
+        assert!(read > 0, "redis closed the connection mid-reply");
+        reply.extend_from_slice(&buffer[..read]);
+    }
+    String::from_utf8_lossy(&reply).to_string()
+}
+
+/// Where the RESP2 value that starts at `at` ends, or `None` while it is incomplete.
+fn resp_end(data: &[u8], at: usize) -> Option<usize> {
+    let line_end = at
+        + data
+            .get(at..)?
+            .windows(2)
+            .position(|pair| pair == b"\r\n")?;
+    let after = line_end + 2;
+    let header = std::str::from_utf8(data.get(at + 1..line_end)?).ok()?;
+    match data.get(at)? {
+        b'$' => {
+            let length: i64 = header.parse().ok()?;
+            if length < 0 {
+                return Some(after);
+            }
+            let end = after + length as usize + 2;
+            (data.len() >= end).then_some(end)
+        }
+        b'*' => {
+            let count: i64 = header.parse().ok()?;
+            let mut next = after;
+            for _ in 0..count.max(0) {
+                next = resp_end(data, next)?;
+            }
+            Some(next)
+        }
+        _ => Some(after),
+    }
 }
 
 pub async fn subscribed_channels(pattern: &str) -> usize {

@@ -239,3 +239,84 @@ async fn add_listener_failover() {
     assert!(receives_again(&topic, &mut subscriber, Duration::from_secs(5)).await);
     user.delete().await;
 }
+
+/// A TCP proxy to Redis that can be switched off: it then closes its connections and hangs up on new ones.
+struct Switch {
+    port: u16,
+    on: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    generation: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Switch {
+    async fn start() -> Switch {
+        let target = redis_url().await.trim_start_matches("redis://").to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let generation = std::sync::Arc::new(tokio::sync::watch::Sender::new(0u64));
+        let (accepting, epoch) = (on.clone(), generation.clone());
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                if !accepting.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let target = target.clone();
+                let mut ended = epoch.subscribe();
+                tokio::spawn(async move {
+                    let Ok(mut server) = TcpStream::connect(target).await else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                        _ = ended.changed() => {}
+                    }
+                });
+            }
+        });
+        Switch {
+            port,
+            on,
+            generation,
+        }
+    }
+
+    fn off(&self) {
+        self.on.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.generation.send_modify(|generation| *generation += 1);
+    }
+
+    fn on(&self) {
+        self.on.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// As with fred and Redisson's connection wait, a command whose connection cannot be opened waits for one within `timeout`; it is not sent, so even with no retries it goes once Redis can be reached again.
+#[tokio::test]
+async fn a_command_waits_within_its_timeout_for_redis_to_come_back() {
+    let switch = Switch::start().await;
+    let client = redissun::Client::builder()
+        .url(format!("redis://127.0.0.1:{}", switch.port))
+        .retry_attempts(0)
+        .timeout(Duration::from_secs(5))
+        .reconnection_delay(redissun::DelayStrategy::Constant(Duration::from_millis(
+            100,
+        )))
+        .ping_connection_interval(Duration::ZERO)
+        .build()
+        .await
+        .unwrap();
+    let bucket = client.bucket::<String>(unique("waits"));
+    bucket.set("before").await.unwrap();
+
+    switch.off();
+    sleep(Duration::from_millis(200)).await;
+    let write = tokio::spawn(async move { bucket.set("after").await });
+    sleep(Duration::from_secs(1)).await;
+    switch.on();
+
+    timeout(Duration::from_secs(5), write)
+        .await
+        .expect("the write never finished")
+        .unwrap()
+        .unwrap();
+}

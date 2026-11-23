@@ -128,7 +128,8 @@ impl Core {
                     .send(request.cmd(), request.routing_key())
                     .await
                 {
-                    // A command sent once goes again only when Redis never saw it.
+                    // A command Redis never saw goes again, even one sent once; within `timeout` that costs no attempt, as the command waits for a connection (a node's reconnection delay paces it).
+                    Err(Failure::Unsent(_)) if !self.retry.timeout.is_zero() => {}
                     Err(Failure::Unsent(_)) if attempt < attempts => attempt += 1,
                     Err(Failure::Connection(_)) if !once && attempt < attempts => attempt += 1,
                     result => return result.map_err(Error::from),
