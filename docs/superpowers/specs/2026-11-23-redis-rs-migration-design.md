@@ -22,7 +22,11 @@ Replace fred with redis-rs inside redissun. The public API and its behaviour sta
 3. **Reading from replicas** on redis-rs: `ReadMode::{Master, Replica, MasterAndReplica}` and `replica_scan_interval`, with the tests from `feat/read-mode` (`tests/read_mode.rs` and the topology waits).
 4. **Release 0.21.0**: the settings table below applied, documentation, the benchmark run again on redis-rs, `CHANGELOG` through the pull request notes.
 
-## Settings without an equivalent (decision for the maintainer)
+## Settings without an equivalent
+
+Decided 2026-11-23: a setting Redisson does not have is removed, one it has stays. Checked against `redisson-4.8.0.jar`: none of `commands_per_flush`, `command_queue_limit`, `internal_command_timeout`, `unresponsive_timeout`, `reconnect_on_auth_error`, `max_redirections`, `cluster_cache_update_delay` exists in Redisson, so they are removed in 0.21; `cluster_health_check` becomes `check_slots_coverage` (Redisson's `checkSlotsCoverage`). The proposal below is superseded.
+
+### Original proposal
 
 Version 0.20 added settings that pass straight to fred. Proposed mapping:
 
