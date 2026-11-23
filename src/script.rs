@@ -167,13 +167,13 @@ impl FromReply for String {
 
 impl FromReply for Bytes {
     fn from_reply<C: Codec>(reply: Value, _codec: &C) -> Result<Self> {
-        crate::reply::bytes(&reply).ok_or_else(|| unexpected(&reply, "bytes"))
+        fred_bytes(&reply).ok_or_else(|| unexpected(&reply, "bytes"))
     }
 }
 
 impl<V: DeserializeOwned> FromReply for Decoded<V> {
     fn from_reply<C: Codec>(reply: Value, codec: &C) -> Result<Self> {
-        let bytes = crate::reply::bytes(&reply).ok_or_else(|| unexpected(&reply, "a value"))?;
+        let bytes = fred_bytes(&reply).ok_or_else(|| unexpected(&reply, "a value"))?;
         codec.decode(&bytes).map(Decoded)
     }
 }
@@ -598,4 +598,9 @@ impl<C: Codec> Function<C> {
     pub fn call<'a, R>(&'a self, name: &'a str) -> ScriptCall<'a, C, R> {
         ScriptCall::new(&self.core, &self.codec, Body::Function(name))
     }
+}
+
+/// The bytes of a fred reply. Scripts run on fred until the transport moves to redis-rs.
+fn fred_bytes(reply: &Value) -> Option<Bytes> {
+    crate::reply::bytes(&crate::client::fred_adapter::from_fred(reply.clone()))
 }

@@ -1,11 +1,9 @@
-use crate::client::core::no_retry;
+use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
 use crate::reply::{array, bytes, malformed, number, text};
-use fred::interfaces::ClientLike;
 use fred::types::scripts::Script;
-use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -50,10 +48,10 @@ impl GeoPoint {
         }
     }
 
-    fn values(&self) -> [Value; 2] {
+    fn values(&self) -> [Arg; 2] {
         [
-            Value::from(self.longitude.to_string()),
-            Value::from(self.latitude.to_string()),
+            Arg::from(self.longitude.to_string()),
+            Arg::from(self.latitude.to_string()),
         ]
     }
 }
@@ -173,25 +171,25 @@ impl GeoSearch {
         self
     }
 
-    fn args(&self, args: &mut Vec<Value>) -> Result<()> {
+    fn args(&self, args: &mut Vec<Arg>) -> Result<()> {
         match self.area {
             Area::Radius(radius) => {
-                args.extend([Value::from("BYRADIUS"), dimension(radius)?]);
+                args.extend([Arg::from("BYRADIUS"), dimension(radius)?]);
             }
             Area::Box(width, height) => {
-                args.extend([Value::from("BYBOX"), dimension(width)?, dimension(height)?]);
+                args.extend([Arg::from("BYBOX"), dimension(width)?, dimension(height)?]);
             }
         }
-        args.push(Value::from(self.unit.as_str()));
+        args.push(Arg::from(self.unit.as_str()));
         match self.order {
-            Some(GeoOrder::Asc) => args.push(Value::from("ASC")),
-            Some(GeoOrder::Desc) => args.push(Value::from("DESC")),
+            Some(GeoOrder::Asc) => args.push(Arg::from("ASC")),
+            Some(GeoOrder::Desc) => args.push(Arg::from("DESC")),
             None => {}
         }
         if let Some(count) = self.count {
-            args.extend([Value::from("COUNT"), crate::reply::int(count)]);
+            args.extend([Arg::from("COUNT"), crate::reply::int(count)]);
             if self.any {
-                args.push(Value::from("ANY"));
+                args.push(Arg::from("ANY"));
             }
         }
         Ok(())
@@ -200,18 +198,18 @@ impl GeoSearch {
 
 enum Origin {
     Point(GeoPoint),
-    Member(Value),
+    Member(Arg),
 }
 
 impl Origin {
-    fn args(self, args: &mut Vec<Value>) -> Result<()> {
+    fn args(self, args: &mut Vec<Arg>) -> Result<()> {
         match self {
             Origin::Point(at) => {
                 at.check()?;
                 let [longitude, latitude] = at.values();
-                args.extend([Value::from("FROMLONLAT"), longitude, latitude]);
+                args.extend([Arg::from("FROMLONLAT"), longitude, latitude]);
             }
-            Origin::Member(member) => args.extend([Value::from("FROMMEMBER"), member]),
+            Origin::Member(member) => args.extend([Arg::from("FROMMEMBER"), member]),
         }
         Ok(())
     }
@@ -221,19 +219,19 @@ fn missing_member(error: &Error) -> bool {
     matches!(error, Error::Redis(message) if message.contains("could not decode requested zset member"))
 }
 
-fn dimension(size: f64) -> Result<Value> {
+fn dimension(size: f64) -> Result<Arg> {
     if size.is_finite() && size >= 0.0 {
-        Ok(Value::from(size.to_string()))
+        Ok(Arg::from(size.to_string()))
     } else {
         Err(Error::Config("a search size must be zero or more".into()))
     }
 }
 
-fn float(value: &Value) -> Option<f64> {
+fn float(value: &redis::Value) -> Option<f64> {
     text(value)?.parse().ok()
 }
 
-fn point(value: &Value) -> Option<GeoPoint> {
+fn point(value: &redis::Value) -> Option<GeoPoint> {
     match array(value) {
         [longitude, latitude] => Some(GeoPoint {
             longitude: float(longitude)?,
@@ -287,19 +285,17 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    fn member<Q>(&self, v: &Q) -> Result<Value>
+    fn member<Q>(&self, v: &Q) -> Result<Arg>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(Value::Bytes(self.codec.encode(v)?))
+        Ok(Arg::from(self.codec.encode(v)?))
     }
 
-    async fn add_command(&self, args: Vec<Value>) -> Result<Value> {
-        let command = CustomCommand::new_static("GEOADD", ClusterHash::Offset(0), false);
-        Ok(no_retry(self.key.core.redis())
-            .custom(command, args)
-            .await?)
+    /// `GEOADD` is sent once, as Redisson does.
+    async fn add_command(&self, args: Vec<Arg>) -> Result<redis::Value> {
+        self.key.query_once(command("GEOADD", args)).await
     }
 
     async fn add_entries<'a, Q>(
@@ -311,8 +307,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        let mut args = vec![Value::from(self.key.redis_key())];
-        args.extend(flag.map(Value::from));
+        let mut args = vec![Arg::from(self.key.redis_key())];
+        args.extend(flag.map(Arg::from));
         let first = args.len();
         for (v, at) in entries {
             at.check()?;
@@ -385,8 +381,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let args = vec![Value::from(self.key.redis_key()), self.member(v)?];
-        let reply = self.key.command("ZREM", args, 0).await?;
+        let args = vec![Arg::from(self.key.redis_key()), self.member(v)?];
+        let reply = self.key.command("ZREM", args).await?;
         Ok(number(&reply) == Some(1))
     }
 
@@ -396,8 +392,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let args = vec![Value::from(self.key.redis_key()), self.member(v)?];
-        let reply = self.key.command("GEOPOS", args, 0).await?;
+        let args = vec![Arg::from(self.key.redis_key()), self.member(v)?];
+        let reply = self.key.command("GEOPOS", args).await?;
         Ok(array(&reply).first().and_then(point))
     }
 
@@ -407,8 +403,8 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let args = vec![Value::from(self.key.redis_key()), self.member(v)?];
-        let reply = self.key.command("GEOHASH", args, 0).await?;
+        let args = vec![Arg::from(self.key.redis_key()), self.member(v)?];
+        let reply = self.key.command("GEOHASH", args).await?;
         Ok(array(&reply).first().and_then(text))
     }
 
@@ -418,10 +414,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let reply = self
-            .key
-            .command("GEOPOS", self.members(members)?, 0)
-            .await?;
+        let reply = self.key.command("GEOPOS", self.members(members)?).await?;
         Ok(array(&reply).iter().map(point).collect())
     }
 
@@ -431,19 +424,16 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let reply = self
-            .key
-            .command("GEOHASH", self.members(members)?, 0)
-            .await?;
+        let reply = self.key.command("GEOHASH", self.members(members)?).await?;
         Ok(array(&reply).iter().map(text).collect())
     }
 
-    fn members<Q>(&self, members: &[&Q]) -> Result<Vec<Value>>
+    fn members<Q>(&self, members: &[&Q]) -> Result<Vec<Arg>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        std::iter::once(Ok(Value::from(self.key.redis_key())))
+        std::iter::once(Ok(Arg::from(self.key.redis_key())))
             .chain(members.iter().map(|v| self.member(*v)))
             .collect()
     }
@@ -455,12 +445,12 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let args = vec![
-            Value::from(self.key.redis_key()),
+            Arg::from(self.key.redis_key()),
             self.member(from)?,
             self.member(to)?,
-            Value::from(unit.as_str()),
+            Arg::from(unit.as_str()),
         ];
-        let reply = self.key.command("GEODIST", args, 0).await?;
+        let reply = self.key.command("GEODIST", args).await?;
         Ok(float(&reply))
     }
 
@@ -468,7 +458,7 @@ where
     pub async fn len(&self) -> Result<usize> {
         let reply = self
             .key
-            .command("ZCARD", vec![Value::from(self.key.redis_key())], 0)
+            .command("ZCARD", vec![Arg::from(self.key.redis_key())])
             .await?;
         Ok(number(&reply).unwrap_or(0) as usize)
     }
@@ -480,12 +470,8 @@ where
 
     /// All members in score order, which for a geo set is geohash order (`ZRANGE 0 -1`). After a store with [`GeoSearch::store_dist`] it is nearest first. Redisson's `readAll`.
     pub async fn read_all(&self) -> Result<Vec<V>> {
-        let args = vec![
-            Value::from(self.key.redis_key()),
-            Value::Integer(0),
-            Value::Integer(-1),
-        ];
-        let reply = self.key.command("ZRANGE", args, 0).await?;
+        let args = vec![Arg::from(self.key.redis_key()), Arg::Int(0), Arg::Int(-1)];
+        let reply = self.key.command("ZRANGE", args).await?;
         array(&reply)
             .iter()
             .map(|member| self.codec.decode(&bytes(member).ok_or_else(malformed)?))
@@ -502,11 +488,11 @@ where
         if args.count == Some(0) {
             return Ok(Vec::new());
         }
-        let mut command = vec![Value::from(self.key.redis_key())];
+        let mut command = vec![Arg::from(self.key.redis_key())];
         origin.args(&mut command)?;
         args.args(&mut command)?;
-        command.extend([Value::from("WITHDIST"), Value::from("WITHCOORD")]);
-        let reply = match self.key.command("GEOSEARCH", command, 0).await {
+        command.extend([Arg::from("WITHDIST"), Arg::from("WITHCOORD")]);
+        let reply = match self.key.command("GEOSEARCH", command).await {
             Ok(reply) => reply,
             Err(error) if missing_member(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error),
@@ -531,15 +517,15 @@ where
         args: &GeoSearch,
     ) -> Result<usize> {
         let mut command = vec![
-            Value::from(destination.to_string()),
-            Value::from(self.key.redis_key()),
+            Arg::from(destination.to_string()),
+            Arg::from(self.key.redis_key()),
         ];
         origin.args(&mut command)?;
         args.args(&mut command)?;
         if args.store_dist {
-            command.push(Value::from("STOREDIST"));
+            command.push(Arg::from("STOREDIST"));
         }
-        let reply = match self.key.command("GEOSEARCHSTORE", command, 0).await {
+        let reply = match self.key.command("GEOSEARCHSTORE", command).await {
             Ok(reply) => reply,
             Err(error) if missing_member(&error) => return Ok(0),
             Err(error) => return Err(error),

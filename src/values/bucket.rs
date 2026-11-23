@@ -1,10 +1,11 @@
+use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::Result;
 use crate::object::{millis, HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
 use fred::types::scripts::Script;
-use fred::types::{Expiration, SetOptions, Value};
+use fred::types::{Expiration, SetOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -112,11 +113,11 @@ where
         Ok(stored.is_some())
     }
 
-    async fn get_ex(&self, args: Vec<Value>) -> Result<Option<V>> {
-        let args = std::iter::once(Value::from(self.key.redis_key()))
+    async fn get_ex(&self, args: Vec<Arg>) -> Result<Option<V>> {
+        let args: Vec<Arg> = std::iter::once(Arg::from(self.key.redis_key()))
             .chain(args)
             .collect();
-        let raw: Option<Bytes> = self.key.command("GETEX", args, 0).await?.convert()?;
+        let raw: Option<Bytes> = self.key.query(command("GETEX", args)).await?;
         self.decode(raw)
     }
 
@@ -285,13 +286,13 @@ where
 
     /// Returns the value and sets a time to live on the key (`GETEX PX`). Needs Redis 6.2 or newer.
     pub async fn get_and_expire(&self, ttl: Duration) -> Result<Option<V>> {
-        self.get_ex(vec![Value::from("PX"), Value::from(millis(ttl)?)])
+        self.get_ex(vec![Arg::from("PX"), Arg::from(millis(ttl)?)])
             .await
     }
 
     /// Returns the value and clears the time to live of the key (`GETEX PERSIST`). Needs Redis 6.2 or newer.
     pub async fn get_and_clear_expire(&self) -> Result<Option<V>> {
-        self.get_ex(vec![Value::from("PERSIST")]).await
+        self.get_ex(vec![Arg::from("PERSIST")]).await
     }
 
     /// Length of the encoded value in bytes (`STRLEN`); 0 when the key is missing.

@@ -1,4 +1,6 @@
 use crate::client::core::no_retry;
+use crate::client::fred_adapter::from_fred;
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::Result;
 use crate::object::{block_seconds, HasKey, Key};
@@ -9,8 +11,9 @@ use fred::interfaces::SortedSetsInterface;
 use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
 use fred::types::sorted_sets::{Ordering, ZCmp};
-use fred::types::{SetOptions, Value};
+use fred::types::SetOptions;
 use futures::{stream, Stream, StreamExt};
+use redis::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -115,17 +118,17 @@ fn score_bound(bound: Bound<&f64>, low: bool) -> String {
     }
 }
 
-fn score_bounds(range: &impl RangeBounds<f64>) -> (Value, Value) {
+fn score_bounds(range: &impl RangeBounds<f64>) -> (Arg, Arg) {
     (
-        Value::from(score_bound(range.start_bound(), true)),
-        Value::from(score_bound(range.end_bound(), false)),
+        Arg::from(score_bound(range.start_bound(), true)),
+        Arg::from(score_bound(range.end_bound(), false)),
     )
 }
 
 fn parse_score(value: &Value) -> Result<f64> {
     match value {
         Value::Double(score) => Ok(*score),
-        Value::Integer(score) => Ok(*score as f64),
+        Value::Int(score) => Ok(*score as f64),
         other => {
             let text = reply::text(other).ok_or_else(malformed)?;
             match text.as_str() {
@@ -527,12 +530,13 @@ where
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        let reply: Value = self
+        let reply: fred::types::Value = self
             .key
             .core
             .redis()
             .zmscore(self.key.redis_key(), self.encode_many(values)?)
             .await?;
+        let reply = from_fred(reply);
         let items = match reply {
             Value::Array(items) => items,
             other => vec![other],
@@ -540,7 +544,7 @@ where
         items
             .iter()
             .map(|item| match item {
-                Value::Null => Ok(None),
+                Value::Nil => Ok(None),
                 other => parse_score(other).map(Some),
             })
             .collect()
@@ -654,14 +658,15 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let reply: Value = self
+        let reply: fred::types::Value = self
             .key
             .core
             .redis()
             .zrank(self.key.redis_key(), self.codec.encode(v)?, true)
             .await?;
+        let reply = from_fred(reply);
         match reply {
-            Value::Null => Ok(None),
+            Value::Nil => Ok(None),
             Value::Array(items) => match items.as_slice() {
                 [rank, score] => {
                     let rank = reply::number(rank).ok_or_else(malformed)?;
@@ -794,7 +799,10 @@ where
                 vec![Bytes::from(from.to_string()), Bytes::from(to.to_string())],
             )
             .await?;
-        let values: Vec<Value> = raw.into_iter().map(Value::Bytes).collect();
+        let values: Vec<Value> = raw
+            .into_iter()
+            .map(|bytes| Value::BulkString(bytes.to_vec()))
+            .collect();
         self.decode_all(scored(&Value::Array(values))?)
     }
 
@@ -874,7 +882,7 @@ where
         timeout: Option<Duration>,
     ) -> Result<Option<Vec<(V, f64)>>> {
         let count = redis_index(count.max(1));
-        let reply: std::result::Result<Value, fred::error::Error> =
+        let reply: std::result::Result<fred::types::Value, fred::error::Error> =
             if timeout.is_some_and(|timeout| timeout.is_zero()) {
                 self.key
                     .core
@@ -888,8 +896,8 @@ where
                     .bzmpop(seconds, self.key.redis_key(), side, Some(count))
                     .await
             };
-        match reply {
-            Ok(Value::Null) => Ok(None),
+        match reply.map(from_fred) {
+            Ok(Value::Nil) => Ok(None),
             Ok(Value::Array(items)) => match items.as_slice() {
                 [_, entries] => Ok(Some(self.decode_all(scored(entries)?)?)),
                 _ => Err(malformed()),
@@ -924,12 +932,13 @@ where
 
     /// Returns up to `count` distinct random values with their scores without removing them.
     pub async fn random_entries(&self, count: usize) -> Result<Vec<(V, f64)>> {
-        let reply: Value = self
+        let reply: fred::types::Value = self
             .key
             .core
             .redis()
             .zrandmember(self.key.redis_key(), Some((redis_index(count), true)))
             .await?;
+        let reply = from_fred(reply);
         self.decode_all(scored(&reply)?)
     }
 
@@ -989,17 +998,17 @@ where
         limit: Option<(usize, usize)>,
     ) -> Result<Vec<(V, f64)>> {
         let (min, max) = score_bounds(range);
-        let mut args = vec![Value::from(self.key.redis_key())];
+        let mut args = vec![Arg::from(self.key.redis_key())];
         if rev {
-            args.extend([max, min, Value::from("BYSCORE"), Value::from("REV")]);
+            args.extend([max, min, Arg::from("BYSCORE"), Arg::from("REV")]);
         } else {
-            args.extend([min, max, Value::from("BYSCORE")]);
+            args.extend([min, max, Arg::from("BYSCORE")]);
         }
         if let Some((offset, count)) = limit {
-            args.extend([Value::from("LIMIT"), reply::int(offset), reply::int(count)]);
+            args.extend([Arg::from("LIMIT"), reply::int(offset), reply::int(count)]);
         }
-        args.push(Value::from("WITHSCORES"));
-        let reply = self.key.command("ZRANGE", args, 0).await?;
+        args.push(Arg::from("WITHSCORES"));
+        let reply = self.key.command("ZRANGE", args).await?;
         self.decode_all(scored(&reply)?)
     }
 
@@ -1039,11 +1048,7 @@ where
         let (min, max) = score_bounds(&range);
         let reply = self
             .key
-            .command(
-                "ZCOUNT",
-                vec![Value::from(self.key.redis_key()), min, max],
-                0,
-            )
+            .command("ZCOUNT", vec![Arg::from(self.key.redis_key()), min, max])
             .await?;
         reply::number(&reply)
             .and_then(|count| usize::try_from(count).ok())
@@ -1057,8 +1062,7 @@ where
             .key
             .command(
                 "ZREMRANGEBYSCORE",
-                vec![Value::from(self.key.redis_key()), min, max],
-                0,
+                vec![Arg::from(self.key.redis_key()), min, max],
             )
             .await?;
         reply::number(&reply)
@@ -1066,37 +1070,29 @@ where
             .ok_or_else(malformed)
     }
 
-    fn keys_with(&self, others: &[&SortedSet<V, C>]) -> Vec<Value> {
+    fn keys_with(&self, others: &[&SortedSet<V, C>]) -> Vec<Arg> {
         std::iter::once(self.key.redis_key())
             .chain(others.iter().map(|other| other.key.redis_key()))
-            .map(Value::from)
+            .map(Arg::from)
             .collect()
     }
 
-    fn combine_args(keys: Vec<Value>, weights: &[f64], aggregate: Aggregate) -> Vec<Value> {
+    fn combine_args(keys: Vec<Arg>, weights: &[f64], aggregate: Aggregate) -> Vec<Arg> {
         let mut args = vec![reply::int(keys.len())];
         args.extend(keys);
         if !weights.is_empty() {
-            args.push(Value::from("WEIGHTS"));
-            args.extend(
-                weights
-                    .iter()
-                    .map(|weight| Value::from(score_text(*weight))),
-            );
+            args.push(Arg::from("WEIGHTS"));
+            args.extend(weights.iter().map(|weight| Arg::from(score_text(*weight))));
         }
-        args.push(Value::from("AGGREGATE"));
-        args.push(Value::from(aggregate.as_str()));
+        args.push(Arg::from("AGGREGATE"));
+        args.push(Arg::from(aggregate.as_str()));
         args
     }
 
-    async fn read_combined(
-        &self,
-        command: &'static str,
-        args: Vec<Value>,
-    ) -> Result<Vec<(V, f64)>> {
+    async fn read_combined(&self, command: &'static str, args: Vec<Arg>) -> Result<Vec<(V, f64)>> {
         let mut args = args;
-        args.push(Value::from("WITHSCORES"));
-        let reply = self.key.command(command, args, 1).await?;
+        args.push(Arg::from("WITHSCORES"));
+        let reply = self.key.command(command, args).await?;
         self.decode_all(scored(&reply)?)
     }
 
@@ -1149,11 +1145,11 @@ where
         sources: &[&SortedSet<V, C>],
         weights: Option<(&[f64], Aggregate)>,
     ) -> Result<usize> {
-        let keys: Vec<Value> = sources
+        let keys: Vec<Arg> = sources
             .iter()
-            .map(|source| Value::from(source.key.redis_key()))
+            .map(|source| Arg::from(source.key.redis_key()))
             .collect();
-        let mut args = vec![Value::from(self.key.redis_key())];
+        let mut args = vec![Arg::from(self.key.redis_key())];
         match weights {
             Some((weights, aggregate)) => args.extend(Self::combine_args(keys, weights, aggregate)),
             None => {
@@ -1161,7 +1157,7 @@ where
                 args.extend(keys);
             }
         }
-        let reply = self.key.command(command, args, 0).await?;
+        let reply = self.key.command(command, args).await?;
         reply::number(&reply)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or_else(malformed)

@@ -1,5 +1,5 @@
 use crate::client::core::Core;
-use crate::client::request::Request;
+use crate::client::request::{command, Arg, Request};
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
@@ -231,18 +231,13 @@ impl Key {
             .collect()
     }
 
+    /// Sends the command `name` with `args`, routed by this object's key, and returns the reply as it came.
     pub(crate) async fn command(
         &self,
-        name: &'static str,
-        args: Vec<fred::types::Value>,
-        key_offset: usize,
-    ) -> Result<fred::types::Value> {
-        let command = fred::types::CustomCommand::new_static(
-            name,
-            fred::types::ClusterHash::Offset(key_offset),
-            false,
-        );
-        Ok(fred::interfaces::ClientLike::custom(self.core.redis(), command, args).await?)
+        name: &str,
+        args: std::vec::Vec<Arg>,
+    ) -> Result<redis::Value> {
+        self.query(command(name, args)).await
     }
 
     /// Sends `cmd`, routed by this object's key, and reads the reply as `T`.

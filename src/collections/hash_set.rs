@@ -1,3 +1,4 @@
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::Result;
 use crate::object::{HasKey, Key};
@@ -6,7 +7,6 @@ use bytes::Bytes;
 use fred::interfaces::{KeysInterface, SetsInterface};
 use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
-use fred::types::Value;
 use futures::{stream, Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -381,12 +381,12 @@ where
     pub async fn intersection_len(&self, others: &[&HashSet<V, C>], limit: usize) -> Result<usize> {
         let keys = self.keys_with(others);
         let mut args = vec![reply::int(keys.len())];
-        args.extend(keys.into_iter().map(Value::from));
+        args.extend(keys.into_iter().map(Arg::from));
         if limit > 0 {
-            args.push(Value::from("LIMIT"));
+            args.push(Arg::from("LIMIT"));
             args.push(reply::int(limit));
         }
-        let count = self.key.command("SINTERCARD", args, 1).await?;
+        let count = self.key.command("SINTERCARD", args).await?;
         reply::number(&count)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or_else(malformed)
@@ -395,9 +395,9 @@ where
     async fn store(&self, command: &'static str, sources: &[&HashSet<V, C>]) -> Result<usize> {
         let args = std::iter::once(self.key.redis_key())
             .chain(sources.iter().map(|source| source.key.redis_key()))
-            .map(Value::from)
+            .map(Arg::from)
             .collect();
-        let count = self.key.command(command, args, 0).await?;
+        let count = self.key.command(command, args).await?;
         reply::number(&count)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or_else(malformed)

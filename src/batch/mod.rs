@@ -8,11 +8,12 @@ pub use views::{
 };
 
 use crate::client::core::Core;
+use crate::client::fred_adapter::from_fred;
 use crate::client::retry::DelayStrategy;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::millis as to_millis;
-use crate::reply::{bytes, int, malformed, number};
+use crate::reply::{bytes, malformed, number};
 use bytes::Bytes;
 use engine::*;
 use fred::types::Value;
@@ -153,7 +154,7 @@ impl<C: Codec> Batch<C> {
         name: &'static str,
         args: Result<Vec<Value>>,
         key_offset: usize,
-        decode: impl FnOnce(&Value) -> Result<T> + Send + 'static,
+        decode: impl FnOnce(&redis::Value) -> Result<T> + Send + 'static,
     ) -> BatchFuture<T> {
         let (sender, receiver) = oneshot::channel();
         let op = match args {
@@ -182,7 +183,8 @@ impl<C: Codec> Batch<C> {
             let _ = stored.send(Command::Op(op.clone()));
         }
         let complete: Complete = Box::new(move |reply| {
-            let _ = sender.send(reply.and_then(|value| decode(&value)));
+            // The engine still runs on fred; its replies are read as redis-rs values.
+            let _ = sender.send(reply.and_then(|value| decode(&from_fred(value))));
         });
         let mut ops = self.ops.lock().unwrap_or_else(|e| e.into_inner());
         ops.push((op, complete));
@@ -373,22 +375,32 @@ impl<C: Codec> Batch<C> {
     }
 }
 
-fn optional(reply: &Value) -> Option<Bytes> {
+fn optional(reply: &redis::Value) -> Option<Bytes> {
     bytes(reply)
 }
 
-fn decode_optional<V: DeserializeOwned, C: Codec>(codec: &C, reply: &Value) -> Result<Option<V>> {
+fn decode_optional<V: DeserializeOwned, C: Codec>(
+    codec: &C,
+    reply: &redis::Value,
+) -> Result<Option<V>> {
     optional(reply).map(|raw| codec.decode(&raw)).transpose()
 }
 
-fn whole(reply: &Value) -> usize {
+fn whole(reply: &redis::Value) -> usize {
     number(reply).unwrap_or(0).max(0) as usize
 }
 
 fn synced_from(reply: Option<Value>) -> usize {
-    match reply {
-        Some(Value::Array(items)) => items.get(1).and_then(number).unwrap_or(0).max(0) as usize,
+    match reply.map(from_fred) {
+        Some(redis::Value::Array(items)) => {
+            items.get(1).and_then(number).unwrap_or(0).max(0) as usize
+        }
         Some(other) => number(&other).unwrap_or(0).max(0) as usize,
         None => 0,
     }
+}
+
+/// An integer argument of a batch command. The batch sends its commands on fred until the transport moves to redis-rs.
+pub(super) fn int(number: impl TryInto<i64>) -> Value {
+    Value::Integer(number.try_into().unwrap_or(i64::MAX))
 }

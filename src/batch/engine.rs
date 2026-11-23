@@ -1,7 +1,8 @@
 use super::synced_from;
 use crate::client::core::Core;
 use crate::error::{Error, Result};
-use crate::reply::{bytes, malformed};
+use crate::reply::malformed;
+use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::error::ErrorKind;
 use fred::interfaces::{ClientLike, ClusterInterface, MetricsInterface, TransactionInterface};
@@ -63,7 +64,11 @@ pub(super) struct Op {
 
 impl Op {
     fn slot(&self) -> Option<u16> {
-        let key = self.args.get(self.key_offset).and_then(bytes)?;
+        let key = match self.args.get(self.key_offset)? {
+            Value::Bytes(bytes) => bytes.clone(),
+            Value::String(text) => Bytes::copy_from_slice(text.as_bytes()),
+            _ => return None,
+        };
         Some(redis_keyslot(&key))
     }
 }

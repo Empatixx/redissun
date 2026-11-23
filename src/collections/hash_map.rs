@@ -1,10 +1,10 @@
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::scripts::Script;
-use fred::types::Value;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -573,19 +573,21 @@ where
 
     /// Returns every entry in one call (`HGETALL`).
     pub async fn read_all_entries(&self) -> Result<Vec<(K, V)>> {
-        let raw: Value = self.key.core.redis().hgetall(self.key.redis_key()).await?;
+        let mut cmd = redis::cmd("HGETALL");
+        cmd.arg(self.key.redis_key());
+        let raw: redis::Value = self.key.query(cmd).await?;
         self.decode_pairs(raw)
     }
 
-    fn decode_pairs(&self, raw: Value) -> Result<Vec<(K, V)>> {
+    /// The pairs of an `HGETALL` or `HSCAN` reply: a map in RESP3, a flat array of fields and values in RESP2.
+    fn decode_pairs(&self, raw: redis::Value) -> Result<Vec<(K, V)>> {
         let flat: Vec<Bytes> = match raw {
-            Value::Map(map) => map
-                .inner()
+            redis::Value::Map(map) => map
                 .into_iter()
-                .flat_map(|(field, value)| [Value::from(field), value])
-                .map(|value| value.convert())
+                .flat_map(|(field, value)| [field, value])
+                .map(redis::FromRedisValue::from_redis_value)
                 .collect::<std::result::Result<_, _>>()?,
-            other => other.convert()?,
+            other => redis::FromRedisValue::from_redis_value(other)?,
         };
         flat.as_chunks::<2>()
             .0
@@ -605,15 +607,15 @@ where
                 .command(
                     "HSCAN",
                     vec![
-                        Value::from(self.key.redis_key()),
-                        Value::from(cursor),
-                        Value::from("COUNT"),
-                        Value::from(SCAN_PAGE),
+                        Arg::from(self.key.redis_key()),
+                        Arg::from(cursor),
+                        Arg::from("COUNT"),
+                        Arg::from(SCAN_PAGE),
                     ],
-                    0,
                 )
                 .await?;
-            let (next, page): (Bytes, Value) = reply.convert()?;
+            let (next, page): (Bytes, redis::Value) =
+                redis::FromRedisValue::from_redis_value(reply)?;
             let next = (next.as_ref() != b"0").then_some(next);
             let items = self.decode_pairs(page)?;
             Ok(Some((stream::iter(items.into_iter().map(Ok)), next)))

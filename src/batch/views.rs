@@ -1,8 +1,9 @@
+use super::int;
 use super::*;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::millis as to_millis;
-use crate::reply::{int, malformed, number, text};
+use crate::reply::{malformed, number, text};
 use fred::types::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -404,7 +405,7 @@ where
         name: &'static str,
         v: &impl Serialize,
         extra: Option<f64>,
-        decode: impl FnOnce(&Value) -> Result<T> + Send + 'static,
+        decode: impl FnOnce(&redis::Value) -> Result<T> + Send + 'static,
     ) -> BatchFuture<T> {
         let args = self.batch.codec.encode(v).map(|raw| {
             let mut args = vec![self.key()];
