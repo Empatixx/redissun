@@ -46,7 +46,9 @@ pub(crate) struct Core {
     background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
     pub(crate) evictors: std::sync::Mutex<std::collections::HashMap<String, Evictor>>,
-    pub(crate) exclusive: std::sync::Mutex<Vec<RedisClient>>,
+    /// The idle connections of batches, by node.
+    pub(crate) exclusive:
+        std::sync::Mutex<std::collections::HashMap<crate::net::stream::Address, Vec<Arc<Node>>>>,
     /// The adders of this client by name, so that one name is one counter.
     pub(crate) adders: crate::coordination::adder::Registry,
     /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
@@ -104,7 +106,7 @@ impl Core {
             background: std::sync::Mutex::new(Vec::new()),
             pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
-            exclusive: std::sync::Mutex::new(Vec::new()),
+            exclusive: std::sync::Mutex::new(std::collections::HashMap::new()),
             adders: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
         });
@@ -379,22 +381,21 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
         };
         let idle = std::mem::take(&mut *strong.exclusive.lock().unwrap_or_else(|e| e.into_inner()));
         drop(strong);
-        for client in idle {
-            let answered = client.is_connected()
-                && matches!(
-                    tokio::time::timeout(wait, client.ping::<()>(None)).await,
-                    Ok(Ok(()))
+        for (address, nodes) in idle {
+            for node in nodes {
+                let answered = matches!(
+                    tokio::time::timeout(wait, node.send(&redis::cmd("PING"))).await,
+                    Ok(Ok(_))
                 );
-            match core.upgrade() {
-                Some(strong) if answered => strong
-                    .exclusive
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(client),
-                _ => {
-                    tokio::spawn(async move {
-                        let _ = client.quit().await;
-                    });
+                match core.upgrade() {
+                    Some(strong) if answered => strong
+                        .exclusive
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entry(address.clone())
+                        .or_default()
+                        .push(node),
+                    _ => node.reset().await,
                 }
             }
         }
@@ -451,8 +452,8 @@ impl Drop for Core {
             if let Some(pubsub) = pubsub {
                 pubsub.quit().await;
             }
-            for client in exclusive {
-                let _ = client.quit().await;
+            for node in exclusive.into_values().flatten() {
+                node.reset().await;
             }
         });
     }

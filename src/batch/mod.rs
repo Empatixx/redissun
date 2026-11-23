@@ -8,7 +8,7 @@ pub use views::{
 };
 
 use crate::client::core::Core;
-use crate::client::fred_adapter::from_fred;
+use crate::client::request::Arg;
 use crate::client::retry::DelayStrategy;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
@@ -16,7 +16,6 @@ use crate::object::millis as to_millis;
 use crate::reply::{bytes, malformed, number};
 use bytes::Bytes;
 use engine::*;
-use fred::types::Value;
 use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -152,7 +151,7 @@ impl<C: Codec> Batch<C> {
     fn queue<T: Send + 'static>(
         &self,
         name: &'static str,
-        args: Result<Vec<Value>>,
+        args: Result<Vec<Arg>>,
         key_offset: usize,
         decode: impl FnOnce(&redis::Value) -> Result<T> + Send + 'static,
     ) -> BatchFuture<T> {
@@ -184,7 +183,7 @@ impl<C: Codec> Batch<C> {
         }
         let complete: Complete = Box::new(move |reply| {
             // The engine still runs on fred; its replies are read as redis-rs values.
-            let _ = sender.send(reply.and_then(|value| decode(&from_fred(value))));
+            let _ = sender.send(reply.and_then(|value| decode(&value)));
         });
         let mut ops = self.ops.lock().unwrap_or_else(|e| e.into_inner());
         ops.push((op, complete));
@@ -292,7 +291,9 @@ impl<C: Codec> Batch<C> {
             let outcome = async {
                 let mut session = Session::begin(&self.core, atomic, Some(limits)).await?;
                 for batch in ops.chunks(HANDED_AT_ONCE) {
-                    batch.iter().for_each(|op| session.send(op.clone()));
+                    for op in batch {
+                        session.send(op.clone()).await?;
+                    }
                     tokio::task::yield_now().await;
                 }
                 session.end(false, self.replication_command(), limits).await
@@ -312,7 +313,7 @@ impl<C: Codec> Batch<C> {
 
     fn replication_command(&self) -> Replication {
         let sync = self.sync?;
-        let timeout = Value::Integer(sync.timeout.as_millis().try_into().unwrap_or(i64::MAX));
+        let timeout = Arg::Int(sync.timeout.as_millis().try_into().unwrap_or(i64::MAX));
         Some(match sync.local_aof {
             Some(local) => ("WAITAOF", vec![int(local), int(sync.slaves), timeout]),
             None => ("WAIT", vec![int(sync.slaves), timeout]),
@@ -321,13 +322,13 @@ impl<C: Codec> Batch<C> {
 
     /// Queues `DEL` for a key; the handle says whether it existed.
     pub fn del(&self, name: impl Into<String>) -> BatchFuture<bool> {
-        let args = Ok(vec![Value::from(name.into())]);
+        let args = Ok(vec![Arg::from(name.into())]);
         self.queue("DEL", args, 0, |reply| Ok(number(reply) == Some(1)))
     }
 
     /// Queues `PEXPIRE` for a key; the handle says whether the key existed.
     pub fn expire(&self, name: impl Into<String>, ttl: Duration) -> BatchFuture<bool> {
-        let args = to_millis(ttl).map(|ttl| vec![Value::from(name.into()), Value::Integer(ttl)]);
+        let args = to_millis(ttl).map(|ttl| vec![Arg::from(name.into()), Arg::Int(ttl)]);
         self.queue("PEXPIRE", args, 0, |reply| Ok(number(reply) == Some(1)))
     }
 
@@ -390,8 +391,8 @@ fn whole(reply: &redis::Value) -> usize {
     number(reply).unwrap_or(0).max(0) as usize
 }
 
-fn synced_from(reply: Option<Value>) -> usize {
-    match reply.map(from_fred) {
+fn synced_from(reply: Option<redis::Value>) -> usize {
+    match reply {
         Some(redis::Value::Array(items)) => {
             items.get(1).and_then(number).unwrap_or(0).max(0) as usize
         }
@@ -400,7 +401,7 @@ fn synced_from(reply: Option<Value>) -> usize {
     }
 }
 
-/// An integer argument of a batch command. The batch sends its commands on fred until the transport moves to redis-rs.
-pub(super) fn int(number: impl TryInto<i64>) -> Value {
-    Value::Integer(number.try_into().unwrap_or(i64::MAX))
+/// An integer argument of a batch command.
+pub(super) fn int(number: impl TryInto<i64>) -> Arg {
+    Arg::Int(number.try_into().unwrap_or(i64::MAX))
 }

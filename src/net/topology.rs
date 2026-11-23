@@ -196,6 +196,15 @@ impl Topology {
         }
     }
 
+    /// Reads where the servers are again: the slot map of a cluster, the master that the sentinels name. A failed read keeps what was known.
+    pub(crate) async fn refresh(&self) {
+        match self {
+            Topology::Single(_) => {}
+            Topology::Sentinel(sentinel) => sentinel.refresh().await,
+            Topology::Cluster(cluster) => drop(cluster.refresh().await),
+        }
+    }
+
     pub(crate) fn is_cluster(&self) -> bool {
         matches!(self, Topology::Cluster(_))
     }
