@@ -10,10 +10,11 @@
 | HashMap insert | `HashMap::insert`, which returns the replaced value | a Lua script with `HGET` and `HSET`, the same as redissun sends | `RMap.put` |
 | HashMap get | `HashMap::get` | `HGET` plus `serde_json` | `RMap.get` |
 | Lock and unlock | `Lock::lock`, `unlock` | `SET NX PX` and a Lua compare-and-delete | `RLock.lock`, `unlock` |
-| Batch of 100 sets | `Batch` | a pipeline | `RBatch` |
+| Batch of 100 sets | `Batch` | a pipeline, each value encoded on its own | `RBatch` |
 
 - The value is a small JSON object of about 80 bytes. Every library stores it as JSON.
-- **Latency** is the median (p50) of one call from one task, after a warm-up. The JVM gets a longer warm-up.
+- **Latency** is the median (p50) of one call from one task, after a warm-up of 3 seconds. The JVM gets a longer warm-up.
+- The Rust libraries take turns going first: each operation starts with a different library, and each run shifts the order again, so no library is always measured on a machine that has not warmed up yet.
 - **Throughput** is the number of operations per second from 64 tasks (64 threads for Redisson), each on its own key, so no operation waits for another.
 - Every library runs with its default settings. redissun uses 4 connections, fred is set to 4, redis-rs uses its one multiplexed connection and Redisson uses its default pool of 64.
 - Redis runs on the same machine, so the numbers show the cost of the client, not the network. On a real network one round trip is 100 to 1000 times longer than the differences you see here.
