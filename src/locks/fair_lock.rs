@@ -1,10 +1,10 @@
+use crate::client::request::Request;
 use crate::error::Result;
 use crate::locks::{
     acquire, fair, force_unlock, unlock_message, Lock, LockGuard, LockRequest, Mode, Wait,
 };
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::ListInterface;
 use std::fmt;
 
 /// A reentrant distributed lock that hands itself to waiters in the order they arrived.
@@ -75,11 +75,13 @@ impl FairLock {
 
     /// Number of owners that wait for the lock.
     pub async fn queue_len(&self) -> Result<usize> {
+        let queue = fair::queue_key(&self.key);
+        let mut cmd = redis::cmd("LLEN");
+        cmd.arg(&queue);
         let length: usize = self
             .key
             .core
-            .redis()
-            .llen(fair::queue_key(&self.key))
+            .query(Request::new(cmd).key(queue.as_bytes()))
             .await?;
         Ok(length)
     }

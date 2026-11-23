@@ -1,5 +1,6 @@
 use crate::client::fred_adapter::from_fred;
 use crate::client::retry::Retry;
+use crate::client::slot::keyslot;
 use crate::error::{Error, Result};
 use crate::lua::Lua;
 use crate::object::Key;
@@ -8,7 +9,6 @@ use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, ClusterInterface};
 use fred::prelude::Options;
 use fred::types::{ClusterHash, CustomCommand, Value};
-use fred::util::redis_keyslot;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -184,7 +184,7 @@ pub(crate) async fn synced_eval<R: redis::FromRedisValue>(
     if settings.single(&client) {
         return plain_eval(key, script, keys, args, retry).await;
     }
-    let slot = redis_keyslot(keys.first().map(String::as_bytes).unwrap_or_default());
+    let slot = keyslot(keys.first().map(String::as_bytes).unwrap_or_default());
     if !wait_supported(key, &client, slot).await? {
         return plain_eval(key, script, keys, args, retry).await;
     }

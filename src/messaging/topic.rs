@@ -1,9 +1,9 @@
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::Key;
 use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
-use fred::interfaces::PubsubInterface;
 use futures::{stream, Stream};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -78,12 +78,11 @@ where
         M: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let receivers: usize = self
-            .key
-            .core
-            .redis()
-            .publish(self.key.redis_key(), self.codec.encode(message)?)
-            .await?;
+        let mut cmd = redis::cmd("PUBLISH");
+        cmd.arg(self.key.redis_key())
+            .arg(&self.codec.encode(message)?[..]);
+        // A channel has no slot; Redis Cluster passes a message on to every node.
+        let receivers: usize = self.key.core.query(Request::new(cmd)).await?;
         Ok(receivers)
     }
 
@@ -108,8 +107,9 @@ where
     /// Number of Redis connections subscribed to the topic, across all programs, like Redisson's `countSubscribers`.
     pub async fn subscriber_count(&self) -> Result<usize> {
         let channel = self.key.redis_key();
-        let counts: HashMap<String, usize> =
-            self.key.core.redis().pubsub_numsub(channel.clone()).await?;
+        let mut cmd = redis::cmd("PUBSUB");
+        cmd.arg("NUMSUB").arg(&channel);
+        let counts: HashMap<String, usize> = self.key.core.query(Request::new(cmd)).await?;
         Ok(counts.get(&channel).copied().unwrap_or(0))
     }
 }

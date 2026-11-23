@@ -6,7 +6,6 @@ use crate::lua::Lua;
 use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
-use fred::interfaces::ListInterface;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -494,7 +493,7 @@ where
 
     /// Number of values that wait for their delay.
     pub async fn len(&self) -> Result<usize> {
-        let length: usize = self.key.core.redis().llen(self.key.redis_key()).await?;
+        let length: usize = self.key.query(self.key.key_cmd("LLEN")).await?;
         Ok(length)
     }
 

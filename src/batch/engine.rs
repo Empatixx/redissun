@@ -1,5 +1,6 @@
 use super::synced_from;
 use crate::client::core::Core;
+use crate::client::slot::keyslot;
 use crate::error::{Error, Result};
 use crate::reply::malformed;
 use bytes::Bytes;
@@ -10,7 +11,6 @@ use fred::prelude::Options;
 use fred::types::cluster::ClusterRouting;
 use fred::types::config::Server;
 use fred::types::{ClusterHash, CustomCommand, Resp3Frame, Value};
-use fred::util::redis_keyslot;
 use futures::FutureExt;
 use std::future::Future;
 use std::pin::Pin;
@@ -69,7 +69,7 @@ impl Op {
             Value::String(text) => Bytes::copy_from_slice(text.as_bytes()),
             _ => return None,
         };
-        Some(redis_keyslot(&key))
+        Some(keyslot(&key))
     }
 }
 

@@ -16,11 +16,11 @@ pub use request::{Lock, LockRequest};
 pub(crate) use scripts::{READ_FORCE_UNLOCK, READ_IS_LOCKED, WRITE_FORCE_UNLOCK};
 pub(crate) use sync::LockSettings;
 
+use crate::client::request::Request;
 use crate::error::{Error, Result};
 use crate::lua::Lua;
 use crate::object::{millis as to_millis, tagged, Key};
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface};
 use scripts::{
     READ_RELEASE, READ_RENEW, READ_UNLOCK_MESSAGE, RELEASE, RENEW, UNLOCK_MESSAGE, WRITE_RELEASE,
 };
@@ -144,9 +144,11 @@ async fn release_inner(
     };
     // The unlock latch makes the script safe to send again: a second run returns what the first one stored, as in Redisson.
     let outcome: Option<i64> = synced_eval(key, script, keys, args, true).await?;
-    let client = key.core.redis().clone();
+    let core = key.core.clone();
     tokio::spawn(async move {
-        let _: std::result::Result<i64, _> = client.del(latch).await;
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(&latch);
+        let _: Result<i64> = core.query(Request::new(cmd).key(latch.as_bytes())).await;
     });
     outcome.map(|_| ()).ok_or(Error::LockNotHeld)
 }
@@ -190,18 +192,22 @@ pub(crate) fn read_unlock_message() -> Bytes {
 }
 
 pub(crate) async fn is_locked(key: &Key) -> Result<bool> {
-    let found: i64 = key.core.redis().exists(key.redis_key()).await?;
+    let found: i64 = key.query(key.key_cmd("EXISTS")).await?;
     Ok(found > 0)
 }
 
 pub(crate) async fn is_held_by_current(key: &Key, mode: Mode) -> Result<bool> {
     let field = held_field(&key.core.owner(), mode);
-    let held: bool = key.core.redis().hexists(key.redis_key(), field).await?;
+    let mut cmd = key.key_cmd("HEXISTS");
+    cmd.arg(field);
+    let held: bool = key.query(cmd).await?;
     Ok(held)
 }
 
 pub(crate) async fn hold_count(key: &Key, mode: Mode) -> Result<u64> {
     let field = held_field(&key.core.owner(), mode);
-    let count: Option<u64> = key.core.redis().hget(key.redis_key(), field).await?;
+    let mut cmd = key.key_cmd("HGET");
+    cmd.arg(field);
+    let count: Option<u64> = key.query(cmd).await?;
     Ok(count.unwrap_or(0))
 }

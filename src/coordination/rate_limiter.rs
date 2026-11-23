@@ -3,7 +3,6 @@ use crate::lua::Lua;
 use crate::object::{millis, Key, Object};
 use crate::pending::Pending;
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface};
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -454,8 +453,7 @@ impl RateLimiter {
 
     /// The configured settings, or `None` when the limiter is not configured.
     pub async fn config(&self) -> Result<Option<RateLimiterConfig>> {
-        let fields: HashMap<String, String> =
-            self.key.core.redis().hgetall(self.key.redis_key()).await?;
+        let fields: HashMap<String, String> = self.key.query(self.key.key_cmd("HGETALL")).await?;
         if fields.is_empty() {
             return Ok(None);
         }
@@ -559,7 +557,9 @@ impl RateLimiter {
     }
 
     async fn delete_all(&self) -> Result<bool> {
-        let removed: i64 = self.key.core.redis().del(self.keys()).await?;
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(self.keys());
+        let removed: i64 = self.key.query(cmd).await?;
         Ok(removed > 0)
     }
 

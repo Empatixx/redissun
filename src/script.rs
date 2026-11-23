@@ -333,7 +333,7 @@ impl<'a, C: Codec, R> ScriptCall<'a, C, R> {
 
 fn custom(name: &'static str, keys: &[String]) -> CustomCommand {
     let hash = match keys.first() {
-        Some(key) => ClusterHash::Custom(fred::util::redis_keyslot(key.as_bytes())),
+        Some(key) => ClusterHash::Custom(crate::client::slot::keyslot(key.as_bytes())),
         None => ClusterHash::Random,
     };
     CustomCommand::new_static(name, hash, false)
