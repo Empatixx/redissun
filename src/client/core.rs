@@ -1,9 +1,9 @@
-use crate::client::fred_adapter;
 use crate::client::request::Request;
 use crate::client::retry::Retry;
-use crate::client::slot::keyslot;
 use crate::error::{Error, Result};
 use crate::lua::Lua;
+use crate::net::node::Failure;
+use crate::net::topology::Topology;
 use crate::pubsub::PubSub;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool, WithOptions};
@@ -33,6 +33,8 @@ pub(crate) struct Startup {
 }
 
 pub(crate) struct Core {
+    /// The servers and the connections to them; every command of `query` goes through it.
+    topology: Arc<Topology>,
     pool: Pool,
     /// Builds the connections that only redissun uses: a batch's, the pub/sub one and those of blocking calls. They have no `command_queue_limit`, because a batch and a resubscription hand many commands over at once and a limit would fail part of them. They have no `unresponsive_timeout` either, because a blocking read or a `WAIT` for replicas waits for its reply on purpose.
     own_connections: Builder,
@@ -54,7 +56,22 @@ pub(crate) struct Core {
 }
 
 impl Core {
-    pub(crate) async fn connect(builder: Builder, startup: Startup) -> Result<Arc<Self>> {
+    pub(crate) async fn connect(
+        builder: Builder,
+        topology: Topology,
+        check_slots_coverage: bool,
+        startup: Startup,
+    ) -> Result<Arc<Self>> {
+        let topology = Arc::new(topology);
+        match tokio::time::timeout(
+            startup.connect_timeout,
+            open(&topology, check_slots_coverage),
+        )
+        .await
+        {
+            Ok(opened) => opened?,
+            Err(_) => return Err(Error::Timeout),
+        }
         let pool = builder
             .build_pool(startup.pool_size)
             .map_err(|e| Error::Config(e.to_string()))?;
@@ -76,6 +93,7 @@ impl Core {
             }
         }
         let core = Arc::new(Self {
+            topology,
             pool,
             own_connections,
             id: Uuid::new_v4().to_string(),
@@ -170,20 +188,37 @@ impl Core {
     }
 
     /// Like [`query`](Core::query), returning the reply as it came.
+    ///
+    /// A command whose connection failed is sent again up to `retry_attempts` times, unless the request is `once`; each attempt waits for the reconnection delay of its node. The `timeout` limits the whole call; zero waits forever.
     pub(crate) async fn query_value(&self, request: Request) -> Result<redis::Value> {
-        let (name, args) = fred_adapter::to_fred(request.cmd())?;
-        let hash = request
-            .routing_key()
-            .map_or(fred::types::ClusterHash::Random, |key| {
-                fred::types::ClusterHash::Custom(keyslot(key))
-            });
-        let command = fred::types::CustomCommand::new(name, hash, false);
-        let client = self.redis();
-        let reply: fred::types::Value = match request.is_once() {
-            true => no_retry(client).custom(command, args).await?,
-            false => client.custom(command, args).await?,
+        let attempts = if request.is_once() {
+            0
+        } else {
+            self.retry.attempts
         };
-        Ok(fred_adapter::from_fred(reply))
+        let send = async {
+            let mut attempt = 0;
+            loop {
+                match self
+                    .topology
+                    .send(request.cmd(), request.routing_key())
+                    .await
+                {
+                    Err(Failure::Connection(_)) if attempt < attempts => attempt += 1,
+                    result => return result.map_err(Error::from),
+                }
+            }
+        };
+        if self.retry.timeout.is_zero() {
+            return send.await;
+        }
+        tokio::time::timeout(self.retry.timeout, send)
+            .await
+            .unwrap_or(Err(Error::Timeout))
+    }
+
+    pub(crate) fn topology(&self) -> &Arc<Topology> {
+        &self.topology
     }
 
     pub(crate) fn redis(&self) -> &RedisClient {
@@ -426,4 +461,33 @@ impl Drop for Core {
             }
         });
     }
+}
+
+/// Opens every pooled connection, after reading the slot map of a cluster, so that `build` fails on an unreachable server and every connection has its name from the start.
+async fn open(topology: &Topology, check_slots_coverage: bool) -> Result<()> {
+    if let Topology::Cluster(cluster) = topology {
+        cluster.refresh().await?;
+        let map = cluster.map();
+        if check_slots_coverage && !map.covers_every_slot() {
+            return Err(Error::Redis(
+                "not every slot of the cluster has a master".into(),
+            ));
+        }
+        for master in map.masters() {
+            cluster.open_pool(&master);
+        }
+    }
+    if let Topology::Sentinel(sentinel) = topology {
+        sentinel.pool().await?;
+    }
+    let mut ping = redis::cmd("PING");
+    ping.arg("redissun");
+    let opened = futures::future::join_all(topology.nodes().into_iter().map(|node| {
+        let ping = ping.clone();
+        async move { node.send(&ping).await.map(|_| ()) }
+    }))
+    .await;
+    opened
+        .into_iter()
+        .try_for_each(|opened| opened.map_err(Error::from))
 }

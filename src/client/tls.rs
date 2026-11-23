@@ -1,14 +1,12 @@
 use crate::error::{Error, Result};
-use fred::rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-};
-use fred::rustls::client::verify_server_cert_signed_by_trust_anchor;
-use fred::rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
-use fred::rustls::pki_types::pem::PemObject;
-use fred::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use fred::rustls::server::ParsedCertificate;
-use fred::rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use fred::types::config::{TlsConfig, TlsConnector, TlsHostMapping};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::verify_server_cert_signed_by_trust_anchor;
+use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,7 +53,16 @@ impl TlsSettings {
             && self.client_auth.is_none()
     }
 
+    /// fred's TLS settings, made from [`client_config`](TlsSettings::client_config); goes with fred.
     pub(crate) fn config(&self) -> Result<TlsConfig> {
+        Ok(TlsConfig {
+            connector: TlsConnector::from(Arc::unwrap_or_clone(self.client_config()?)),
+            hostnames: TlsHostMapping::None,
+        })
+    }
+
+    /// The rustls configuration of every TLS connection of the client.
+    pub(crate) fn client_config(&self) -> Result<Arc<ClientConfig>> {
         let provider = provider();
         let builder = ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -90,10 +97,7 @@ impl TlsSettings {
             }
             None => builder.with_no_client_auth(),
         };
-        Ok(TlsConfig {
-            connector: TlsConnector::from(config),
-            hostnames: TlsHostMapping::None,
-        })
+        Ok(Arc::new(config))
     }
 
     fn roots(&self) -> Result<RootCertStore> {
@@ -105,7 +109,7 @@ impl TlsSettings {
                 }
             }
             None => {
-                let native = fred::rustls_native_certs::load_native_certs();
+                let native = rustls_native_certs::load_native_certs();
                 roots.add_parsable_certificates(native.certs);
             }
         }
@@ -135,9 +139,9 @@ fn provider() -> Arc<CryptoProvider> {
         return installed.clone();
     }
     #[cfg(feature = "tls-rustls-aws-lc")]
-    return Arc::new(fred::rustls::crypto::aws_lc_rs::default_provider());
+    return Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     #[cfg(not(feature = "tls-rustls-aws-lc"))]
-    Arc::new(fred::rustls::crypto::ring::default_provider())
+    Arc::new(rustls::crypto::ring::default_provider())
 }
 
 #[derive(Debug)]
@@ -154,7 +158,7 @@ impl ServerCertVerifier for Verifier {
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         now: UnixTime,
-    ) -> std::result::Result<ServerCertVerified, fred::rustls::Error> {
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         if let Some(roots) = &self.roots {
             let certificate = ParsedCertificate::try_from(end_entity)?;
             verify_server_cert_signed_by_trust_anchor(
@@ -173,7 +177,7 @@ impl ServerCertVerifier for Verifier {
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, fred::rustls::Error> {
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         verify_tls12_signature(
             message,
             cert,
@@ -187,7 +191,7 @@ impl ServerCertVerifier for Verifier {
         message: &[u8],
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, fred::rustls::Error> {
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         verify_tls13_signature(
             message,
             cert,

@@ -70,6 +70,18 @@ pub(crate) fn parse_address(text: &str) -> Option<Address> {
     ))
 }
 
+/// An error reply, with its text as Redis sent it (`NOSCRIPT No matching script…`), which callers match on.
+pub(crate) fn server_failure(error: redis::ServerError) -> Failure {
+    let message = match error.details() {
+        Some(details) => format!("{} {details}", error.code()),
+        None => error.code().to_string(),
+    };
+    match failure(redis::RedisError::from(error)) {
+        redirect @ Failure::Redirect { .. } => redirect,
+        _ => Failure::Other(Error::Redis(message)),
+    }
+}
+
 fn failure(error: redis::RedisError) -> Failure {
     if let Some((address, _)) = error.redirect_node() {
         if let Some(address) = parse_address(address) {
@@ -241,6 +253,8 @@ impl Node {
     ) -> std::result::Result<redis::Value, Failure> {
         let (mut connection, generation) = self.live().await?;
         match connection.send_packed_command(cmd).await {
+            // redis-rs hands an error reply over as a value; it is a failure like any other.
+            Ok(redis::Value::ServerError(error)) => Err(server_failure(error)),
             Ok(value) => Ok(value),
             Err(error) => {
                 let failure = failure(error);
@@ -300,7 +314,19 @@ mod tests {
     async fn redis() -> (ContainerAsync<Redis>, Address) {
         let container = Redis::default().with_tag("7.4").start().await.unwrap();
         let port = container.get_host_port_ipv4(6379).await.unwrap();
-        (container, Address::new("127.0.0.1", port))
+        let address = Address::new("127.0.0.1", port);
+        // The port is mapped before Redis listens on it.
+        let probe = Node::new(
+            address.clone(),
+            Arc::new(settings(None, NodeCredentials::None)),
+        );
+        for _ in 0..100 {
+            if probe.send(&command("PING", &[])).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        (container, address)
     }
 
     fn settings(name: Option<&str>, credentials: NodeCredentials) -> NodeSettings {
@@ -364,6 +390,23 @@ mod tests {
         node.send(&command("SET", &["k", "v"])).await.unwrap();
         let value = node.send(&command("GET", &["k"])).await.unwrap();
         assert_eq!(value, redis::Value::BulkString(b"v".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn an_error_reply_is_a_failure_not_a_value() {
+        let (_container, address) = redis().await;
+        let node = Node::new(address, Arc::new(settings(None, NodeCredentials::None)));
+        let failure = node
+            .send(&command(
+                "EVALSHA",
+                &["0000000000000000000000000000000000000000", "0"],
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&failure, super::Failure::Other(crate::error::Error::Redis(message)) if message.contains("NOSCRIPT")),
+            "{failure:?}"
+        );
     }
 
     #[tokio::test]

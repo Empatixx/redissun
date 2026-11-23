@@ -409,6 +409,11 @@ impl Cluster {
         Err(last)
     }
 
+    /// The pool to `address`, created when there is none yet.
+    pub(crate) fn open_pool(&self, address: &Address) -> Arc<Pool> {
+        self.pool(address)
+    }
+
     async fn pool_for(&self, key: Option<&[u8]>) -> Result<Arc<Pool>, Failure> {
         let map = self.map();
         let address = match key {

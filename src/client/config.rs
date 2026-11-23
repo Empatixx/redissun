@@ -547,13 +547,92 @@ impl<C: Codec> ClientBuilder<C> {
         keepalive
     }
 
+    /// The servers behind the URL, and how every connection to them is opened.
+    fn topology(&self, url: &str) -> Result<crate::net::topology::Topology> {
+        use crate::net::node::{NodeCredentials, NodeSettings};
+        use crate::net::topology::{Cluster, Pool, Sentinel, Topology};
+        use crate::net::url::Kind;
+        let target = crate::net::url::parse(url)?;
+        let settings = &self.settings;
+        let credentials = match &settings.resolver {
+            Some(resolver) => NodeCredentials::Resolver(resolver.clone()),
+            None => {
+                let username = settings
+                    .username
+                    .clone()
+                    .or_else(|| target.username.clone());
+                let password = settings
+                    .password
+                    .clone()
+                    .or_else(|| target.password.clone());
+                match (username, password) {
+                    (None, None) => NodeCredentials::None,
+                    (username, password) => {
+                        NodeCredentials::Fixed(crate::Credentials { username, password })
+                    }
+                }
+            }
+        };
+        let stream = crate::net::stream::StreamSettings {
+            connect_timeout: settings.connect_timeout,
+            tcp_no_delay: settings.tcp_no_delay,
+            keep_alive: settings.keep_alive.then(|| self.keepalive()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+            tls: if target.tls {
+                Some(settings.tls.client_config()?)
+            } else {
+                None
+            },
+        };
+        let node = std::sync::Arc::new(NodeSettings {
+            stream: stream.clone(),
+            db: settings.database.or(target.database).map(i64::from),
+            credentials,
+            client_name: settings.client_name.clone(),
+            resp3: false,
+            push: None,
+            reconnection_delay: settings.reconnection_delay,
+        });
+        Ok(match target.kind {
+            Kind::Single => {
+                Topology::Single(Pool::new(&target.nodes[0], settings.pool_size, &node))
+            }
+            Kind::Sentinel { service } => {
+                // Sentinels are asked without the master's database, credentials or name.
+                let sentinels = std::sync::Arc::new(NodeSettings {
+                    stream,
+                    db: None,
+                    credentials: NodeCredentials::None,
+                    client_name: None,
+                    resp3: false,
+                    push: None,
+                    reconnection_delay: settings.reconnection_delay,
+                });
+                Topology::Sentinel(Sentinel::new(
+                    target.nodes,
+                    service,
+                    settings.pool_size,
+                    node,
+                    sentinels,
+                ))
+            }
+            Kind::Cluster => {
+                Topology::Cluster(Cluster::new(target.nodes, settings.pool_size, node))
+            }
+        })
+    }
+
     /// Connects and returns the client.
     pub async fn build(self) -> Result<Client<C>> {
         let url = self.validate()?;
         let builder = self.fred_builder(&url)?;
+        let topology = self.topology(&url)?;
+        let check_slots_coverage = self.settings.cluster_health_check;
         let settings = self.settings;
         let core = Core::connect(
             builder,
+            topology,
+            check_slots_coverage,
             Startup {
                 pool_size: settings.pool_size,
                 lock_lease: settings.lock_lease,
