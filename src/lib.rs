@@ -16,6 +16,14 @@
 //! ```
 
 #![deny(missing_docs)]
+// The library returns errors instead of panicking. clippy.toml allows these calls in tests, where a panic is a failed test.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod batch;
