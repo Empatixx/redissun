@@ -482,7 +482,7 @@ async fn a_nan_score_is_rejected_when_queued() {
 }
 
 #[tokio::test]
-async fn order() {
+async fn stored_batches_on_one_connection_each_get_their_own_replies() {
     let client = connect_with(|builder| builder.pool_size(1)).await;
     let mut tasks = Vec::new();
     for _ in 0..2 {
@@ -505,7 +505,7 @@ async fn order() {
 }
 
 #[tokio::test]
-async fn convertor() {
+async fn replies_are_decoded_per_command_in_every_mode() {
     let client = client().await;
     for batch in modes(&client) {
         let zset = unique("myZKey");
@@ -548,7 +548,7 @@ async fn convertor() {
 }
 
 #[tokio::test]
-async fn performance() {
+async fn hundreds_of_batches_of_reads_return_the_stored_values() {
     let client = client().await;
     let name = unique("map");
     let map = client.hash_map::<String, String>(name.clone());
@@ -573,7 +573,7 @@ async fn performance() {
 }
 
 #[tokio::test]
-async fn skip_result() {
+async fn batches_with_dropped_handles_do_not_disturb_concurrent_commands() {
     let client = client().await;
     let shared = unique("test");
     let mut tasks = Vec::new();
@@ -694,7 +694,7 @@ async fn sync_slaves_wait() {
 }
 
 #[tokio::test]
-async fn write_timeout() {
+async fn ten_thousand_inserts_execute_well_within_the_timeout() {
     let client = client().await;
     for batch in modes(&client) {
         let name = unique("test");
@@ -733,7 +733,7 @@ async fn skip_result_in_both_modes() {
 }
 
 #[tokio::test]
-async fn batch_npe() {
+async fn deleting_keys_set_in_the_same_batch_succeeds() {
     let client = client().await;
     for batch in modes(&client) {
         let a1 = unique("A1");
@@ -748,7 +748,7 @@ async fn batch_npe() {
 }
 
 #[tokio::test]
-async fn atomic() {
+async fn an_atomic_batch_returns_every_reply_in_order() {
     let client = client().await;
     let batch = client.batch().atomic();
     let (a1, a2, a3) = (unique("A1"), unique("A2"), unique("A3"));
@@ -766,7 +766,7 @@ async fn atomic() {
 }
 
 #[tokio::test]
-async fn different_codecs() {
+async fn maps_with_different_value_types_share_one_batch() {
     let client = client().await;
     for batch in [
         client.batch(),
@@ -793,7 +793,7 @@ async fn different_codecs() {
 }
 
 #[tokio::test]
-async fn batch_list() {
+async fn five_hundred_pushes_to_one_list_count_as_commands() {
     let client = client().await;
     for batch in modes(&client) {
         let list = batch.vec::<i64>(unique("list"));
@@ -805,7 +805,7 @@ async fn batch_list() {
 }
 
 #[tokio::test]
-async fn batch_ping() {
+async fn a_batch_that_waits_while_connections_are_pinged_still_executes() {
     let client =
         connect_with(|builder| builder.ping_connection_interval(Duration::from_millis(100))).await;
     for batch in modes(&client) {
@@ -817,7 +817,7 @@ async fn batch_ping() {
 }
 
 #[tokio::test]
-async fn shutdown_timeout() {
+async fn a_batch_finishes_before_the_client_is_dropped() {
     for stored in [false, true] {
         let client = client().await;
         let batch = if stored {
@@ -855,7 +855,7 @@ async fn batch_big_request() {
 }
 
 #[tokio::test]
-async fn empty() {
+async fn an_empty_batch_executes_in_every_mode() {
     let client = client().await;
     for batch in modes(&client) {
         assert_eq!(batch.execute().await.unwrap().commands, 0);
@@ -863,7 +863,7 @@ async fn empty() {
 }
 
 #[tokio::test]
-async fn ordering() {
+async fn handles_queued_from_many_tasks_resolve_in_queue_order() {
     let client = client().await;
     for stored in [false, true] {
         let batch = Arc::new(if stored {
@@ -900,7 +900,7 @@ async fn ordering() {
 }
 
 #[tokio::test]
-async fn test() {
+async fn map_and_counter_commands_in_one_batch_return_their_replies() {
     let client = client().await;
     for batch in modes(&client) {
         let name = unique("test");
@@ -1259,7 +1259,7 @@ mod cluster {
     }
 
     #[tokio::test]
-    async fn sync_slaves() {
+    async fn sync_reports_one_replica_in_a_cluster() {
         let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = connect(&topology).await;
@@ -1509,7 +1509,7 @@ mod cluster {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn connection_leak() {
+    async fn timed_out_batches_do_not_leak_the_only_connection() {
         let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         let client = Client::builder()
@@ -1549,7 +1549,7 @@ mod cluster {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn failover() {
+    async fn a_large_batch_survives_a_cluster_failover() {
         let _turn = ONE_AT_A_TIME.lock().await;
         let topology = Topology::cluster().await;
         wait_for_replicas(&topology).await;

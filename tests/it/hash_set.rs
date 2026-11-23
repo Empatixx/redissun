@@ -105,7 +105,7 @@ async fn set_operations_treat_a_missing_set_as_empty() {
 }
 
 #[tokio::test]
-async fn object_methods() {
+async fn a_hash_set_supports_exists_expire_persist_and_rename() {
     let client = client().await;
     let set = client.hash_set::<String>(unique("set"));
     set.insert("a").await.unwrap();
@@ -168,8 +168,9 @@ fn object(name: &str, value: &str) -> TestObject {
     }
 }
 
+// Redisson: testContainsEach
 #[tokio::test]
-async fn test_contains_each() {
+async fn contains_many_reports_membership_of_each_value() {
     let set = ints(&[0, 1]).await;
     assert!(set.contains_many::<i32>(&[]).await.unwrap().is_empty());
     assert_eq!(set.contains_many(&[&0, &1]).await.unwrap(), [true, true]);
@@ -183,14 +184,16 @@ async fn test_contains_each() {
     );
 }
 
+// Redisson: testRemoveAllCounted
 #[tokio::test]
-async fn test_remove_all_counted() {
+async fn remove_many_returns_how_many_members_were_removed() {
     let set = ints(&[0, 1, 2, 3]).await;
     assert_eq!(set.remove_many(&[&1, &2, &3, &4, &5]).await.unwrap(), 3);
 }
 
+// Redisson: testTryAdd
 #[tokio::test]
-async fn test_try_add() {
+async fn try_extend_adds_nothing_when_any_value_already_exists() {
     let set = client().await.hash_set::<String>(unique("set"));
     let elements = 20_000;
     let names: Vec<String> = (0..elements).map(|i| format!("name{i}")).collect();
@@ -204,8 +207,9 @@ async fn test_try_add() {
     assert_eq!(set.len().await.unwrap(), elements);
 }
 
+// Redisson: testRemoveRandom
 #[tokio::test]
-async fn test_remove_random() {
+async fn pop_removes_random_members_until_the_set_is_empty() {
     let set = ints(&[1, 2, 3]).await;
     for _ in 0..3 {
         assert!([1, 2, 3].contains(&set.pop().await.unwrap().unwrap()));
@@ -213,8 +217,9 @@ async fn test_remove_random() {
     assert_eq!(set.pop().await.unwrap(), None);
 }
 
+// Redisson: testRemoveRandomAmount
 #[tokio::test]
-async fn test_remove_random_amount() {
+async fn pop_many_removes_the_requested_number_of_members() {
     let set = ints(&[1, 2, 3, 4, 5, 6]).await;
     let mut seen = Vec::new();
     for count in [3, 2, 1] {
@@ -227,8 +232,9 @@ async fn test_remove_random_amount() {
     assert!(set.pop_many(4).await.unwrap().is_empty());
 }
 
+// Redisson: testRandomLimited
 #[tokio::test]
-async fn test_random_limited() {
+async fn random_many_returns_members_without_removing_them() {
     let set = ints(&(0..10).collect::<Vec<_>>()).await;
     let random = set.random_many(3).await.unwrap();
     assert_eq!(random.len(), 3);
@@ -236,8 +242,9 @@ async fn test_random_limited() {
     assert_eq!(set.len().await.unwrap(), 10);
 }
 
+// Redisson: testRandom
 #[tokio::test]
-async fn test_random() {
+async fn random_returns_a_member_and_keeps_it_in_the_set() {
     let set = ints(&[1, 2, 3]).await;
     for _ in 0..3 {
         assert!([1, 2, 3].contains(&set.random().await.unwrap().unwrap()));
@@ -245,8 +252,9 @@ async fn test_random() {
     assert_eq!(all(&set).await, [1, 2, 3]);
 }
 
+// Redisson: testAddBean
 #[tokio::test]
-async fn test_add_bean() {
+async fn a_struct_member_round_trips_through_the_set() {
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
     struct SimpleBean {
         lng: i64,
@@ -257,22 +265,25 @@ async fn test_add_bean() {
     assert_eq!(read, [SimpleBean { lng: 1 }]);
 }
 
+// Redisson: testAddLong
 #[tokio::test]
-async fn test_add_long() {
+async fn an_i64_member_round_trips_through_the_set() {
     let set = client().await.hash_set::<i64>(unique("set"));
     set.insert(&1i64).await.unwrap();
     assert_eq!(all(&set).await, [1i64]);
 }
 
+// Redisson: testAddAsync
 #[tokio::test]
-async fn test_add_async() {
+async fn insert_returns_true_and_the_member_is_contained() {
     let set = client().await.hash_set::<i32>(unique("set"));
     assert!(set.insert(&2).await.unwrap());
     assert!(set.contains(&2).await.unwrap());
 }
 
+// Redisson: testRemoveAsync
 #[tokio::test]
-async fn test_remove_async() {
+async fn remove_returns_whether_the_member_was_present() {
     let set = ints(&[1, 3, 7]).await;
     assert!(set.remove(&1).await.unwrap());
     assert!(!set.contains(&1).await.unwrap());
@@ -284,8 +295,9 @@ async fn test_remove_async() {
     assert_eq!(all(&set).await, [7]);
 }
 
+// Redisson: testIteratorRemove
 #[tokio::test]
-async fn test_iterator_remove() {
+async fn removing_members_while_iterating_empties_the_set() {
     let set = set_of(&["1", "4", "2", "5", "3"]).await;
     let values: Vec<String> = set.iter().try_collect().await.unwrap();
     for value in &values {
@@ -305,8 +317,9 @@ async fn test_iterator_remove() {
     assert!(set.is_empty().await.unwrap());
 }
 
+// Redisson: testIteratorSequence
 #[tokio::test]
-async fn test_iterator_sequence() {
+async fn iter_returns_all_thousand_members() {
     let set = client().await.hash_set::<i64>(unique("set"));
     let values: Vec<i64> = (0..1000).collect();
     set.extend(values.iter()).await.unwrap();
@@ -314,24 +327,27 @@ async fn test_iterator_sequence() {
     assert_eq!(read, values.into_iter().collect());
 }
 
+// Redisson: testLong
 #[tokio::test]
-async fn test_long() {
+async fn two_i64_members_are_both_stored() {
     let set = client().await.hash_set::<i64>(unique("set"));
     set.insert(&1).await.unwrap();
     set.insert(&2).await.unwrap();
     assert_eq!(all(&set).await, [1, 2]);
 }
 
+// Redisson: testRetainAll
 #[tokio::test]
-async fn test_retain_all() {
+async fn retain_keeps_only_the_given_members_of_a_large_set() {
     let set = ints(&(0..20_000).collect::<Vec<_>>()).await;
     assert!(set.retain(&[&1, &2]).await.unwrap());
     assert_eq!(all(&set).await, [1, 2]);
     assert_eq!(set.len().await.unwrap(), 2);
 }
 
+// Redisson: testIteratorRemoveHighVolume
 #[tokio::test]
-async fn test_iterator_remove_high_volume() {
+async fn removing_ten_thousand_iterated_members_empties_the_set() {
     let set = ints(&(0..10_000).collect::<Vec<_>>()).await;
     let values: Vec<i32> = set.iter().try_collect().await.unwrap();
     let mut count = 0;
@@ -343,22 +359,25 @@ async fn test_iterator_remove_high_volume() {
     assert_eq!(count, 10_000);
 }
 
+// Redisson: testContainsAll
 #[tokio::test]
-async fn test_contains_all() {
+async fn contains_all_is_true_only_when_every_member_is_present() {
     let set = ints(&(0..200).collect::<Vec<_>>()).await;
     assert!(set.contains_all::<i32>(&[]).await.unwrap());
     assert!(set.contains_all(&[&30, &11]).await.unwrap());
     assert!(!set.contains_all(&[&30, &711, &11]).await.unwrap());
 }
 
+// Redisson: testToArray
 #[tokio::test]
-async fn test_to_array() {
+async fn iter_returns_every_inserted_string_member() {
     let set = set_of(&["1", "4", "2", "5", "3"]).await;
     assert_eq!(all(&set).await, ["1", "2", "3", "4", "5"]);
 }
 
+// Redisson: testContains
 #[tokio::test]
-async fn test_contains() {
+async fn contains_matches_struct_members_by_value() {
     let set = client().await.hash_set::<TestObject>(unique("set"));
     for (name, value) in [("1", "2"), ("1", "2"), ("2", "3"), ("3", "4"), ("5", "6")] {
         set.insert(&object(name, value)).await.unwrap();
@@ -368,8 +387,9 @@ async fn test_contains() {
     assert!(!set.contains(&object("1", "9")).await.unwrap());
 }
 
+// Redisson: testDuplicates
 #[tokio::test]
-async fn test_duplicates() {
+async fn inserting_an_equal_struct_twice_stores_it_once() {
     let set = client().await.hash_set::<TestObject>(unique("set"));
     for (name, value) in [("1", "2"), ("1", "2"), ("2", "3"), ("3", "4"), ("5", "6")] {
         set.insert(&object(name, value)).await.unwrap();
@@ -377,21 +397,24 @@ async fn test_duplicates() {
     assert_eq!(set.len().await.unwrap(), 4);
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn len_counts_each_distinct_member_once() {
     let set = ints(&[1, 2, 3, 3, 4, 5, 5]).await;
     assert_eq!(set.len().await.unwrap(), 5);
 }
 
+// Redisson: testRetainAllEmpty
 #[tokio::test]
-async fn test_retain_all_empty() {
+async fn retain_with_nothing_empties_the_set() {
     let set = ints(&[1, 2, 3, 4, 5]).await;
     assert!(set.retain::<i32>(&[]).await.unwrap());
     assert_eq!(set.len().await.unwrap(), 0);
 }
 
+// Redisson: testRetainAllNoModify
 #[tokio::test]
-async fn test_retain_all_no_modify() {
+async fn retain_of_every_member_reports_no_change() {
     let set = ints(&[1, 2]).await;
     assert!(!set.retain(&[&1, &2]).await.unwrap());
     assert_eq!(all(&set).await, [1, 2]);
@@ -415,15 +438,17 @@ async fn three_sets(
     sets
 }
 
+// Redisson: testUnion
 #[tokio::test]
-async fn test_union() {
+async fn store_union_writes_the_union_into_the_set() {
     let [set, set1, set2] = three_sets(&[5, 6], &[1, 2], &[3, 4]).await;
     assert_eq!(set.store_union(&[&set1, &set2]).await.unwrap(), 4);
     assert_eq!(all(&set).await, [1, 2, 3, 4]);
 }
 
+// Redisson: testReadUnion
 #[tokio::test]
-async fn test_read_union() {
+async fn union_returns_all_members_without_changing_the_set() {
     let [set, set1, set2] = three_sets(&[5, 6], &[1, 2], &[3, 4]).await;
     let mut union = set.union(&[&set1, &set2]).await.unwrap();
     union.sort();
@@ -431,15 +456,17 @@ async fn test_read_union() {
     assert_eq!(all(&set).await, [5, 6]);
 }
 
+// Redisson: testDiff
 #[tokio::test]
-async fn test_diff() {
+async fn store_difference_writes_the_difference_into_the_set() {
     let [set, set1, set2] = three_sets(&[5, 6], &[1, 2, 3], &[3, 4, 5]).await;
     assert_eq!(set.store_difference(&[&set1, &set2]).await.unwrap(), 2);
     assert_eq!(all(&set).await, [1, 2]);
 }
 
+// Redisson: testReadDiff
 #[tokio::test]
-async fn test_read_diff() {
+async fn difference_returns_members_missing_from_the_others() {
     let [set, set1, set2] = three_sets(&[5, 7, 6], &[1, 2, 5], &[3, 4, 5]).await;
     let mut diff = set.difference(&[&set1, &set2]).await.unwrap();
     diff.sort();
@@ -447,8 +474,9 @@ async fn test_read_diff() {
     assert_eq!(all(&set).await, [5, 6, 7]);
 }
 
+// Redisson: testCountIntersection
 #[tokio::test]
-async fn test_count_intersection() {
+async fn intersection_len_counts_common_members_up_to_a_limit() {
     let [set, set1, set2] = three_sets(&[1, 2, 3, 4], &[2, 3, 4], &[3, 4, 5]).await;
     assert_eq!(set.intersection_len(&[&set1, &set2], 0).await.unwrap(), 2);
     assert_eq!(set.intersection_len(&[&set1], 0).await.unwrap(), 3);
@@ -456,44 +484,50 @@ async fn test_count_intersection() {
     assert_eq!(all(&set).await, [1, 2, 3, 4]);
 }
 
+// Redisson: testIntersection
 #[tokio::test]
-async fn test_intersection() {
+async fn store_intersection_writes_the_common_members_into_the_set() {
     let [set, set1, set2] = three_sets(&[5, 6], &[1, 2, 3], &[3, 4, 5]).await;
     assert_eq!(set.store_intersection(&[&set1, &set2]).await.unwrap(), 1);
     assert_eq!(all(&set).await, [3]);
 }
 
+// Redisson: testReadIntersection
 #[tokio::test]
-async fn test_read_intersection() {
+async fn intersection_returns_common_members_without_changing_the_set() {
     let [set, set1, set2] = three_sets(&[5, 7, 6], &[1, 2, 5], &[3, 4, 5]).await;
     assert_eq!(set.intersection(&[&set1, &set2]).await.unwrap(), [5]);
     assert_eq!(all(&set).await, [5, 6, 7]);
 }
 
+// Redisson: testMove
 #[tokio::test]
-async fn test_move() {
+async fn move_to_transfers_a_present_member_to_the_other_set() {
     let [set, other, _] = three_sets(&[1, 2], &[], &[]).await;
     assert!(set.move_to(&other, &1).await.unwrap());
     assert_eq!(all(&set).await, [2]);
     assert_eq!(all(&other).await, [1]);
 }
 
+// Redisson: testMoveNoMember
 #[tokio::test]
-async fn test_move_no_member() {
+async fn move_to_of_a_missing_member_changes_neither_set() {
     let [set, other, _] = three_sets(&[1], &[], &[]).await;
     assert!(!set.move_to(&other, &2).await.unwrap());
     assert_eq!(set.len().await.unwrap(), 1);
     assert_eq!(other.len().await.unwrap(), 0);
 }
 
+// Redisson: testRemoveAllEmpty
 #[tokio::test]
-async fn test_remove_all_empty() {
+async fn remove_many_of_nothing_removes_nothing() {
     let set = ints(&[1, 2, 3, 4, 5]).await;
     assert_eq!(set.remove_many::<i32>(&[]).await.unwrap(), 0);
 }
 
+// Redisson: testRemoveAll
 #[tokio::test]
-async fn test_remove_all() {
+async fn remove_many_removes_every_listed_member() {
     let set = ints(&[1, 2, 3, 4, 5]).await;
     assert_eq!(set.remove_many::<i32>(&[]).await.unwrap(), 0);
     assert!(set.remove_many(&[&3, &2, &10, &6]).await.unwrap() > 0);

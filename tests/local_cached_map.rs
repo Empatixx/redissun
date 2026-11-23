@@ -435,8 +435,9 @@ async fn update_test(client: &Client) -> (Ints, Ints) {
     (map1, map2)
 }
 
+// Redisson: testUpdateStrategy
 #[tokio::test]
-async fn test_update_strategy() {
+async fn a_removed_key_is_gone_with_the_update_strategy() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -451,8 +452,9 @@ async fn test_update_strategy() {
     assert!(!map.contains_key("a").await.unwrap());
 }
 
+// Redisson: testPutAfterDelete
 #[tokio::test]
-async fn test_put_after_delete() {
+async fn insert_after_clear_returns_the_latest_value() {
     let _gate = shared().await;
     let map = cached(&client().await, &unique("test")).await;
     for _ in 0..1_000 {
@@ -464,8 +466,9 @@ async fn test_put_after_delete() {
     }
 }
 
+// Redisson: testReadAllValues2
 #[tokio::test]
-async fn test_read_all_values2() {
+async fn values_are_read_through_a_second_instance_of_the_map() {
     let _gate = shared().await;
     let client = client().await;
     let name = unique("test");
@@ -478,8 +481,9 @@ async fn test_read_all_values2() {
     assert_eq!(values.len(), 1);
 }
 
+// Redisson: testReadValuesAndEntries
 #[tokio::test]
-async fn test_read_values_and_entries() {
+async fn values_and_iter_return_all_stored_values_and_entries() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -500,15 +504,17 @@ async fn test_read_values_and_entries() {
     );
 }
 
+// Redisson: testClearEmpty
 #[tokio::test]
-async fn test_clear_empty() {
+async fn clearing_an_empty_map_succeeds() {
     let _gate = shared().await;
     let map = cached(&client().await, &unique("test")).await;
     map.clear().await.unwrap();
 }
 
+// Redisson: testDelete
 #[tokio::test]
-async fn test_delete() {
+async fn clear_returns_whether_the_map_existed() {
     let _gate = shared().await;
     let map = cached(&client().await, &unique("test")).await;
     assert!(!map.clear().await.unwrap());
@@ -516,8 +522,9 @@ async fn test_delete() {
     assert!(map.clear().await.unwrap());
 }
 
+// Redisson: testInvalidationOnClear
 #[tokio::test]
-async fn test_invalidation_on_clear() {
+async fn clear_empties_the_local_cache_of_every_instance() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = invalidation_test(&client).await;
@@ -529,8 +536,9 @@ async fn test_invalidation_on_clear() {
     assert_eq!(map2.len().await.unwrap(), 0);
 }
 
+// Redisson: testInvalidationOnUpdateNonBinaryCodec
 #[tokio::test]
-async fn test_invalidation_on_update_non_binary_codec() {
+async fn an_update_invalidates_the_key_in_the_other_instance() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = invalidation_test(&client).await;
@@ -541,8 +549,9 @@ async fn test_invalidation_on_update_non_binary_codec() {
     assert_eq!(map2.local_len(), 1);
 }
 
+// Redisson: testSyncOnUpdate
 #[tokio::test]
-async fn test_sync_on_update() {
+async fn invalidate_drops_and_update_keeps_entries_updated_elsewhere() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = invalidation_test(&client).await;
@@ -560,8 +569,9 @@ async fn test_sync_on_update() {
     assert_eq!(map2.local_len(), 2);
 }
 
+// Redisson: testNoInvalidationOnUpdate
 #[tokio::test]
-async fn test_no_invalidation_on_update() {
+async fn without_sync_an_update_keeps_the_other_cache_intact() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = lfu_pair(
@@ -585,8 +595,9 @@ async fn test_no_invalidation_on_update() {
     assert_eq!(map2.local_len(), 2);
 }
 
+// Redisson: testLocalCacheState
 #[tokio::test]
-async fn test_local_cache_state() {
+async fn cached_entries_returns_the_locally_cached_entries() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -605,8 +616,9 @@ async fn test_local_cache_state() {
     );
 }
 
+// Redisson: testLocalCacheClear
 #[tokio::test]
-async fn test_local_cache_clear() {
+async fn clear_local_everywhere_empties_caches_but_keeps_the_map() {
     let _gate = shared().await;
     let name = unique("test");
     let (first, second) = (client().await, client().await);
@@ -638,8 +650,9 @@ async fn test_local_cache_clear() {
     assert_eq!(map2.local_len(), 0);
 }
 
+// Redisson: testNoInvalidationOnRemove
 #[tokio::test]
-async fn test_no_invalidation_on_remove() {
+async fn without_sync_a_remove_drops_only_the_local_entry() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = lfu_pair(
@@ -662,8 +675,9 @@ async fn test_no_invalidation_on_remove() {
     assert_eq!(map2.local_len(), 1);
 }
 
+// Redisson: testSyncOnRemove
 #[tokio::test]
-async fn test_sync_on_remove() {
+async fn a_remove_drops_the_key_from_every_cache_with_invalidate_and_update() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = invalidation_test(&client).await;
@@ -708,20 +722,23 @@ async fn check_bounded(policy: EvictionPolicy) {
     assert_eq!(values, (1..=6).collect());
 }
 
+// Redisson: testLfu
 #[tokio::test]
-async fn test_lfu() {
+async fn an_lfu_cache_holds_at_most_its_size_while_redis_keeps_all() {
     let _gate = shared().await;
     check_bounded(EvictionPolicy::Lfu).await;
 }
 
+// Redisson: testLru
 #[tokio::test]
-async fn test_lru() {
+async fn an_lru_cache_holds_at_most_its_size_while_redis_keeps_all() {
     let _gate = shared().await;
     check_bounded(EvictionPolicy::Lru).await;
 }
 
+// Redisson: testSizeCache
 #[tokio::test]
-async fn test_size_cache() {
+async fn local_len_reports_three_entries_with_a_cache_size_of_two() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -737,8 +754,9 @@ async fn test_size_cache() {
     assert_eq!(map.len().await.unwrap(), 3);
 }
 
+// Redisson: testInvalidationOnPut
 #[tokio::test]
-async fn test_invalidation_on_put() {
+async fn an_insert_invalidates_the_keys_cached_by_the_other_instance() {
     let _gate = shared().await;
     let client = client().await;
     let (map1, map2) = invalidation_test(&client).await;
@@ -749,8 +767,9 @@ async fn test_invalidation_on_put() {
     assert_eq!(map2.local_len(), 0);
 }
 
+// Redisson: testPutGetCache
 #[tokio::test]
-async fn test_put_get_cache() {
+async fn inserted_values_are_cached_and_readable_from_another_instance() {
     let _gate = shared().await;
     let client = client().await;
     let name = unique("test");
@@ -782,8 +801,9 @@ async fn test_put_get_cache() {
     assert_eq!(other.get("15").await.unwrap(), Some(3));
 }
 
+// Redisson: testGetStoringCacheMiss
 #[tokio::test]
-async fn test_get_storing_cache_miss() {
+async fn a_stored_cache_miss_counts_locally_but_is_not_an_entry() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -798,8 +818,9 @@ async fn test_get_storing_cache_miss() {
     assert!(map.cached_entries().unwrap().is_empty());
 }
 
+// Redisson: testGetNotStoringCacheMiss
 #[tokio::test]
-async fn test_get_not_storing_cache_miss() {
+async fn a_cache_miss_is_not_stored_when_store_cache_miss_is_off() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -812,8 +833,9 @@ async fn test_get_not_storing_cache_miss() {
     assert_eq!(map.local_len(), 0);
 }
 
+// Redisson: testGetBeforePut
 #[tokio::test]
-async fn test_get_before_put() {
+async fn an_insert_after_a_get_returns_the_new_value_on_read() {
     let _gate = shared().await;
     let client = client().await;
     let name = unique("test");
@@ -830,8 +852,9 @@ async fn test_get_before_put() {
     }
 }
 
+// Redisson: testReadAllEntrySet
 #[tokio::test]
-async fn test_read_all_entry_set() {
+async fn iter_returns_all_entries_and_caches_them_locally() {
     let _gate = shared().await;
     let client = client().await;
     let name = unique("test");
@@ -847,8 +870,9 @@ async fn test_read_all_entry_set() {
     assert_eq!(again, entries);
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn remove_returns_the_old_value_and_drops_it_from_the_cache() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -863,8 +887,9 @@ async fn test_remove() {
     assert_eq!(map.remove("14").await.unwrap(), None);
 }
 
+// Redisson: testFastPut
 #[tokio::test]
-async fn test_fast_put() {
+async fn insert_returns_the_previous_value_and_overwrites_it() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -980,8 +1005,9 @@ async fn an_expired_map_clears_the_cache_of_every_instance() {
     assert_eq!(other.local_len(), 1);
 }
 
+// Redisson: testExpiration
 #[tokio::test]
-async fn test_expiration() {
+async fn an_expired_map_drops_its_cached_entries() {
     let _gate = shared().await;
     common::raw_command(&["CONFIG", "SET", "notify-keyspace-events", "EKx"]).await;
     let map = cached(&client().await, &unique("test")).await;
@@ -993,8 +1019,9 @@ async fn test_expiration() {
     assert_eq!(map.get("12").await.unwrap(), None);
 }
 
+// Redisson: testReadAllValues
 #[tokio::test]
-async fn test_read_all_values() {
+async fn values_match_the_entries_on_this_and_another_instance() {
     let _gate = shared().await;
     let client = client().await;
     let name = unique("test");
@@ -1012,8 +1039,9 @@ async fn test_read_all_values() {
     assert!(expected.values().all(|value| values2.contains(value)));
 }
 
+// Redisson: testInteger
 #[tokio::test]
-async fn test_integer() {
+async fn i32_keys_and_values_round_trip() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -1028,8 +1056,9 @@ async fn test_integer() {
     assert_eq!(map.get(&3).await.unwrap(), Some(4));
 }
 
+// Redisson: testLong
 #[tokio::test]
-async fn test_long() {
+async fn i64_keys_and_values_round_trip() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -1044,8 +1073,9 @@ async fn test_long() {
     assert_eq!(map.get(&3).await.unwrap(), Some(4));
 }
 
+// Redisson: testIterator
 #[tokio::test]
-async fn test_iterator() {
+async fn keys_values_and_iter_return_all_thousand_entries() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -1066,8 +1096,9 @@ async fn test_iterator() {
     assert_eq!(entries.len(), size as usize);
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn len_counts_distinct_keys_across_overwrites_and_removes() {
     let _gate = shared().await;
     let map = simple(&client().await, &unique("simple")).await;
     let put = |key: &'static str, value: &'static str| {
@@ -1098,8 +1129,9 @@ async fn test_size() {
     assert_eq!(map.len().await.unwrap(), 3);
 }
 
+// Redisson: testPutGet
 #[tokio::test]
-async fn test_put_get() {
+async fn get_returns_the_struct_value_stored_for_a_struct_key() {
     let _gate = shared().await;
     let map = simple_with_three_entries(&client().await, &unique("simple")).await;
     let val1 = map.get(&simple_key("33")).await.unwrap().unwrap();
@@ -1108,16 +1140,18 @@ async fn test_put_get() {
     assert_eq!(val2.value, "6");
 }
 
+// Redisson: testContainsKey
 #[tokio::test]
-async fn test_contains_key() {
+async fn contains_key_is_true_only_for_stored_struct_keys() {
     let _gate = shared().await;
     let map = simple_with_three_entries(&client().await, &unique("simple")).await;
     assert!(map.contains_key(&simple_key("33")).await.unwrap());
     assert!(!map.contains_key(&simple_key("34")).await.unwrap());
 }
 
+// Redisson: testRemoveObject
 #[tokio::test]
-async fn test_remove_object() {
+async fn remove_returns_the_struct_value_or_none_for_a_missing_key() {
     let _gate = shared().await;
     let map = simple_with_three_entries(&client().await, &unique("simple")).await;
     assert_eq!(
@@ -1132,8 +1166,9 @@ async fn test_remove_object() {
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
+// Redisson: testValueIterator
 #[tokio::test]
-async fn test_value_iterator() {
+async fn values_returns_each_value_exactly_once() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -1157,8 +1192,9 @@ async fn test_value_iterator() {
     assert_eq!(values.len(), 0);
 }
 
+// Redisson: testEquals
 #[tokio::test]
-async fn test_equals() {
+async fn iter_returns_exactly_the_inserted_entries() {
     let _gate = shared().await;
     let map = cached(&client().await, &unique("simple")).await;
     map.insert("1", "7").await.unwrap();
@@ -1173,8 +1209,9 @@ async fn test_equals() {
     assert_eq!(entries, expected);
 }
 
+// Redisson: testReadAllKeySet
 #[tokio::test]
-async fn test_read_all_key_set() {
+async fn keys_returns_every_key_of_the_map() {
     let _gate = shared().await;
     let map = simple_with_three_entries(&client().await, &unique("simple")).await;
     let keys: Vec<SimpleKey> = map.keys().try_collect().await.unwrap();
@@ -1183,8 +1220,9 @@ async fn test_read_all_key_set() {
     assert!(keys.iter().all(|key| entries.contains_key(key)));
 }
 
+// Redisson: testReadAllKeySetHighAmount
 #[tokio::test]
-async fn test_read_all_key_set_high_amount() {
+async fn keys_returns_all_thousand_keys_of_a_large_map() {
     let _gate = shared().await;
     let map = simple(&client().await, &unique("simple")).await;
     for i in 0..1000 {

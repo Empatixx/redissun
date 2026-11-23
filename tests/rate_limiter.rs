@@ -372,8 +372,9 @@ async fn the_client_clock_and_redisson_key_layout_are_used() {
     );
 }
 
+// Redisson: testKeepAliveTime
 #[tokio::test]
-async fn test_keep_alive_time() {
+async fn keep_alive_deletes_an_idle_limiter_and_acquiring_extends_it() {
     let limiter = client().await.rate_limiter(unique("testKeepAliveTime"));
     limiter
         .try_set_rate_with(
@@ -394,8 +395,9 @@ async fn test_keep_alive_time() {
     assert!(limiter.ttl().await.unwrap().unwrap() > Duration::from_millis(1500));
 }
 
+// Redisson: testExpire2
 #[tokio::test]
-async fn test_expire2() {
+async fn expire_removes_the_limiter_and_its_permit_keys() {
     let name = unique("test1");
     let limiter = client().await.rate_limiter(name.clone());
     limiter
@@ -408,8 +410,9 @@ async fn test_expire2() {
     assert_eq!(keys_of(&name).await, 0);
 }
 
+// Redisson: testRateValue
 #[tokio::test]
-async fn test_rate_value() {
+async fn the_permit_set_never_exceeds_the_rate_under_load() {
     let client = client().await;
     let name = unique("test1");
     let rate = 50;
@@ -444,8 +447,9 @@ async fn test_rate_value() {
     );
 }
 
+// Redisson: testExpire
 #[tokio::test]
-async fn test_expire() {
+async fn an_expired_limiter_leaves_no_keys_behind() {
     let name = unique("limiter");
     let limiter = client().await.rate_limiter(name.clone());
     limiter
@@ -458,8 +462,9 @@ async fn test_expire() {
     assert_eq!(keys_of(&name).await, 0);
 }
 
+// Redisson: testAcquisitionInterval
 #[tokio::test]
-async fn test_acquisition_interval() {
+async fn a_permit_is_free_again_one_interval_later() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     limiter
         .try_set_rate(RateType::Overall, 2, Duration::from_secs(5))
@@ -473,8 +478,9 @@ async fn test_acquisition_interval() {
     assert!(!limiter.try_acquire(1).await.unwrap());
 }
 
+// Redisson: testRateConfig
 #[tokio::test]
-async fn test_rate_config() {
+async fn config_returns_the_rate_interval_and_type_that_were_set() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
         .try_set_rate(RateType::Overall, 1, Duration::from_secs(5))
@@ -486,8 +492,9 @@ async fn test_rate_config() {
     assert_eq!(config.rate_type, RateType::Overall);
 }
 
+// Redisson: testAvailablePermits
 #[tokio::test]
-async fn test_available_permits() {
+async fn available_permits_are_full_again_after_the_interval() {
     let limiter = client().await.rate_limiter(unique("rt2"));
     limiter
         .try_set_rate(RateType::Overall, 10, Duration::from_secs(5))
@@ -499,8 +506,9 @@ async fn test_available_permits() {
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
 }
 
+// Redisson: testUpdateRateConfig
 #[tokio::test]
-async fn test_update_rate_config() {
+async fn set_rate_overwrites_the_stored_config() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
         .try_set_rate(RateType::Overall, 1, Duration::from_secs(5))
@@ -516,8 +524,9 @@ async fn test_update_rate_config() {
     assert_eq!(config.rate_type, RateType::Overall);
 }
 
+// Redisson: testPermitsExceeding
 #[tokio::test]
-async fn test_permits_exceeding() {
+async fn acquiring_above_the_rate_fails_with_the_redisson_message() {
     let limiter = client().await.rate_limiter(unique("myLimiter"));
     limiter
         .try_set_rate(RateType::PerClient, 1, Duration::from_secs(1))
@@ -533,8 +542,9 @@ async fn test_permits_exceeding() {
     assert!(limiter.try_acquire(1).await.unwrap());
 }
 
+// Redisson: testZeroTimeout
 #[tokio::test]
-async fn test_zero_timeout() {
+async fn acquire_with_a_zero_timeout_takes_only_free_permits() {
     let limiter = client().await.rate_limiter(unique("myLimiter"));
     limiter
         .try_set_rate(RateType::Overall, 5, Duration::from_secs(1))
@@ -565,8 +575,9 @@ async fn test_zero_timeout() {
     }
 }
 
+// Redisson: testTryAcquire
 #[tokio::test]
-async fn test_try_acquire() {
+async fn acquire_with_a_timeout_gives_up_without_a_free_permit() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
         .try_set_rate(RateType::Overall, 1, Duration::from_secs(5))
@@ -580,8 +591,9 @@ async fn test_try_acquire() {
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
+// Redisson: testAcquire
 #[tokio::test]
-async fn test_acquire() {
+async fn acquire_waits_for_the_next_interval_once_permits_run_out() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
         .try_set_rate(RateType::Overall, 1, Duration::from_millis(500))
@@ -594,7 +606,7 @@ async fn test_acquire() {
 }
 
 #[tokio::test]
-async fn test() {
+async fn try_acquire_grants_exactly_the_rate_in_every_interval() {
     let limiter = client().await.rate_limiter(unique("test"));
     assert!(limiter
         .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))
@@ -615,8 +627,9 @@ async fn test() {
     }
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn del_removes_the_limiter_keys_and_reports_whether_it_existed() {
     let name = unique("test");
     let limiter = client().await.rate_limiter(name.clone());
     assert!(!limiter.del().await.unwrap());
@@ -698,8 +711,9 @@ fn assert_rate(times: &[u128], rate: usize, interval_ms: u128) {
     );
 }
 
+// Redisson: testConcurrency2
 #[tokio::test]
-async fn test_concurrency2() {
+async fn concurrent_blocking_acquires_keep_to_the_rate() {
     let limiter = client().await.rate_limiter(unique("test"));
     limiter
         .try_set_rate(RateType::Overall, 18, Duration::from_secs(1))
@@ -709,8 +723,9 @@ async fn test_concurrency2() {
     assert_rate(&times, 18, 1000);
 }
 
+// Redisson: testConcurrency
 #[tokio::test]
-async fn test_concurrency() {
+async fn concurrent_try_acquires_keep_to_the_rate() {
     let limiter = client().await.rate_limiter(unique("test"));
     assert!(limiter
         .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))
@@ -724,8 +739,9 @@ async fn test_concurrency() {
     assert_rate(&times, 10, 1000);
 }
 
+// Redisson: testChangeRate
 #[tokio::test]
-async fn test_change_rate() {
+async fn set_rate_changes_the_rate_in_both_modes() {
     let limiter = client().await.rate_limiter(unique("test_change_rate"));
     let second = Duration::from_secs(1);
     limiter
@@ -761,8 +777,9 @@ async fn test_change_rate() {
     assert_eq!(limiter.available_permits().await.unwrap(), 19);
 }
 
+// Redisson: testSetStateArgs
 #[tokio::test]
-async fn test_set_state_args() {
+async fn permits_taken_with_keep_state_still_expire_after_the_interval() {
     let limiter = client().await.rate_limiter(unique("testSetStateArgs"));
     limiter
         .set_rate_with(args(RateType::Overall, 10, Duration::from_secs(1)).keep_state(true))
@@ -775,8 +792,9 @@ async fn test_set_state_args() {
     assert_eq!(limiter.available_permits().await.unwrap(), 7);
 }
 
+// Redisson: testSetStateArgsKeepState
 #[tokio::test]
-async fn test_set_state_args_keep_state() {
+async fn set_rate_with_keep_state_carries_the_used_permits_over() {
     let limiter = client()
         .await
         .rate_limiter(unique("testSetStateArgsKeepState"));
@@ -794,8 +812,9 @@ async fn test_set_state_args_keep_state() {
     assert_eq!(limiter.available_permits().await.unwrap(), 17);
 }
 
+// Redisson: testSetStateArgsNotKeepState
 #[tokio::test]
-async fn test_set_state_args_not_keep_state() {
+async fn set_rate_without_keep_state_frees_every_permit() {
     let limiter = client()
         .await
         .rate_limiter(unique("testSetStateArgsNotKeepState"));
@@ -813,8 +832,9 @@ async fn test_set_state_args_not_keep_state() {
     assert_eq!(limiter.available_permits().await.unwrap(), 20);
 }
 
+// Redisson: testUpdateRateNonExisting
 #[tokio::test]
-async fn test_update_rate_non_existing() {
+async fn update_rate_of_a_missing_limiter_creates_nothing() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateNonExisting"));
@@ -831,8 +851,9 @@ async fn test_update_rate_non_existing() {
     assert!(!limiter.exists().await.unwrap());
 }
 
+// Redisson: testUpdateRateKeepsState
 #[tokio::test]
-async fn test_update_rate_keeps_state() {
+async fn update_rate_with_the_same_settings_keeps_the_limiter_working() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateKeepsState"));
@@ -852,8 +873,9 @@ async fn test_update_rate_keeps_state() {
     assert!(limiter.try_acquire(8).await.unwrap());
 }
 
+// Redisson: testUpdateRateHigherRate
 #[tokio::test]
-async fn test_update_rate_higher_rate() {
+async fn update_rate_to_a_higher_rate_adds_free_permits() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateExistingKeyHigherRate"));
@@ -872,8 +894,9 @@ async fn test_update_rate_higher_rate() {
     assert!(limiter.try_acquire(16).await.unwrap());
 }
 
+// Redisson: testUpdateRateLowerRateNewValuePositive
 #[tokio::test]
-async fn test_update_rate_lower_rate_new_value_positive() {
+async fn update_rate_to_a_lower_rate_removes_free_permits() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateLowerRateNewValuePositive"));
@@ -893,8 +916,9 @@ async fn test_update_rate_lower_rate_new_value_positive() {
     assert!(limiter.try_acquire(2).await.unwrap());
 }
 
+// Redisson: testUpdateRateLowerRateNewValueNegative
 #[tokio::test]
-async fn test_update_rate_lower_rate_new_value_negative() {
+async fn update_rate_below_the_used_permits_leaves_none_free() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateLowerRateNewValueNegative"));
@@ -914,8 +938,9 @@ async fn test_update_rate_lower_rate_new_value_negative() {
     assert!(!limiter.try_acquire(2).await.unwrap());
 }
 
+// Redisson: testUpdateRatePermitResetFull
 #[tokio::test]
-async fn test_update_rate_permit_reset_full() {
+async fn update_rate_after_the_interval_starts_with_every_permit_free() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRatePermitResetFull"));
@@ -934,8 +959,9 @@ async fn test_update_rate_permit_reset_full() {
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
 }
 
+// Redisson: testUpdateRateModeChangeClearsState
 #[tokio::test]
-async fn test_update_rate_mode_change_clears_state() {
+async fn update_rate_to_another_rate_type_clears_the_used_permits() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateModeChangeClearsState"));
@@ -953,8 +979,9 @@ async fn test_update_rate_mode_change_clears_state() {
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
 }
 
+// Redisson: testUpdateRateKeepAliveTimeLessThanIntervalThrows
 #[tokio::test]
-async fn test_update_rate_keep_alive_time_less_than_interval_throws() {
+async fn update_rate_rejects_a_keep_alive_shorter_than_the_interval() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateKeepAliveTimeLessThanIntervalThrows"));
@@ -968,8 +995,9 @@ async fn test_update_rate_keep_alive_time_less_than_interval_throws() {
     assert!(matches!(result, Err(Error::Config(_))));
 }
 
+// Redisson: testUpdateRateRateIntervalChangeDropsExpired
 #[tokio::test]
-async fn test_update_rate_rate_interval_change_drops_expired() {
+async fn update_rate_to_a_shorter_interval_drops_old_permits() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRateRateIntervalChangeDropsExpired"));
@@ -987,8 +1015,9 @@ async fn test_update_rate_rate_interval_change_drops_expired() {
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
 }
 
+// Redisson: testUpdateRatePerClientUsesClientState
 #[tokio::test]
-async fn test_update_rate_per_client_uses_client_state() {
+async fn update_rate_in_per_client_mode_keeps_the_client_usage() {
     let limiter = client()
         .await
         .rate_limiter(unique("testUpdateRatePerClientUsesClientState"));
@@ -1006,8 +1035,9 @@ async fn test_update_rate_per_client_uses_client_state() {
     assert_eq!(limiter.available_permits().await.unwrap(), 17);
 }
 
+// Redisson: testRelease
 #[tokio::test]
-async fn test_release() {
+async fn release_returns_permits_but_never_above_the_rate() {
     let limiter = client().await.rate_limiter(unique("test_release"));
     for rate_type in [RateType::PerClient, RateType::Overall] {
         limiter
@@ -1026,8 +1056,9 @@ async fn test_release() {
     }
 }
 
+// Redisson: testReleasedPermitsPreservedAfterExpiry
 #[tokio::test]
-async fn test_released_permits_preserved_after_expiry() {
+async fn acquire_and_release_cycles_lose_no_permits_after_expiry() {
     let limiter = client().await.rate_limiter(unique("testNoCollapse"));
     limiter
         .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))

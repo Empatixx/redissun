@@ -284,8 +284,9 @@ async fn a_cancelled_unlock_still_releases_the_lock() {
     }
 }
 
+// Redisson: testSubscriptionsPerConnection
 #[tokio::test]
-async fn test_subscriptions_per_connection() {
+async fn waiters_on_a_few_locks_release_their_channels() {
     let client = client().await;
     let prefix = unique("lock-sub");
     let errors = Arc::new(AtomicU32::new(0));
@@ -324,8 +325,9 @@ async fn test_subscriptions_per_connection() {
     }
 }
 
+// Redisson: testSinglePubSub
 #[tokio::test]
-async fn test_single_pub_sub() {
+async fn waiters_on_two_lock_names_never_time_out() {
     let client = client().await;
     let prefix = unique("lock-single");
     let has_fails = Arc::new(AtomicBool::new(false));
@@ -353,8 +355,9 @@ async fn test_single_pub_sub() {
     assert!(!has_fails.load(Ordering::SeqCst));
 }
 
+// Redisson: testLockIsNotRenewedAfterInterruptedTryLock
 #[tokio::test]
-async fn test_lock_is_not_renewed_after_interrupted_try_lock() {
+async fn a_cancelled_try_lock_leaves_no_renewed_lock() {
     let client = short_lease_client(Duration::from_millis(600)).await;
     let lock = client.lock(unique("lock"));
     assert!(!lock.is_locked().await.unwrap());
@@ -370,8 +373,9 @@ async fn test_lock_is_not_renewed_after_interrupted_try_lock() {
     assert!(!lock.is_locked().await.unwrap());
 }
 
+// Redisson: testRemainTimeToLive2
 #[tokio::test]
-async fn test_remain_time_to_live2() {
+async fn ttl_keeps_the_lease_of_the_last_reentrant_hold() {
     let lock = client().await.lock(unique("lock"));
     let lease = Duration::from_secs(10);
     let first = lock.lock().lease(lease).await.unwrap();
@@ -383,8 +387,9 @@ async fn test_remain_time_to_live2() {
     assert!(ttl >= Duration::from_secs(9) && ttl <= lease, "{ttl:?}");
 }
 
+// Redisson: testTryLockWait
 #[tokio::test]
-async fn test_try_lock_wait() {
+async fn lock_with_a_timeout_gives_up_after_the_timeout() {
     let name = unique("lock");
     let holder = client().await.lock(name.clone());
     let _guard = tokio::spawn(async move { holder.lock().await.unwrap() })
@@ -405,8 +410,9 @@ async fn test_try_lock_wait() {
     );
 }
 
+// Redisson: testForceUnlock
 #[tokio::test]
-async fn test_force_unlock() {
+async fn force_unlock_releases_the_own_held_lock() {
     let client = client().await;
     let name = unique("lock");
     let lock = client.lock(name.clone());
@@ -416,8 +422,9 @@ async fn test_force_unlock() {
     assert!(!client.lock(name).is_locked().await.unwrap());
 }
 
+// Redisson: testExpire
 #[tokio::test]
-async fn test_expire() {
+async fn an_expired_lease_lets_another_owner_take_the_lock() {
     let client = client().await;
     let name = unique("lock");
     let lock = client.lock(name.clone());
@@ -434,8 +441,9 @@ async fn test_expire() {
     assert!(matches!(guard.unlock().await, Err(Error::LockNotHeld)));
 }
 
+// Redisson: testRemainTimeToLive
 #[tokio::test]
-async fn test_remain_time_to_live() {
+async fn ttl_reports_the_lease_or_the_watchdog_timeout() {
     let client = client().await;
     let lock = client.lock(unique("test-lock:1"));
     let hour = Duration::from_secs(3600);
@@ -451,8 +459,9 @@ async fn test_remain_time_to_live() {
     guard.unlock().await.unwrap();
 }
 
+// Redisson: testAutoExpire
 #[tokio::test]
-async fn test_auto_expire() {
+async fn the_lock_of_a_crashed_owner_expires_after_its_lease() {
     let name = unique("lock");
     let lease = Duration::from_millis(1000);
     crash_while_holding(name.clone(), lease);
@@ -468,8 +477,9 @@ async fn test_auto_expire() {
     }
 }
 
+// Redisson: testGetHoldCount
 #[tokio::test]
-async fn test_get_hold_count() {
+async fn hold_count_follows_each_lock_and_unlock() {
     let lock = client().await.lock(unique("lock"));
     assert_eq!(lock.hold_count().await.unwrap(), 0);
     let guard = lock.lock().await.unwrap();
@@ -486,8 +496,9 @@ async fn test_get_hold_count() {
     assert_eq!(lock.hold_count().await.unwrap(), 0);
 }
 
+// Redisson: testIsHeldByCurrentThreadOtherThread
 #[tokio::test]
-async fn test_is_held_by_current_thread_other_thread() {
+async fn the_lock_is_not_held_by_another_owner() {
     let client = client().await;
     let name = unique("lock");
     let lock = client.lock(name.clone());
@@ -507,8 +518,9 @@ async fn test_is_held_by_current_thread_other_thread() {
     );
 }
 
+// Redisson: testIsHeldByCurrentThread
 #[tokio::test]
-async fn test_is_held_by_current_thread() {
+async fn is_held_by_current_follows_lock_and_unlock() {
     let lock = client().await.lock(unique("lock"));
     assert!(!lock.is_held_by_current().await.unwrap());
     let guard = lock.lock().await.unwrap();
@@ -517,8 +529,9 @@ async fn test_is_held_by_current_thread() {
     assert!(!lock.is_held_by_current().await.unwrap());
 }
 
+// Redisson: testIsLockedOtherThread
 #[tokio::test]
-async fn test_is_locked_other_thread() {
+async fn another_owner_sees_the_lock_until_it_is_released() {
     let client = client().await;
     let name = unique("lock");
     let guard = client.lock(name.clone()).lock().await.unwrap();
@@ -537,8 +550,9 @@ async fn test_is_locked_other_thread() {
     );
 }
 
+// Redisson: testIsLocked
 #[tokio::test]
-async fn test_is_locked() {
+async fn is_locked_follows_lock_and_unlock() {
     let lock = client().await.lock(unique("lock"));
     assert!(!lock.is_locked().await.unwrap());
     let guard = lock.lock().await.unwrap();
@@ -547,8 +561,9 @@ async fn test_is_locked() {
     assert!(!lock.is_locked().await.unwrap());
 }
 
+// Redisson: testUnlockFail
 #[tokio::test]
-async fn test_unlock_fail() {
+async fn a_stale_guard_cannot_unlock_the_new_owner() {
     let client = client().await;
     let name = unique("lock");
     let lock = client.lock(name.clone());
@@ -564,15 +579,17 @@ async fn test_unlock_fail() {
     held.unlock().await.unwrap();
 }
 
+// Redisson: testLockUnlock
 #[tokio::test]
-async fn test_lock_unlock() {
+async fn the_lock_can_be_taken_again_after_unlock() {
     let lock = client().await.lock(unique("lock1"));
     lock.lock().await.unwrap().unlock().await.unwrap();
     lock.lock().await.unwrap().unlock().await.unwrap();
 }
 
+// Redisson: testReentrancy
 #[tokio::test]
-async fn test_reentrancy() {
+async fn try_lock_is_reentrant_but_refuses_another_owner() {
     let client = client().await;
     let name = unique("lock1");
     let lock = client.lock(name.clone());
@@ -588,8 +605,9 @@ async fn test_reentrancy() {
     first.unlock().await.unwrap();
 }
 
+// Redisson: testConcurrencyTryLockUnLock
 #[tokio::test]
-async fn test_concurrency_try_lock_un_lock() {
+async fn concurrent_try_lock_and_unlock_leave_the_lock_free() {
     let client = client().await;
     let name = unique("1testConcurrencyTryLockUnLock");
     let mut tasks = Vec::new();
@@ -609,8 +627,9 @@ async fn test_concurrency_try_lock_un_lock() {
     assert!(!client.lock(name).is_locked().await.unwrap());
 }
 
+// Redisson: testConcurrencySingleInstance
 #[tokio::test]
-async fn test_concurrency_single_instance() {
+async fn concurrent_owners_on_one_client_each_get_the_lock() {
     let client = client().await;
     let name = unique("testConcurrency_SingleInstance");
     let counter = Arc::new(AtomicU32::new(0));
@@ -630,8 +649,9 @@ async fn test_concurrency_single_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 15);
 }
 
+// Redisson: testConcurrencyLoopMultiInstance
 #[tokio::test]
-async fn test_concurrency_loop_multi_instance() {
+async fn repeated_locking_from_many_clients_never_loses_a_turn() {
     let name = unique("testConcurrency_MultiInstance1");
     let counter = Arc::new(AtomicU32::new(0));
     let mut tasks = Vec::new();
@@ -653,8 +673,9 @@ async fn test_concurrency_loop_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 160);
 }
 
+// Redisson: testConcurrencyMultiInstance
 #[tokio::test]
-async fn test_concurrency_multi_instance() {
+async fn concurrent_owners_on_several_clients_each_get_the_lock() {
     let name = unique("testConcurrency_MultiInstance2");
     let counter = Arc::new(AtomicU32::new(0));
     let clients = [
@@ -679,8 +700,9 @@ async fn test_concurrency_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 100);
 }
 
+// Redisson: testLockReentrantRenew
 #[tokio::test]
-async fn test_lock_reentrant_renew() {
+async fn the_watchdog_renews_the_lock_after_a_reentrant_release() {
     let lease = Duration::from_millis(1000);
     let client = short_lease_client(lease).await;
     let name = unique("LOCK_KEY");

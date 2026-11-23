@@ -302,8 +302,9 @@ async fn the_lock_is_one_hash_with_a_mode() {
     assert_eq!(common::raw_command(&["EXISTS", &key]).await.trim(), ":0");
 }
 
+// Redisson: testReadLockExpiration
 #[tokio::test]
-async fn test_read_lock_expiration() {
+async fn a_writer_gets_the_lock_once_every_read_lease_ends() {
     let client = client().await;
     let name = unique("test");
     let first = lock_of(&client, &name);
@@ -345,8 +346,9 @@ async fn test_read_lock_expiration() {
     );
 }
 
+// Redisson: testReadLockIsLocked
 #[tokio::test]
-async fn test_read_lock_is_locked() {
+async fn the_write_holder_can_take_a_read_lock_too() {
     let lock = lock_of(&client().await, &unique("TEST"));
     let write = lock.write().await.unwrap();
     assert!(!lock.is_read_locked().await.unwrap());
@@ -361,8 +363,9 @@ async fn test_read_lock_is_locked() {
     write.unlock().await.unwrap();
 }
 
+// Redisson: testReadLockExpirationRenewal
 #[tokio::test]
-async fn test_read_lock_expiration_renewal() {
+async fn the_watchdog_renews_read_locks_held_past_the_lease() {
     let lease = Duration::from_millis(1000);
     let client = connect_with(|builder| builder.lock_lease(Duration::from_millis(1000))).await;
     let name = unique("mytestlock");
@@ -391,8 +394,9 @@ async fn test_read_lock_expiration_renewal() {
     assert_eq!(exceptions.load(Ordering::SeqCst), 0);
 }
 
+// Redisson: testName
 #[tokio::test]
-async fn test_name() {
+async fn a_hash_tagged_name_with_colons_works_for_read_locks() {
     let client = client().await;
     let name = format!("{{{}}}:abc:key", unique("test"));
     let mut tasks = Vec::new();
@@ -412,8 +416,9 @@ async fn test_name() {
     }
 }
 
+// Redisson: testWriteLockExpiration
 #[tokio::test]
-async fn test_write_lock_expiration() {
+async fn a_reentrant_write_lock_keeps_other_writers_out() {
     let client = client().await;
     let name = unique("test2s3");
     let lock = lock_of(&client, &name);
@@ -447,8 +452,9 @@ async fn test_write_lock_expiration() {
         .unwrap());
 }
 
+// Redisson: testReadLockLeaseTimeoutDiffThreadsWrr
 #[tokio::test]
-async fn test_read_lock_lease_timeout_diff_threads_wrr() {
+async fn readers_get_the_lock_after_the_write_lease_ends() {
     let client = client().await;
     let name = unique("my_read_write_lock");
     let lock = lock_of(&client, &name);
@@ -475,8 +481,9 @@ async fn test_read_lock_lease_timeout_diff_threads_wrr() {
     assert_eq!(executed.load(Ordering::SeqCst), 2);
 }
 
+// Redisson: testReadLockLeaseTimeoutDiffThreadsRrw
 #[tokio::test]
-async fn test_read_lock_lease_timeout_diff_threads_rrw() {
+async fn a_writer_gets_the_lock_after_the_last_read_lease() {
     let client = client().await;
     let name = unique("my_read_write_lock");
     let first = lock_of(&client, &name);
@@ -522,8 +529,9 @@ async fn test_read_lock_lease_timeout_diff_threads_rrw() {
         .unwrap());
 }
 
+// Redisson: testReadLockLeaseTimeout
 #[tokio::test]
-async fn test_read_lock_lease_timeout() {
+async fn a_second_read_lease_does_not_extend_the_first() {
     let client = client().await;
     let name = unique("my_read_write_lock");
     let lock = lock_of(&client, &name);
@@ -548,8 +556,9 @@ async fn test_read_lock_lease_timeout() {
     std::mem::forget(first);
 }
 
+// Redisson: testWr
 #[tokio::test]
-async fn test_wr() {
+async fn the_write_lock_outlives_a_nested_read_lock() {
     let lock = lock_of(&client().await, &unique("my_read_write_lock"));
     let write = lock.write().await.unwrap();
     let read = lock.read().await.unwrap();
@@ -560,8 +569,9 @@ async fn test_wr() {
     assert!(!lock.is_write_locked().await.unwrap());
 }
 
+// Redisson: testWriteRead
 #[tokio::test]
-async fn test_write_read() {
+async fn waiting_readers_all_get_the_lock_once_the_writer_unlocks() {
     let client = client().await;
     let name = unique("TEST");
     let lock = lock_of(&client, &name);
@@ -582,8 +592,9 @@ async fn test_write_read() {
         .unwrap();
 }
 
+// Redisson: testWriteReadReentrancy
 #[tokio::test]
-async fn test_write_read_reentrancy() {
+async fn a_read_inside_a_write_blocks_a_new_write() {
     let client = client().await;
     let name = unique("TEST");
     let lock = lock_of(&client, &name);
@@ -602,8 +613,9 @@ async fn test_write_read_reentrancy() {
     write.unlock().await.unwrap();
 }
 
+// Redisson: testWriteLock
 #[tokio::test]
-async fn test_write_lock() {
+async fn a_reentrant_writer_must_release_every_hold_before_others_read() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -639,8 +651,9 @@ async fn test_write_lock() {
     std::mem::forget(read);
 }
 
+// Redisson: testMultiRead
 #[tokio::test]
-async fn test_multi_read() {
+async fn a_writer_waits_until_every_reader_has_left() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -675,8 +688,9 @@ async fn test_multi_read() {
     lock.force_unlock_write().await.unwrap();
 }
 
+// Redisson: testForceUnlock
 #[tokio::test]
-async fn test_force_unlock() {
+async fn force_unlock_of_one_mode_leaves_the_other_mode_locked() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -699,8 +713,9 @@ async fn test_force_unlock() {
     assert!(!lock.is_write_locked().await.unwrap());
 }
 
+// Redisson: testReadWriteTtl
 #[tokio::test]
-async fn test_read_write_ttl() {
+async fn the_watchdog_keeps_the_ttl_while_both_modes_are_held() {
     let lease = Duration::from_millis(3000);
     let client = connect_with(|builder| builder.lock_lease(Duration::from_millis(3000))).await;
     let lock = lock_of(&client, &unique("rwlock"));
@@ -719,8 +734,9 @@ async fn test_read_write_ttl() {
     read.unlock().await.unwrap();
 }
 
+// Redisson: testExpireRead
 #[tokio::test]
-async fn test_expire_read() {
+async fn a_read_lease_does_not_block_another_reader() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -737,8 +753,9 @@ async fn test_expire_read() {
     guard.unlock().await.unwrap();
 }
 
+// Redisson: testExpireWrite
 #[tokio::test]
-async fn test_expire_write() {
+async fn a_write_lease_ends_and_lets_another_writer_in() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -755,8 +772,9 @@ async fn test_expire_write() {
     assert!(matches!(guard.unlock().await, Err(Error::LockNotHeld)));
 }
 
+// Redisson: testAutoExpire
 #[tokio::test]
-async fn test_auto_expire() {
+async fn the_write_lock_of_a_crashed_owner_expires() {
     let name = unique("lock");
     let holder_name = name.clone();
     abandoned(
@@ -777,8 +795,9 @@ async fn test_auto_expire() {
     }
 }
 
+// Redisson: testHoldCount
 #[tokio::test]
-async fn test_hold_count() {
+async fn read_and_write_hold_counts_follow_each_lock_and_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     assert_eq!(lock.read_hold_count().await.unwrap(), 0);
     let guard = lock.read().await.unwrap();
@@ -807,8 +826,9 @@ async fn test_hold_count() {
     assert_eq!(lock.write_hold_count().await.unwrap(), 0);
 }
 
+// Redisson: testIsHeldByCurrentThreadOtherThread
 #[tokio::test]
-async fn test_is_held_by_current_thread_other_thread() {
+async fn a_read_lock_is_not_held_by_another_owner() {
     let client = client().await;
     let name = unique("lock");
     let guard = lock_of(&client, &name).read().await.unwrap();
@@ -827,8 +847,9 @@ async fn test_is_held_by_current_thread_other_thread() {
     );
 }
 
+// Redisson: testIsHeldByCurrentThread
 #[tokio::test]
-async fn test_is_held_by_current_thread() {
+async fn is_read_held_by_current_follows_lock_and_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     assert!(!lock.is_read_held_by_current().await.unwrap());
     let guard = lock.read().await.unwrap();
@@ -837,8 +858,9 @@ async fn test_is_held_by_current_thread() {
     assert!(!lock.is_read_held_by_current().await.unwrap());
 }
 
+// Redisson: testIsLockedOtherThread
 #[tokio::test]
-async fn test_is_locked_other_thread() {
+async fn another_owner_sees_the_read_lock_until_it_is_released() {
     let client = client().await;
     let name = unique("lock");
     let guard = lock_of(&client, &name).read().await.unwrap();
@@ -857,8 +879,9 @@ async fn test_is_locked_other_thread() {
     );
 }
 
+// Redisson: testIsLocked
 #[tokio::test]
-async fn test_is_locked() {
+async fn is_read_locked_follows_lock_and_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     assert!(!lock.is_read_locked().await.unwrap());
     let guard = lock.read().await.unwrap();
@@ -867,8 +890,9 @@ async fn test_is_locked() {
     assert!(!lock.is_read_locked().await.unwrap());
 }
 
+// Redisson: testUnlockFail
 #[tokio::test]
-async fn test_unlock_fail() {
+async fn unlocking_a_force_unlocked_read_lock_reports_lock_not_held() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -882,15 +906,17 @@ async fn test_unlock_fail() {
     held.unlock().await.unwrap();
 }
 
+// Redisson: testLockUnlock
 #[tokio::test]
-async fn test_lock_unlock() {
+async fn a_read_lock_can_be_taken_again_after_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     lock.read().await.unwrap().unlock().await.unwrap();
     lock.read().await.unwrap().unlock().await.unwrap();
 }
 
+// Redisson: testReentrancy
 #[tokio::test]
-async fn test_reentrancy() {
+async fn try_read_is_reentrant_for_the_same_owner() {
     let client = client().await;
     let lock = lock_of(&client, &unique("lock"));
     let first = lock.try_read().await.unwrap().unwrap();
@@ -915,8 +941,9 @@ async fn take_and_release(lock: &RwLock, write: bool, hold: Duration) {
     guard.unlock().await.unwrap();
 }
 
+// Redisson: testConcurrencySingleInstance
 #[tokio::test]
-async fn test_concurrency_single_instance() {
+async fn concurrent_readers_and_writers_on_one_client_all_finish() {
     let client = client().await;
     let name = unique("testConcurrency_SingleInstance");
     let counter = Arc::new(AtomicU32::new(0));
@@ -935,8 +962,9 @@ async fn test_concurrency_single_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 15);
 }
 
+// Redisson: testConcurrencyLoopMultiInstance
 #[tokio::test]
-async fn test_concurrency_loop_multi_instance() {
+async fn repeated_reads_and_writes_from_many_clients_all_finish() {
     let name = unique("testConcurrency_MultiInstance1");
     let counter = Arc::new(AtomicU32::new(0));
     let mut tasks = Vec::new();
@@ -956,8 +984,9 @@ async fn test_concurrency_loop_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 160);
 }
 
+// Redisson: testConcurrencyMultiInstance
 #[tokio::test]
-async fn test_concurrency_multi_instance() {
+async fn concurrent_readers_and_writers_on_several_clients_all_finish() {
     let name = unique("testConcurrency_MultiInstance2");
     let counter = Arc::new(AtomicU32::new(0));
     let clients = [
@@ -981,8 +1010,9 @@ async fn test_concurrency_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 100);
 }
 
+// Redisson: testMultiInstanceReadLockZombieCleanup
 #[tokio::test]
-async fn test_multi_instance_read_lock_zombie_cleanup() {
+async fn a_writer_gets_the_lock_after_a_crashed_reader_expires() {
     let lease = Duration::from_millis(1000);
     let configure: fn(ClientBuilder) -> ClientBuilder =
         |builder| builder.lock_lease(Duration::from_millis(1000));

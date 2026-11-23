@@ -372,8 +372,9 @@ async fn a_waiter_without_a_timeout_keeps_its_place_for_the_fair_lock_wait_timeo
     assert_eq!(*order.lock().await, vec![0, 1, 2]);
 }
 
+// Redisson: testLeaseTimeout
 #[tokio::test]
-async fn test_lease_timeout() {
+async fn waiters_with_a_lease_get_the_lock_in_arrival_order() {
     let client = client().await;
     let name = unique("lock");
     let list = Arc::new(Mutex::new(Vec::new()));
@@ -401,8 +402,9 @@ async fn test_lease_timeout() {
     assert_eq!(*list.lock().await, (0..8).collect::<Vec<_>>());
 }
 
+// Redisson: testMultipleLocks
 #[tokio::test]
-async fn test_multiple_locks() {
+async fn twenty_concurrent_waiters_each_get_the_lock_once() {
     let client = client().await;
     let name = unique("lock");
     let acquired = Arc::new(AtomicU32::new(0));
@@ -478,23 +480,27 @@ async fn drift_scenario(jobs: usize, wait: Duration, hold: Duration) {
     }
 }
 
+// Redisson: testWaitTimeoutDrift
 #[tokio::test]
-async fn test_wait_timeout_drift() {
+async fn queue_timeouts_stay_bounded_when_waiters_give_up() {
     drift_scenario(12, Duration::from_millis(500), Duration::from_secs(1)).await;
 }
 
+// Redisson: testLockAcquiredTimeoutDrift
 #[tokio::test]
-async fn test_lock_acquired_timeout_drift() {
+async fn queue_timeouts_stay_bounded_when_every_waiter_gets_the_lock() {
     drift_scenario(3, Duration::from_secs(3), Duration::from_millis(100)).await;
 }
 
+// Redisson: testFirstThreadDeathTimeoutDrift
 #[tokio::test]
-async fn test_first_thread_death_timeout_drift() {
+async fn queue_timeouts_stay_bounded_after_many_short_holds() {
     drift_scenario(10, Duration::from_secs(3), Duration::from_millis(100)).await;
 }
 
+// Redisson: testAcquireFailedTimeoutDriftDescrete
 #[tokio::test]
-async fn test_acquire_failed_timeout_drift_descrete() {
+async fn a_cancelled_waiter_moves_the_later_deadlines_forward() {
     let wait = Duration::from_secs(5);
     let lease = Duration::from_secs(30);
     let client = connect_with(|builder| builder.fair_lock_wait_timeout(wait)).await;
@@ -549,8 +555,9 @@ async fn test_acquire_failed_timeout_drift_descrete() {
     first_guard.unlock().await.unwrap();
 }
 
+// Redisson: testLockAcquiredBooleanTimeoutDriftDescrete
 #[tokio::test]
-async fn test_lock_acquired_boolean_timeout_drift_descrete() {
+async fn try_lock_succeeds_for_another_owner_after_the_lease() {
     let lease = Duration::from_millis(500);
     let configure: fn(ClientBuilder) -> ClientBuilder = |builder| {
         builder
@@ -604,8 +611,9 @@ async fn abandoned_try_lock(
     receiver.await.unwrap()
 }
 
+// Redisson: testLockAcquiredTimeoutDriftDescrete
 #[tokio::test]
-async fn test_lock_acquired_timeout_drift_descrete() {
+async fn a_new_waiter_queues_one_wait_timeout_after_the_first() {
     let wait = Duration::from_secs(5);
     let lease = Duration::from_secs(300);
     let client = connect_with(|builder| builder.fair_lock_wait_timeout(wait)).await;
@@ -647,8 +655,9 @@ async fn test_lock_acquired_timeout_drift_descrete() {
     first_guard.unlock().await.unwrap();
 }
 
+// Redisson: testAbandonedTimeoutDriftDescrete
 #[tokio::test]
-async fn test_abandoned_timeout_drift_descrete() {
+async fn waiters_of_a_dead_client_expire_from_the_queue() {
     let lease = Duration::from_millis(500);
     let thread_wait = Duration::from_millis(100);
     let configure: fn(ClientBuilder) -> ClientBuilder =
@@ -695,8 +704,9 @@ async fn test_abandoned_timeout_drift_descrete() {
     guard.unlock().await.unwrap();
 }
 
+// Redisson: testTryLockNonDelayed
 #[tokio::test]
-async fn test_try_lock_non_delayed() {
+async fn a_zero_timeout_lock_succeeds_on_a_free_lock() {
     let client = client().await;
     let name = unique("SOME_LOCK");
     let first = lock_of(&client, &name);
@@ -733,8 +743,9 @@ async fn test_try_lock_non_delayed() {
     guard.unlock().await.unwrap();
 }
 
+// Redisson: testTryLockWait
 #[tokio::test]
-async fn test_try_lock_wait() {
+async fn lock_with_a_timeout_gives_up_after_the_timeout() {
     let name = unique("lock");
     let holder = lock_of(&client().await, &name);
     let _guard = tokio::spawn(async move { holder.lock().await.unwrap() })
@@ -755,8 +766,9 @@ async fn test_try_lock_wait() {
     );
 }
 
+// Redisson: testForceUnlock
 #[tokio::test]
-async fn test_force_unlock() {
+async fn force_unlock_releases_a_held_lock() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -766,8 +778,9 @@ async fn test_force_unlock() {
     assert!(!lock_of(&client, &name).is_locked().await.unwrap());
 }
 
+// Redisson: testExpire
 #[tokio::test]
-async fn test_expire() {
+async fn a_lease_ends_and_lets_another_owner_in() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -784,8 +797,9 @@ async fn test_expire() {
     assert!(guard.unlock().await.is_ok());
 }
 
+// Redisson: testAutoExpire
 #[tokio::test]
-async fn test_auto_expire() {
+async fn the_lock_of_a_crashed_owner_expires_after_its_lease() {
     let name = unique("lock");
     let lease = Duration::from_millis(1000);
     let holder_name = name.clone();
@@ -807,8 +821,9 @@ async fn test_auto_expire() {
     }
 }
 
+// Redisson: testGetHoldCount
 #[tokio::test]
-async fn test_get_hold_count() {
+async fn hold_count_follows_each_lock_and_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     assert_eq!(lock.hold_count().await.unwrap(), 0);
     let guard = lock.lock().await.unwrap();
@@ -824,8 +839,9 @@ async fn test_get_hold_count() {
     assert_eq!(lock.hold_count().await.unwrap(), 0);
 }
 
+// Redisson: testIsHeldByCurrentThreadOtherThread
 #[tokio::test]
-async fn test_is_held_by_current_thread_other_thread() {
+async fn the_lock_is_not_held_by_another_owner() {
     let client = client().await;
     let name = unique("lock");
     let guard = lock_of(&client, &name).lock().await.unwrap();
@@ -844,8 +860,9 @@ async fn test_is_held_by_current_thread_other_thread() {
     );
 }
 
+// Redisson: testIsHeldByCurrentThread
 #[tokio::test]
-async fn test_is_held_by_current_thread() {
+async fn is_held_by_current_follows_lock_and_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     assert!(!lock.is_held_by_current().await.unwrap());
     let guard = lock.lock().await.unwrap();
@@ -854,8 +871,9 @@ async fn test_is_held_by_current_thread() {
     assert!(!lock.is_held_by_current().await.unwrap());
 }
 
+// Redisson: testIsLockedOtherThread
 #[tokio::test]
-async fn test_is_locked_other_thread() {
+async fn another_owner_sees_the_lock_until_it_is_released() {
     let client = client().await;
     let name = unique("lock");
     let guard = lock_of(&client, &name).lock().await.unwrap();
@@ -874,8 +892,9 @@ async fn test_is_locked_other_thread() {
     );
 }
 
+// Redisson: testIsLocked
 #[tokio::test]
-async fn test_is_locked() {
+async fn is_locked_follows_lock_and_unlock() {
     let lock = lock_of(&client().await, &unique("lock"));
     assert!(!lock.is_locked().await.unwrap());
     let guard = lock.lock().await.unwrap();
@@ -884,8 +903,9 @@ async fn test_is_locked() {
     assert!(!lock.is_locked().await.unwrap());
 }
 
+// Redisson: testUnlockFail
 #[tokio::test]
-async fn test_unlock_fail() {
+async fn unlocking_a_force_unlocked_lock_reports_lock_not_held() {
     let client = client().await;
     let name = unique("lock");
     let lock = lock_of(&client, &name);
@@ -899,15 +919,17 @@ async fn test_unlock_fail() {
     held.unlock().await.unwrap();
 }
 
+// Redisson: testLockUnlock
 #[tokio::test]
-async fn test_lock_unlock() {
+async fn the_lock_can_be_taken_again_after_unlock() {
     let lock = lock_of(&client().await, &unique("lock1"));
     lock.lock().await.unwrap().unlock().await.unwrap();
     lock.lock().await.unwrap().unlock().await.unwrap();
 }
 
+// Redisson: testReentrancy
 #[tokio::test]
-async fn test_reentrancy() {
+async fn try_lock_is_reentrant_but_refuses_another_owner() {
     let client = client().await;
     let name = unique("lock1");
     let lock = lock_of(&client, &name);
@@ -923,8 +945,9 @@ async fn test_reentrancy() {
     first.unlock().await.unwrap();
 }
 
+// Redisson: testConcurrencySingleInstance
 #[tokio::test]
-async fn test_concurrency_single_instance() {
+async fn concurrent_owners_on_one_client_each_get_the_lock() {
     let client = client().await;
     let name = unique("testConcurrency_SingleInstance");
     let counter = Arc::new(AtomicU32::new(0));
@@ -942,8 +965,9 @@ async fn test_concurrency_single_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 15);
 }
 
+// Redisson: testConcurrencyLoopMultiInstance
 #[tokio::test]
-async fn test_concurrency_loop_multi_instance() {
+async fn repeated_locking_from_many_clients_never_loses_a_turn() {
     let name = unique("testConcurrency_MultiInstance1");
     let counter = Arc::new(AtomicU32::new(0));
     let mut tasks = Vec::new();
@@ -965,8 +989,9 @@ async fn test_concurrency_loop_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 80);
 }
 
+// Redisson: testConcurrencyMultiInstance
 #[tokio::test]
-async fn test_concurrency_multi_instance() {
+async fn concurrent_owners_on_several_clients_each_get_the_lock() {
     let name = unique("testConcurrency_MultiInstance2");
     let counter = Arc::new(AtomicU32::new(0));
     let clients = [
@@ -991,8 +1016,9 @@ async fn test_concurrency_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 100);
 }
 
+// Redisson: testConcurrencyMultiInstanceOrdering
 #[tokio::test]
-async fn test_concurrency_multi_instance_ordering() {
+async fn concurrent_waiters_get_the_lock_in_arrival_order() {
     let client = client().await;
     let name = unique("testConcurrency_MultiInstance2");
     let arrivals: Arc<std::sync::Mutex<std::collections::VecDeque<usize>>> = Arc::default();

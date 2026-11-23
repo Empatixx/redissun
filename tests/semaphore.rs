@@ -265,8 +265,9 @@ where
     }
 }
 
+// Redisson: testAcquireAfterAddPermits
 #[tokio::test]
-async fn test_acquire_after_add_permits() {
+async fn a_waiter_for_two_permits_wakes_once_enough_are_added() {
     let client = client().await;
     let name = unique("test");
     let semaphore = client.semaphore(name.clone());
@@ -295,8 +296,9 @@ async fn test_acquire_after_add_permits() {
     waiter.await.unwrap();
 }
 
+// Redisson: testZero
 #[tokio::test]
-async fn test_zero() {
+async fn acquiring_and_releasing_zero_permits_changes_nothing() {
     let semaphore = client().await.semaphore(unique("test"));
     assert!(semaphore
         .acquire(0)
@@ -308,16 +310,18 @@ async fn test_zero() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
 }
 
+// Redisson: testAcquireWithoutSetPermits
 #[tokio::test]
-async fn test_acquire_without_set_permits() {
+async fn released_permits_can_be_acquired_without_setting_permits() {
     let semaphore = client().await.semaphore(unique("test"));
     semaphore.release(1).await.unwrap();
     semaphore.release(1).await.unwrap();
     take(&semaphore, 2).await;
 }
 
+// Redisson: testTrySetPermits
 #[tokio::test]
-async fn test_try_set_permits() {
+async fn try_set_permits_sets_once_and_the_ttl_variant_expires() {
     let semaphore = client().await.semaphore(unique("test"));
     assert!(semaphore.try_set_permits(10).await.unwrap());
     assert_eq!(semaphore.available_permits().await.unwrap(), 10);
@@ -337,8 +341,9 @@ async fn test_try_set_permits() {
     assert!(!semaphore.exists().await.unwrap());
 }
 
+// Redisson: testAddPermits
 #[tokio::test]
-async fn test_add_permits() {
+async fn add_permits_and_release_both_raise_the_available_permits() {
     let semaphore = client().await.semaphore(unique("test"));
     semaphore.try_set_permits(10).await.unwrap();
     take(&semaphore, 10).await;
@@ -351,8 +356,9 @@ async fn test_add_permits() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 9);
 }
 
+// Redisson: testReducePermits
 #[tokio::test]
-async fn test_reduce_permits() {
+async fn negative_add_permits_can_make_the_available_permits_negative() {
     let semaphore = client().await.semaphore(unique("test2"));
     semaphore.try_set_permits(10).await.unwrap();
     take(&semaphore, 10).await;
@@ -364,8 +370,9 @@ async fn test_reduce_permits() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
 }
 
+// Redisson: testBlockingAcquire
 #[tokio::test]
-async fn test_blocking_acquire() {
+async fn acquire_waits_until_another_owner_releases_a_permit() {
     let client = client().await;
     let name = unique("test");
     let semaphore = client.semaphore(name.clone());
@@ -384,8 +391,9 @@ async fn test_blocking_acquire() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
 }
 
+// Redisson: testBlockingNAcquire
 #[tokio::test]
-async fn test_blocking_n_acquire() {
+async fn acquire_of_several_permits_waits_until_enough_are_released() {
     let client = client().await;
     let name = unique("test");
     let semaphore = client.semaphore(name.clone());
@@ -407,8 +415,9 @@ async fn test_blocking_n_acquire() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
 }
 
+// Redisson: testTryNAcquire
 #[tokio::test]
-async fn test_try_n_acquire() {
+async fn acquire_with_a_timeout_gets_several_permits_once_released() {
     let client = client().await;
     let name = unique("test");
     let semaphore = client.semaphore(name.clone());
@@ -439,15 +448,17 @@ async fn test_try_n_acquire() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
 }
 
+// Redisson: testReleaseWithoutPermits
 #[tokio::test]
-async fn test_release_without_permits() {
+async fn release_on_a_missing_semaphore_creates_the_permits() {
     let semaphore = client().await.semaphore(unique("test"));
     semaphore.release(1).await.unwrap();
     assert_eq!(semaphore.available_permits().await.unwrap(), 1);
 }
 
+// Redisson: testDrainPermits
 #[tokio::test]
-async fn test_drain_permits() {
+async fn drain_permits_returns_only_the_free_permits() {
     let semaphore = client().await.semaphore(unique("test"));
     assert_eq!(semaphore.drain_permits().await.unwrap(), 0);
     semaphore.try_set_permits(10).await.unwrap();
@@ -456,8 +467,9 @@ async fn test_drain_permits() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 0);
 }
 
+// Redisson: testReleaseAcquire
 #[tokio::test]
-async fn test_release_acquire() {
+async fn release_returns_the_acquired_permits() {
     let semaphore = client().await.semaphore(unique("test"));
     semaphore.try_set_permits(10).await.unwrap();
     take(&semaphore, 1).await;
@@ -470,8 +482,9 @@ async fn test_release_acquire() {
     assert_eq!(semaphore.available_permits().await.unwrap(), 10);
 }
 
+// Redisson: testReleaseIfExists
 #[tokio::test]
-async fn test_release_if_exists() {
+async fn release_if_exists_does_not_create_a_missing_semaphore() {
     let client = client().await;
     let semaphore = client.semaphore(unique("test"));
     semaphore.try_set_permits(10).await.unwrap();
@@ -485,8 +498,9 @@ async fn test_release_if_exists() {
     assert!(!missing.exists().await.unwrap());
 }
 
+// Redisson: testConcurrencySingleInstance
 #[tokio::test]
-async fn test_concurrency_single_instance() {
+async fn one_permit_on_one_client_serializes_every_task() {
     let client = client().await;
     let name = unique("test");
     client
@@ -511,8 +525,9 @@ async fn test_concurrency_single_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), iterations as u32);
 }
 
+// Redisson: testConcurrencyLoopMaxMultiInstance
 #[tokio::test]
-async fn test_concurrency_loop_max_multi_instance() {
+async fn huge_and_single_permit_acquires_from_many_clients_all_finish() {
     let iterations = 10;
     let name = unique("test");
     client()
@@ -544,8 +559,9 @@ async fn test_concurrency_loop_max_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 4 * iterations);
 }
 
+// Redisson: testConcurrencyLoopMultiInstance
 #[tokio::test]
-async fn test_concurrency_loop_multi_instance() {
+async fn one_permit_serializes_repeated_acquires_from_many_clients() {
     let iterations = 100;
     let name = unique("test");
     client()
@@ -573,8 +589,9 @@ async fn test_concurrency_loop_multi_instance() {
     assert_eq!(counter.load(Ordering::SeqCst), 16 * iterations);
 }
 
+// Redisson: testConcurrencyMultiInstance1Permits
 #[tokio::test]
-async fn test_concurrency_multi_instance_1_permits() {
+async fn one_permit_serializes_tasks_on_separate_clients() {
     let iterations = 30;
     let name = unique("test");
     client()

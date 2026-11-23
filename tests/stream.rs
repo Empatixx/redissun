@@ -344,8 +344,9 @@ async fn huge_counts_do_not_wrap_around() {
     assert_eq!(log.len().await.unwrap(), 3);
 }
 
+// Redisson: testType
 #[tokio::test]
-async fn test_type() {
+async fn type_command_reports_a_stream_key_as_stream() {
     let log = stream().await;
     log.create_group("group", &StreamId::latest())
         .await
@@ -354,8 +355,9 @@ async fn test_type() {
     assert!(raw_command(&["TYPE", log.name()]).await.contains("stream"));
 }
 
+// Redisson: testEmptyMap
 #[tokio::test]
-async fn test_empty_map() {
+async fn a_trimmed_pending_entry_is_reread_with_empty_fields() {
     let log = stream().await;
     log.create_group("group", &StreamId::latest())
         .await
@@ -382,8 +384,9 @@ async fn test_empty_map() {
     assert!(result[0].fields.is_empty());
 }
 
+// Redisson: testBusyGroupIsNotRetryException
 #[tokio::test]
-async fn test_busy_group_is_not_retry_exception() {
+async fn creating_an_existing_group_again_returns_false() {
     let log = stream().await;
     assert!(log
         .create_group("group", &StreamId::latest())
@@ -395,8 +398,9 @@ async fn test_busy_group_is_not_retry_exception() {
         .unwrap());
 }
 
+// Redisson: testAutoClaim
 #[tokio::test]
-async fn test_auto_claim() {
+async fn auto_claim_returns_idle_entries_from_the_start_id() {
     let log = stream().await;
     let [_, _, id3, _] = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
@@ -412,8 +416,9 @@ async fn test_auto_claim() {
     }
 }
 
+// Redisson: testAutoClaimDeletedIds
 #[tokio::test]
-async fn test_auto_claim_deleted_ids() {
+async fn auto_claim_reports_ids_of_deleted_pending_entries() {
     let log = stream().await;
     add(&log, &[("1", "1")]).await;
     add(&log, &[("2", "2")]).await;
@@ -478,24 +483,27 @@ async fn assert_pending_idle(log: &Log, ids: &[StreamId; 4]) {
     }
 }
 
+// Redisson: testPendingIdle
 #[tokio::test]
-async fn test_pending_idle() {
+async fn pending_entries_with_min_idle_list_all_and_per_consumer_entries() {
     let log = stream().await;
     let ids = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
     assert_pending_idle(&log, &ids).await;
 }
 
+// Redisson: testPendingIdle2
 #[tokio::test]
-async fn test_pending_idle2() {
+async fn pending_entries_with_min_idle_list_entries_of_two_consumers() {
     let log = stream().await;
     let ids = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
     assert_pending_idle(&log, &ids).await;
 }
 
+// Redisson: testTrim
 #[tokio::test]
-async fn test_trim() {
+async fn trim_reports_dropped_entries_and_zero_on_a_missing_stream() {
     let log = stream().await;
     add(&log, &[("0", "0")]).await;
     add(&log, &[("1", "1")]).await;
@@ -517,8 +525,9 @@ async fn trim_min_id_and_non_strict() {
     assert_eq!(log.len().await.unwrap(), 2 - dropped);
 }
 
+// Redisson: testPendingEmpty
 #[tokio::test]
-async fn test_pending_empty() {
+async fn pending_summary_of_a_fresh_group_is_empty() {
     let log = stream().await;
     log.create_group("testGroup", &StreamId::latest())
         .await
@@ -530,8 +539,9 @@ async fn test_pending_empty() {
     assert!(result.consumers.is_empty());
 }
 
+// Redisson: testUpdateGroupMessageId
 #[tokio::test]
-async fn test_update_group_message_id() {
+async fn update_group_message_id_rewinds_the_group_for_rereading() {
     let log = stream().await;
     let id = add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &StreamId::latest())
@@ -552,8 +562,9 @@ async fn test_update_group_message_id() {
     assert_eq!(s2.len(), 2);
 }
 
+// Redisson: testRemoveConsumer
 #[tokio::test]
-async fn test_remove_consumer() {
+async fn remove_consumer_returns_its_pending_entry_count() {
     let log = stream().await;
     add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &StreamId::latest())
@@ -576,8 +587,9 @@ async fn test_remove_consumer() {
     );
 }
 
+// Redisson: testRemoveGroup
 #[tokio::test]
-async fn test_remove_group() {
+async fn read_group_fails_after_the_group_is_destroyed() {
     let log = stream().await;
     add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &StreamId::latest())
@@ -592,8 +604,9 @@ async fn test_remove_group() {
         .is_err());
 }
 
+// Redisson: testRemoveMessages
 #[tokio::test]
-async fn test_remove_messages() {
+async fn remove_deletes_entries_by_id_and_returns_the_count() {
     let log = stream().await;
     let id1 = add(&log, &[("0", "0")]).await;
     let id2 = add(&log, &[("1", "1")]).await;
@@ -602,8 +615,9 @@ async fn test_remove_messages() {
     assert_eq!(log.len().await.unwrap(), 0);
 }
 
+// Redisson: testClaimRemove
 #[tokio::test]
-async fn test_claim_remove() {
+async fn claim_skips_an_entry_deleted_from_the_stream() {
     let log = stream().await;
     let [_, _, id3, id4] = two_consumers(&log).await;
     log.remove(std::slice::from_ref(&id3)).await.unwrap();
@@ -620,8 +634,9 @@ async fn test_claim_remove() {
     assert_eq!(ids_of(&res), [id4]);
 }
 
+// Redisson: testClaim
 #[tokio::test]
-async fn test_claim() {
+async fn claim_moves_idle_entries_with_their_fields_to_a_consumer() {
     let log = stream().await;
     let [_, _, id3, id4] = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
@@ -642,8 +657,9 @@ async fn test_claim() {
     }
 }
 
+// Redisson: testAutoClaimIds
 #[tokio::test]
-async fn test_auto_claim_ids() {
+async fn fast_auto_claim_returns_only_the_claimed_ids() {
     let log = stream().await;
     let [_, _, id3, id4] = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
@@ -655,8 +671,9 @@ async fn test_auto_claim_ids() {
     assert_eq!(ids, [id3, id4]);
 }
 
+// Redisson: testClaimIds
 #[tokio::test]
-async fn test_claim_ids() {
+async fn fast_claim_returns_only_the_claimed_ids() {
     let log = stream().await;
     let [_, _, id3, id4] = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
@@ -704,22 +721,25 @@ async fn assert_pending(log: &Log, ids: &[StreamId; 4]) {
     }
 }
 
+// Redisson: testPending
 #[tokio::test]
-async fn test_pending() {
+async fn pending_summarizes_entries_and_consumers_of_a_group() {
     let log = stream().await;
     let ids = two_consumers(&log).await;
     assert_pending(&log, &ids).await;
 }
 
+// Redisson: testPending2
 #[tokio::test]
-async fn test_pending2() {
+async fn pending_entries_list_entries_overall_and_per_consumer() {
     let log = stream().await;
     let ids = two_consumers(&log).await;
     assert_pending(&log, &ids).await;
 }
 
+// Redisson: testPendingRange
 #[tokio::test]
-async fn test_pending_range() {
+async fn pending_entries_messages_return_entry_fields_per_consumer() {
     let log = stream().await;
     add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &StreamId::latest())
@@ -759,8 +779,9 @@ async fn test_pending_range() {
     assert!(pres3.is_empty());
 }
 
+// Redisson: testAck
 #[tokio::test]
-async fn test_ack() {
+async fn ack_returns_the_number_of_acknowledged_entries() {
     let log = stream().await;
     add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &StreamId::latest())
@@ -776,8 +797,9 @@ async fn test_ack() {
     assert_eq!(log.ack("testGroup", &[id1, id2]).await.unwrap(), 2);
 }
 
+// Redisson: testReadGroupBlocking
 #[tokio::test]
-async fn test_read_group_blocking() {
+async fn read_group_wait_returns_entries_and_the_group_can_be_recreated() {
     let log = stream().await;
     let id0 = add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &id0).await.unwrap();
@@ -803,8 +825,9 @@ async fn test_read_group_blocking() {
     assert!(other.create_group("testGroup", &id1).await.unwrap());
 }
 
+// Redisson: testCreateEmpty
 #[tokio::test]
-async fn test_create_empty() {
+async fn a_group_created_at_zero_on_an_empty_stream_reads_new_entries() {
     let log = stream().await;
     log.create_group("testGroup", &StreamId::zero())
         .await
@@ -817,8 +840,9 @@ async fn test_create_empty() {
     assert_eq!(s.len(), 1);
 }
 
+// Redisson: testReadGroup
 #[tokio::test]
-async fn test_read_group() {
+async fn read_group_delivers_new_entries_up_to_the_count() {
     let log = stream().await;
     let id0 = add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &id0).await.unwrap();
@@ -870,8 +894,9 @@ async fn read_group_after_rereads_own_pending_entries_and_no_ack_skips_them() {
     assert_eq!(log.pending("g").await.unwrap().count, 1);
 }
 
+// Redisson: testAutogenerateStreamSequenceId
 #[tokio::test]
-async fn test_autogenerate_stream_sequence_id() {
+async fn auto_sequence_id_generates_increasing_sequence_numbers() {
     let log = stream().await;
     assert_eq!(log.len().await.unwrap(), 0);
     let id = StreamId::auto_sequence(1);
@@ -909,8 +934,9 @@ async fn two_entries(log: &Log) {
         .unwrap();
 }
 
+// Redisson: testRangeReversed
 #[tokio::test]
-async fn test_range_reversed() {
+async fn rev_range_returns_entries_newest_first() {
     let log = stream().await;
     two_entries(&log).await;
     let r2 = log
@@ -922,8 +948,9 @@ async fn test_range_reversed() {
     assert_eq!(map(&r2[0]), owned(&ENTRIES2));
 }
 
+// Redisson: testRange
 #[tokio::test]
-async fn test_range() {
+async fn range_returns_entries_between_two_ids() {
     let log = stream().await;
     two_entries(&log).await;
     let r = log
@@ -941,8 +968,9 @@ async fn test_range() {
     assert_eq!(map(&r2[1]), owned(&ENTRIES2));
 }
 
+// Redisson: testRangeReversed2
 #[tokio::test]
-async fn test_range_reversed2() {
+async fn rev_range_with_exclusive_open_bounds_returns_all_entries() {
     let log = stream().await;
     two_entries(&log).await;
     let r2 = log
@@ -958,8 +986,9 @@ async fn test_range_reversed2() {
     assert_eq!(map(&r2[0]), owned(&ENTRIES2));
 }
 
+// Redisson: testRange2
 #[tokio::test]
-async fn test_range2() {
+async fn range_with_an_exclusive_start_skips_the_start_entry() {
     let log = stream().await;
     two_entries(&log).await;
     let r = log
@@ -983,8 +1012,9 @@ async fn test_range2() {
     assert_eq!(map(&r3[0]), owned(&ENTRIES2));
 }
 
+// Redisson: testPoll
 #[tokio::test]
-async fn test_poll() {
+async fn read_wait_blocks_until_an_entry_is_added_later() {
     let log = stream().await;
     let writer = log.clone();
     tokio::spawn(async move {
@@ -1010,8 +1040,9 @@ async fn test_poll() {
     assert_eq!(map(&s[0]), owned(&ENTRIES1));
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn len_counts_both_entries_despite_a_non_strict_max_len() {
     let log = stream().await;
     two_entries(&log).await;
     assert_eq!(log.len().await.unwrap(), 2);
@@ -1019,8 +1050,9 @@ async fn test_size() {
 
 const ENTRIES3: [(&str, &str); 2] = [("15", "05"), ("17", "07")];
 
+// Redisson: testReadMulti
 #[tokio::test]
-async fn test_read_multi() {
+async fn read_returns_three_entries_in_insertion_order() {
     let log = stream().await;
     two_entries(&log).await;
     log.add(pairs(&ENTRIES3))
@@ -1036,8 +1068,9 @@ async fn test_read_multi() {
     assert_eq!(map(&result[2]), owned(&ENTRIES3));
 }
 
+// Redisson: testReadSingle
 #[tokio::test]
-async fn test_read_single() {
+async fn read_returns_a_single_entry_with_its_fields() {
     let log = stream().await;
     log.add(pairs(&ENTRIES1))
         .id(StreamId::new(1, 0))
@@ -1051,8 +1084,9 @@ async fn test_read_single() {
     assert_eq!(map(&result[0]), owned(&ENTRIES1));
 }
 
+// Redisson: testReadEmpty
 #[tokio::test]
-async fn test_read_empty() {
+async fn read_on_an_empty_stream_returns_nothing() {
     let log = stream().await;
     assert!(log
         .read(&StreamId::new(0, 0), Some(10))
@@ -1061,16 +1095,18 @@ async fn test_read_empty() {
         .is_empty());
 }
 
+// Redisson: testReadEmptyAsync
 #[tokio::test]
-async fn test_read_empty_async() {
+async fn a_stored_read_future_on_an_empty_stream_returns_nothing() {
     let log = stream().await;
     let after = StreamId::new(0, 0);
     let pending = log.read(&after, Some(10));
     assert!(pending.await.unwrap().is_empty());
 }
 
+// Redisson: testReadGroupEmptyAsync
 #[tokio::test]
-async fn test_read_group_empty_async() {
+async fn read_group_returns_nothing_once_all_entries_were_delivered() {
     let log = stream().await;
     log.create_group("testGroup", &StreamId::latest())
         .await
@@ -1086,8 +1122,9 @@ async fn test_read_group_empty_async() {
     assert!(result.is_empty());
 }
 
+// Redisson: testAdd
 #[tokio::test]
-async fn test_add() {
+async fn add_returns_an_auto_generated_millis_sequence_id() {
     let log = stream().await;
     let s = add(&log, &[("12", "33")]).await;
     let (millis, sequence) = s.as_str().split_once('-').unwrap();
@@ -1096,8 +1133,9 @@ async fn test_add() {
     assert_eq!(log.len().await.unwrap(), 1);
 }
 
+// Redisson: testAddAll
 #[tokio::test]
-async fn test_add_all() {
+async fn add_with_an_explicit_id_stores_all_fields_of_the_entry() {
     let log = stream().await;
     assert_eq!(log.len().await.unwrap(), 0);
     let id = StreamId::new(12, 42);
@@ -1120,8 +1158,9 @@ async fn test_add_all() {
     assert_eq!(log.len().await.unwrap(), 2);
 }
 
+// Redisson: testStreamConsumers
 #[tokio::test]
-async fn test_stream_consumers() {
+async fn consumers_report_name_pending_count_and_idle_time() {
     let log = stream().await;
     let id1 = StreamId::new(12, 44);
     log.create_group("testGroup", &id1).await.unwrap();
@@ -1154,8 +1193,9 @@ async fn test_stream_consumers() {
     assert!(s2[0].idle < Duration::from_millis(100));
 }
 
+// Redisson: testStreamGroupsInfo
 #[tokio::test]
-async fn test_stream_groups_info() {
+async fn groups_report_name_consumers_pending_and_last_delivered_id() {
     let log = stream().await;
     log.add(pairs(&[("6", "61"), ("4", "41")]))
         .id(StreamId::new(12, 42))
@@ -1185,8 +1225,9 @@ async fn test_stream_groups_info() {
     assert_eq!(s2[1].last_delivered_id, id1);
 }
 
+// Redisson: testStreamInfoEmpty
 #[tokio::test]
-async fn test_stream_info_empty() {
+async fn info_of_an_empty_stream_with_a_group_has_no_first_entry() {
     let log = stream().await;
     log.create_group("testGroup", &StreamId::new(12, 44))
         .await
@@ -1197,8 +1238,9 @@ async fn test_stream_info_empty() {
     assert!(info.first_entry.is_none());
 }
 
+// Redisson: testStreamInfo
 #[tokio::test]
-async fn test_stream_info() {
+async fn info_reports_length_radix_tree_and_first_and_last_entries() {
     let log = stream().await;
     let id = StreamId::new(12, 42);
     log.add(pairs(&[("6", "61"), ("4", "41")]))
