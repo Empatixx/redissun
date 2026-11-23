@@ -1,4 +1,3 @@
-use fred::prelude::ReconnectPolicy;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -95,27 +94,6 @@ impl DelayStrategy {
             DelayStrategy::DecorrelatedJitter { max, .. } => max,
         }
     }
-
-    pub(crate) fn reconnect_policy(&self) -> ReconnectPolicy {
-        let clamp = |duration: Duration| u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
-        let mut policy = match *self {
-            DelayStrategy::Constant(delay) => ReconnectPolicy::new_constant(0, clamp(delay)),
-            DelayStrategy::EqualJitter { base, max } => {
-                let mut policy =
-                    ReconnectPolicy::new_exponential(0, clamp(base / 2).max(1), clamp(max), 2);
-                policy.set_jitter(clamp(base / 2));
-                return policy;
-            }
-            DelayStrategy::FullJitter { base, max } => {
-                ReconnectPolicy::new_exponential(0, clamp(base).max(1), clamp(max), 2)
-            }
-            DelayStrategy::DecorrelatedJitter { min, max } => {
-                ReconnectPolicy::new_exponential(0, clamp(min).max(1), clamp(max), 3)
-            }
-        };
-        policy.set_jitter(0);
-        policy
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -205,33 +183,5 @@ mod tests {
             timeout: 3 * SECOND,
         };
         assert_eq!(retry.unlock_latch_ttl(), Duration::from_secs(20));
-    }
-
-    #[test]
-    fn reconnect_policies_follow_the_strategy() {
-        assert_eq!(
-            DelayStrategy::Constant(SECOND).reconnect_policy(),
-            ReconnectPolicy::Constant {
-                attempts: 0,
-                max_attempts: 0,
-                delay: 1000,
-                jitter: 0,
-            }
-        );
-        assert_eq!(
-            DelayStrategy::EqualJitter {
-                base: Duration::from_millis(100),
-                max: Duration::from_secs(10),
-            }
-            .reconnect_policy(),
-            ReconnectPolicy::Exponential {
-                attempts: 0,
-                max_attempts: 0,
-                min_delay: 50,
-                max_delay: 10_000,
-                base: 2,
-                jitter: 50,
-            }
-        );
     }
 }

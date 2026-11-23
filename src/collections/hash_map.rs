@@ -1,10 +1,9 @@
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::scripts::Script;
-use fred::types::Value;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -13,24 +12,24 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
-pub(crate) static INSERT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static INSERT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
         return previous",
     )
 });
 
-pub(crate) static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HDEL', KEYS[1], ARGV[1])
         return previous",
     )
 });
 
-static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PUT_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 1 then
             return nil
         end
@@ -38,8 +37,8 @@ static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PUT_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('HGET', KEYS[1], ARGV[1])
         if value ~= false then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -49,8 +48,8 @@ static PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FAST_PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static FAST_PUT_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('HGET', KEYS[1], ARGV[1])
         if value ~= false then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -60,8 +59,8 @@ static FAST_PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REPLACE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REPLACE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
             local value = redis.call('HGET', KEYS[1], ARGV[1])
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -71,8 +70,8 @@ static REPLACE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FAST_REPLACE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static FAST_REPLACE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
             return 1
@@ -81,8 +80,8 @@ static FAST_REPLACE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REPLACE_IF: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REPLACE_IF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
             return 1
@@ -91,8 +90,8 @@ static REPLACE_IF: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE_IF: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE_IF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
             return redis.call('HDEL', KEYS[1], ARGV[1])
         end
@@ -100,8 +99,8 @@ static REMOVE_IF: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS_VALUE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS_VALUE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local values = redis.call('HVALS', KEYS[1])
         for i = 1, #values, 1 do
             if ARGV[1] == values[i] then
@@ -191,9 +190,12 @@ where
     {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis()
-            .hget(self.key.redis_key(), self.codec.encode(k)?)
+            .query({
+                let mut cmd = redis::cmd("HGET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
             .await?;
         self.decode_value(raw)
     }
@@ -224,16 +226,26 @@ where
     {
         let found: bool = self
             .key
-            .core
-            .redis()
-            .hexists(self.key.redis_key(), self.codec.encode(k)?)
+            .query({
+                let mut cmd = redis::cmd("HEXISTS");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
             .await?;
         Ok(found)
     }
 
     /// Number of entries.
     pub async fn len(&self) -> Result<usize> {
-        let len: usize = self.key.core.redis().hlen(self.key.redis_key()).await?;
+        let len: usize = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HLEN");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         Ok(len)
     }
 
@@ -245,9 +257,11 @@ where
     /// Deletes every entry.
     pub async fn clear(&self) -> Result<()> {
         self.key
-            .core
-            .redis()
-            .del::<(), _>(self.key.redis_key())
+            .query::<()>({
+                let mut cmd = redis::cmd("DEL");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -271,9 +285,12 @@ where
             return Ok(());
         }
         self.key
-            .core
-            .redis()
-            .hset::<(), _, _>(self.key.redis_key(), encoded)
+            .query::<()>({
+                let mut cmd = redis::cmd("HSET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary_pairs(&encoded));
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -293,9 +310,12 @@ where
             .collect::<Result<Vec<Bytes>>>()?;
         let raw: Vec<Option<Bytes>> = self
             .key
-            .core
-            .redis()
-            .hmget(self.key.redis_key(), fields)
+            .query({
+                let mut cmd = redis::cmd("HMGET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&fields));
+                cmd
+            })
             .await?;
         raw.into_iter().map(|r| self.decode_value(r)).collect()
     }
@@ -310,13 +330,13 @@ where
     {
         let inserted: bool = self
             .key
-            .core
-            .redis_no_retry()
-            .hsetnx(
-                self.key.redis_key(),
-                self.codec.encode(k)?,
-                self.codec.encode(v)?,
-            )
+            .query_once({
+                let mut cmd = redis::cmd("HSETNX");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(inserted)
     }
@@ -329,9 +349,13 @@ where
     {
         let value: i64 = self
             .key
-            .core
-            .redis_no_retry()
-            .hincrby(self.key.redis_key(), self.codec.encode(k)?, delta)
+            .query_once({
+                let mut cmd = redis::cmd("HINCRBY");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(delta);
+                cmd
+            })
             .await?;
         Ok(value)
     }
@@ -344,14 +368,18 @@ where
     {
         let value: f64 = self
             .key
-            .core
-            .redis_no_retry()
-            .hincrbyfloat(self.key.redis_key(), self.codec.encode(k)?, delta)
+            .query_once({
+                let mut cmd = redis::cmd("HINCRBYFLOAT");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(delta);
+                cmd
+            })
             .await?;
         Ok(value)
     }
 
-    async fn eval_value(&self, script: &Script, args: Vec<Bytes>) -> Result<Option<V>> {
+    async fn eval_value(&self, script: &Lua, args: Vec<Bytes>) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
             .core
@@ -360,7 +388,7 @@ where
         self.decode_value(raw)
     }
 
-    async fn eval_flag(&self, script: &Script, args: Vec<Bytes>) -> Result<bool> {
+    async fn eval_flag(&self, script: &Lua, args: Vec<Bytes>) -> Result<bool> {
         let flag: i64 = self
             .key
             .core
@@ -379,12 +407,12 @@ where
     {
         let added: i64 = self
             .key
-            .core
-            .redis()
-            .hset(
-                self.key.redis_key(),
-                (self.codec.encode(k)?, self.codec.encode(v)?),
-            )
+            .query({
+                let mut cmd = redis::cmd("HSET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg((&self.codec.encode(k)?[..], &self.codec.encode(v)?[..]));
+                cmd
+            })
             .await?;
         Ok(added == 1)
     }
@@ -400,7 +428,7 @@ where
         let raw: Option<Bytes> = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &PUT_IF_ABSENT,
                 vec![self.key.redis_key()],
                 vec![self.codec.encode(k)?, self.codec.encode(v)?],
@@ -515,9 +543,12 @@ where
             .collect::<Result<Vec<Bytes>>>()?;
         let removed: usize = self
             .key
-            .core
-            .redis()
-            .hdel(self.key.redis_key(), fields)
+            .query({
+                let mut cmd = redis::cmd("HDEL");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&fields));
+                cmd
+            })
             .await?;
         Ok(removed)
     }
@@ -540,9 +571,12 @@ where
     {
         let size: usize = self
             .key
-            .core
-            .redis()
-            .hstrlen(self.key.redis_key(), self.codec.encode(k)?)
+            .query({
+                let mut cmd = redis::cmd("HSTRLEN");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
             .await?;
         Ok(size)
     }
@@ -550,42 +584,55 @@ where
     /// Returns up to `count` distinct random keys (`HRANDFIELD`).
     pub async fn random_keys(&self, count: usize) -> Result<Vec<K>> {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
-        let raw: Vec<Bytes> = self
-            .key
-            .core
-            .redis()
-            .hrandfield(self.key.redis_key(), Some((count, false)))
-            .await?;
+        let mut cmd = self.key.key_cmd("HRANDFIELD");
+        cmd.arg(count);
+        let raw: Vec<Bytes> = self.key.query(cmd).await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
     /// Returns every key in one call (`HKEYS`).
     pub async fn read_all_keys(&self) -> Result<Vec<K>> {
-        let raw: Vec<Bytes> = self.key.core.redis().hkeys(self.key.redis_key()).await?;
+        let raw: Vec<Bytes> = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HKEYS");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
     /// Returns every value in one call (`HVALS`).
     pub async fn read_all_values(&self) -> Result<Vec<V>> {
-        let raw: Vec<Bytes> = self.key.core.redis().hvals(self.key.redis_key()).await?;
+        let raw: Vec<Bytes> = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HVALS");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
     /// Returns every entry in one call (`HGETALL`).
     pub async fn read_all_entries(&self) -> Result<Vec<(K, V)>> {
-        let raw: Value = self.key.core.redis().hgetall(self.key.redis_key()).await?;
+        let mut cmd = redis::cmd("HGETALL");
+        cmd.arg(self.key.redis_key());
+        let raw: redis::Value = self.key.query(cmd).await?;
         self.decode_pairs(raw)
     }
 
-    fn decode_pairs(&self, raw: Value) -> Result<Vec<(K, V)>> {
+    /// The pairs of an `HGETALL` or `HSCAN` reply: a map in RESP3, a flat array of fields and values in RESP2.
+    fn decode_pairs(&self, raw: redis::Value) -> Result<Vec<(K, V)>> {
         let flat: Vec<Bytes> = match raw {
-            Value::Map(map) => map
-                .inner()
+            redis::Value::Map(map) => map
                 .into_iter()
-                .flat_map(|(field, value)| [Value::from(field), value])
-                .map(|value| value.convert())
+                .flat_map(|(field, value)| [field, value])
+                .map(redis::FromRedisValue::from_redis_value)
                 .collect::<std::result::Result<_, _>>()?,
-            other => other.convert()?,
+            other => redis::FromRedisValue::from_redis_value(other)?,
         };
         flat.as_chunks::<2>()
             .0
@@ -605,15 +652,15 @@ where
                 .command(
                     "HSCAN",
                     vec![
-                        Value::from(self.key.redis_key()),
-                        Value::from(cursor),
-                        Value::from("COUNT"),
-                        Value::from(SCAN_PAGE),
+                        Arg::from(self.key.redis_key()),
+                        Arg::from(cursor),
+                        Arg::from("COUNT"),
+                        Arg::from(SCAN_PAGE),
                     ],
-                    0,
                 )
                 .await?;
-            let (next, page): (Bytes, Value) = reply.convert()?;
+            let (next, page): (Bytes, redis::Value) =
+                redis::FromRedisValue::from_redis_value(reply)?;
             let next = (next.as_ref() != b"0").then_some(next);
             let items = self.decode_pairs(page)?;
             Ok(Some((stream::iter(items.into_iter().map(Ok)), next)))

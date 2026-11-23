@@ -1,21 +1,20 @@
+use crate::client::request::Arg;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::reply::{array, int, malformed, number};
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
-use fred::types::Value;
 use std::fmt;
 use std::ops::Range;
 use std::sync::LazyLock;
 
 const MAX_INDEX: u64 = (1 << 32) - 1;
 
-pub(crate) static COUNT: LazyLock<Script> =
-    LazyLock::new(|| Script::from_lua("return redis.call('BITCOUNT', KEYS[1])"));
+pub(crate) static COUNT: LazyLock<Lua> =
+    LazyLock::new(|| Lua::from_lua("return redis.call('BITCOUNT', KEYS[1])"));
 
-static LENGTH: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static LENGTH: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local i = redis.call('bitpos', KEYS[1], 1, -1)
         local pos = i < 0 and redis.call('bitpos', KEYS[1], 0, -1) or math.floor(i / 8) * 8
         while (pos >= 0) do
@@ -34,8 +33,8 @@ static LENGTH: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET_RANGE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static SET_RANGE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "for i = tonumber(ARGV[1]), tonumber(ARGV[2]) - 1, 1 do
             redis.call('SETBIT', KEYS[1], i, ARGV[3])
         end
@@ -52,15 +51,15 @@ fn checked(index: u64) -> Result<u64> {
     Ok(index)
 }
 
-fn index_value(index: u64) -> Result<Value> {
+fn index_value(index: u64) -> Result<Arg> {
     Ok(int(checked(index)?))
 }
 
-fn bit(value: bool) -> Value {
-    Value::Integer(i64::from(value))
+fn bit(value: bool) -> Arg {
+    Arg::Int(i64::from(value))
 }
 
-fn field(signed: bool, size: u32) -> Result<Value> {
+fn field(signed: bool, size: u32) -> Result<Arg> {
     let limit = if signed { 64 } else { 63 };
     if size == 0 || size > limit {
         return Err(Error::Config(format!(
@@ -68,7 +67,7 @@ fn field(signed: bool, size: u32) -> Result<Value> {
             if signed { "signed" } else { "unsigned" }
         )));
     }
-    Ok(Value::from(format!(
+    Ok(Arg::from(format!(
         "{}{size}",
         if signed { 'i' } else { 'u' }
     )))
@@ -108,15 +107,15 @@ impl BitSet {
         Self { key }
     }
 
-    fn name(&self) -> Value {
-        Value::from(self.key.redis_key())
+    fn name(&self) -> Arg {
+        Arg::from(self.key.redis_key())
     }
 
     /// Returns the bit at `index` (`GETBIT`).
     pub async fn get(&self, index: u64) -> Result<bool> {
         let reply = self
             .key
-            .command("GETBIT", vec![self.name(), index_value(index)?], 0)
+            .command("GETBIT", vec![self.name(), index_value(index)?])
             .await?;
         Ok(number(&reply) == Some(1))
     }
@@ -128,9 +127,9 @@ impl BitSet {
         }
         let mut args = vec![self.name()];
         for &index in indexes {
-            args.extend([Value::from("GET"), Value::from("u1"), index_value(index)?]);
+            args.extend([Arg::from("GET"), Arg::from("u1"), index_value(index)?]);
         }
-        let reply = self.key.command("BITFIELD", args, 0).await?;
+        let reply = self.key.command("BITFIELD", args).await?;
         Ok(array(&reply)
             .iter()
             .map(|value| number(value) == Some(1))
@@ -141,11 +140,7 @@ impl BitSet {
     pub async fn set(&self, index: u64, value: bool) -> Result<bool> {
         let reply = self
             .key
-            .command(
-                "SETBIT",
-                vec![self.name(), index_value(index)?, bit(value)],
-                0,
-            )
+            .command("SETBIT", vec![self.name(), index_value(index)?, bit(value)])
             .await?;
         Ok(number(&reply) == Some(1))
     }
@@ -158,13 +153,13 @@ impl BitSet {
         let mut args = vec![self.name()];
         for &index in indexes {
             args.extend([
-                Value::from("SET"),
-                Value::from("u1"),
+                Arg::from("SET"),
+                Arg::from("u1"),
                 index_value(index)?,
                 bit(value),
             ]);
         }
-        self.key.command("BITFIELD", args, 0).await?;
+        self.key.command("BITFIELD", args).await?;
         Ok(())
     }
 
@@ -192,7 +187,7 @@ impl BitSet {
 
     /// Number of bits that are set (`BITCOUNT`), Redisson's `cardinality`.
     pub async fn count(&self) -> Result<u64> {
-        let reply = self.key.command("BITCOUNT", vec![self.name()], 0).await?;
+        let reply = self.key.command("BITCOUNT", vec![self.name()]).await?;
         Ok(number(&reply).unwrap_or(0) as u64)
     }
 
@@ -200,7 +195,7 @@ impl BitSet {
     pub async fn first_set(&self) -> Result<Option<u64>> {
         let reply = self
             .key
-            .command("BITPOS", vec![self.name(), Value::Integer(1)], 0)
+            .command("BITPOS", vec![self.name(), Arg::Int(1)])
             .await?;
         Ok(number(&reply).and_then(|position| u64::try_from(position).ok()))
     }
@@ -217,13 +212,13 @@ impl BitSet {
 
     /// Size of the underlying string in bits, always a multiple of 8, like Redisson's `size`.
     pub async fn size(&self) -> Result<u64> {
-        let reply = self.key.command("STRLEN", vec![self.name()], 0).await?;
+        let reply = self.key.command("STRLEN", vec![self.name()]).await?;
         Ok(number(&reply).unwrap_or(0) as u64 * 8)
     }
 
     /// Returns the raw bytes of the string, empty when the key is missing, like Redisson's `toByteArray`.
     pub async fn to_bytes(&self) -> Result<Vec<u8>> {
-        let raw: Option<Bytes> = self.key.core.redis().get(self.key.redis_key()).await?;
+        let raw: Option<Bytes> = self.key.query(self.key.key_cmd("GET")).await?;
         Ok(raw.map(|raw| raw.to_vec()).unwrap_or_default())
     }
 
@@ -248,9 +243,11 @@ impl BitSet {
             return self.clear().await;
         }
         self.key
-            .core
-            .redis()
-            .set::<(), _, _>(self.key.redis_key(), Bytes::from(raw), None, None, false)
+            .query::<()>({
+                let mut cmd = self.key.key_cmd("SET");
+                cmd.arg(raw);
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -262,9 +259,9 @@ impl BitSet {
     }
 
     async fn op(&self, op: &'static str, others: &[&str]) -> Result<u64> {
-        let mut args = vec![Value::from(op), self.name(), self.name()];
-        args.extend(others.iter().map(|name| Value::from(name.to_string())));
-        let reply = self.key.command("BITOP", args, 1).await?;
+        let mut args = vec![Arg::from(op), self.name(), self.name()];
+        args.extend(others.iter().map(|name| Arg::from(name.to_string())));
+        let reply = self.key.command("BITOP", args).await?;
         number(&reply).map(|n| n as u64).ok_or_else(malformed)
     }
 
@@ -288,19 +285,19 @@ impl BitSet {
         self.op("NOT", &[]).await
     }
 
-    async fn bitfield(&self, signed: bool, size: u32, args: Vec<Value>) -> Result<i64> {
+    async fn bitfield(&self, signed: bool, size: u32, args: Vec<Arg>) -> Result<i64> {
         let mut all = vec![self.name()];
         let mut args = args.into_iter();
         all.push(args.next().ok_or_else(malformed)?);
         all.push(field(signed, size)?);
         all.extend(args);
-        let reply = self.key.command("BITFIELD", all, 0).await?;
+        let reply = self.key.command("BITFIELD", all).await?;
         array(&reply).first().and_then(number).ok_or_else(malformed)
     }
 
     /// Reads a signed integer of `size` bits (1 to 64) starting at bit `offset` (`BITFIELD GET i<size>`).
     pub async fn get_signed(&self, size: u32, offset: u64) -> Result<i64> {
-        self.bitfield(true, size, vec![Value::from("GET"), int(offset)])
+        self.bitfield(true, size, vec![Arg::from("GET"), int(offset)])
             .await
     }
 
@@ -309,7 +306,7 @@ impl BitSet {
         self.bitfield(
             true,
             size,
-            vec![Value::from("SET"), int(offset), Value::Integer(value)],
+            vec![Arg::from("SET"), int(offset), Arg::Int(value)],
         )
         .await
     }
@@ -324,11 +321,7 @@ impl BitSet {
         self.bitfield(
             true,
             size,
-            vec![
-                Value::from("INCRBY"),
-                int(offset),
-                Value::Integer(increment),
-            ],
+            vec![Arg::from("INCRBY"), int(offset), Arg::Int(increment)],
         )
         .await
     }
@@ -336,7 +329,7 @@ impl BitSet {
     /// Reads an unsigned integer of `size` bits (1 to 63) starting at bit `offset` (`BITFIELD GET u<size>`).
     pub async fn get_unsigned(&self, size: u32, offset: u64) -> Result<u64> {
         let value = self
-            .bitfield(false, size, vec![Value::from("GET"), int(offset)])
+            .bitfield(false, size, vec![Arg::from("GET"), int(offset)])
             .await?;
         Ok(value as u64)
     }
@@ -344,11 +337,7 @@ impl BitSet {
     /// Writes an unsigned integer of `size` bits (1 to 63) at bit `offset` and returns the previous one (`BITFIELD SET u<size>`).
     pub async fn set_unsigned(&self, size: u32, offset: u64, value: u64) -> Result<u64> {
         let previous = self
-            .bitfield(
-                false,
-                size,
-                vec![Value::from("SET"), int(offset), int(value)],
-            )
+            .bitfield(false, size, vec![Arg::from("SET"), int(offset), int(value)])
             .await?;
         Ok(previous as u64)
     }
@@ -364,11 +353,7 @@ impl BitSet {
             .bitfield(
                 false,
                 size,
-                vec![
-                    Value::from("INCRBY"),
-                    int(offset),
-                    Value::Integer(increment),
-                ],
+                vec![Arg::from("INCRBY"), int(offset), Arg::Int(increment)],
             )
             .await?;
         Ok(value as u64)

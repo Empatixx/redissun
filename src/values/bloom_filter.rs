@@ -1,10 +1,10 @@
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::coordination::rate_limiter::{suffix_name, EXPIRE_ANY, PERSIST_ANY};
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{Key, Object};
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::scripts::Script;
 use highway::{HighwayHash, HighwayHasher};
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -23,8 +23,8 @@ const HASH_KEY: highway::Key = highway::Key([
     0xf86c_6a11_d0c1_8e95,
 ]);
 
-static INIT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static INIT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('EXISTS', KEYS[1]) == 1 then
             return 0
         end
@@ -33,8 +33,8 @@ static INIT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static INSERT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static INSERT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], 'size') ~= ARGV[1] or redis.call('HGET', KEYS[1], 'hashIterations') ~= ARGV[2] then
             return redis.error_reply('Bloom filter config has been changed')
         end
@@ -55,8 +55,8 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], 'size') ~= ARGV[1] or redis.call('HGET', KEYS[1], 'hashIterations') ~= ARGV[2] then
             return false
         end
@@ -80,8 +80,8 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RENAME: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RENAME: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local half = #KEYS / 2
         for j = 1, half do
             if redis.call('EXISTS', KEYS[j]) == 1 then
@@ -183,12 +183,9 @@ impl<V, C: Codec> BloomFilter<V, C> {
     }
 
     async fn read_config(&self) -> Result<Config> {
-        let fields: Vec<Option<u64>> = self
-            .key
-            .core
-            .redis()
-            .hmget(self.config_key(), vec!["size", "hashIterations"])
-            .await?;
+        let mut cmd = redis::cmd("HMGET");
+        cmd.arg(self.config_key()).arg("size").arg("hashIterations");
+        let fields: Vec<Option<u64>> = self.on_config(cmd).await?;
         let [Some(size), Some(hash_iterations)] = fields.as_slice() else {
             return Err(not_initialised());
         };
@@ -207,8 +204,19 @@ impl<V, C: Codec> BloomFilter<V, C> {
         }
     }
 
-    async fn setting<T: fred::prelude::FromValue>(&self, field: &str) -> Result<T> {
-        let value: Option<T> = self.key.core.redis().hget(self.config_key(), field).await?;
+    /// Sends `cmd`, routed by the configuration key, which shares the filter's hash slot.
+    async fn on_config<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        let config = self.config_key();
+        self.key
+            .core
+            .query(Request::new(cmd).key(config.as_bytes()))
+            .await
+    }
+
+    async fn setting<T: redis::FromRedisValue>(&self, field: &str) -> Result<T> {
+        let mut cmd = redis::cmd("HGET");
+        cmd.arg(self.config_key()).arg(field);
+        let value: Option<T> = self.on_config(cmd).await?;
         value.ok_or_else(not_initialised)
     }
 
@@ -285,12 +293,16 @@ impl<V, C: Codec> BloomFilter<V, C> {
     }
 
     async fn delete_all(&self) -> Result<bool> {
-        let removed: i64 = self.key.core.redis().del(self.keys()).await?;
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(self.keys());
+        let removed: i64 = self.key.query(cmd).await?;
         Ok(removed > 0)
     }
 
     async fn exists_any(&self) -> Result<bool> {
-        let found: i64 = self.key.core.redis().exists(self.keys()).await?;
+        let mut cmd = redis::cmd("EXISTS");
+        cmd.arg(self.keys());
+        let found: i64 = self.key.query(cmd).await?;
         Ok(found > 0)
     }
 

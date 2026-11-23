@@ -1,11 +1,9 @@
 use crate::codec::Codec;
 use crate::collections::list;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::ListInterface;
-use fred::types::lists::ListLocation;
-use fred::types::scripts::Script;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -16,8 +14,8 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::LazyLock;
 use uuid::Uuid;
 
-static INSERT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static INSERT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local ind = table.remove(ARGV, 1)
         local size = redis.call('llen', KEYS[1])
         assert(tonumber(ind) <= size, 'index: ' .. ind .. ' but current size: ' .. size)
@@ -35,16 +33,16 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static SET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('lindex', KEYS[1], ARGV[1])
         redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         return v",
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('lindex', KEYS[1], ARGV[1])
         redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         redis.call('lrem', KEYS[1], 1, ARGV[2])
@@ -52,16 +50,16 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FAST_REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static FAST_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         redis.call('lrem', KEYS[1], 1, ARGV[2])
         return 1",
     )
 });
 
-static CONTAINS_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local items = redis.call('lrange', KEYS[1], 0, -1)
         for i = 1, #items, 1 do
             for j = #ARGV, 1, -1 do
@@ -74,8 +72,8 @@ static CONTAINS_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE_VALUES: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = 0
         for i = 1, #ARGV, 1 do
             if redis.call('lrem', KEYS[1], 0, ARGV[i]) > 0 then
@@ -86,8 +84,8 @@ static REMOVE_VALUES: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RETAIN_VALUES: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RETAIN_VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local changed = 0
         local items = redis.call('lrange', KEYS[1], 0, -1)
         for i = 1, #items, 1 do
@@ -202,9 +200,12 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         self.key
-            .core
-            .redis_no_retry()
-            .rpush::<(), _, _>(self.key.redis_key(), self.codec.encode(v)?)
+            .query_once::<()>({
+                let mut cmd = redis::cmd("RPUSH");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -220,9 +221,12 @@ where
             return Ok(());
         }
         self.key
-            .core
-            .redis_no_retry()
-            .rpush::<(), _, _>(self.key.redis_key(), encoded)
+            .query_once::<()>({
+                let mut cmd = redis::cmd("RPUSH");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&encoded));
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -231,9 +235,11 @@ where
     pub async fn pop(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis_no_retry()
-            .rpop(self.key.redis_key(), None)
+            .query_once({
+                let mut cmd = redis::cmd("RPOP");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
@@ -245,9 +251,12 @@ where
         };
         let raw: Option<Bytes> = self
             .key
-            .core
-            .redis()
-            .lindex(self.key.redis_key(), index)
+            .query({
+                let mut cmd = redis::cmd("LINDEX");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(index);
+                cmd
+            })
             .await?;
         self.decode(raw)
     }
@@ -282,11 +291,15 @@ where
     {
         let index = redis_index(index)?;
         self.key
-            .core
-            .redis()
-            .lset::<(), _, _>(self.key.redis_key(), index, self.codec.encode(v)?)
+            .query::<()>({
+                let mut cmd = redis::cmd("LSET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(index);
+                cmd.arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await
-            .map_err(|error| out_of_range(error.into()))
+            .map_err(out_of_range)
     }
 
     /// Inserts a value before the index and moves the rest back. It is atomic, costs O(n) and is sent once without retry.
@@ -318,9 +331,12 @@ where
         if index == 0 {
             encoded.reverse();
             self.key
-                .core
-                .redis_no_retry()
-                .lpush::<(), _, _>(self.key.redis_key(), encoded)
+                .query_once::<()>({
+                    let mut cmd = redis::cmd("LPUSH");
+                    cmd.arg(self.key.redis_key());
+                    cmd.arg(crate::client::request::binary(&encoded));
+                    cmd
+                })
                 .await?;
             return Ok(());
         }
@@ -329,7 +345,7 @@ where
             .collect();
         self.key
             .core
-            .eval_no_retry::<i64>(&INSERT, vec![self.key.redis_key()], args)
+            .eval_once::<i64>(&INSERT, vec![self.key.redis_key()], args)
             .await
             .map(|_| ())
             .map_err(out_of_range)
@@ -342,7 +358,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.linsert(ListLocation::Before, pivot, v).await
+        self.linsert("BEFORE", pivot, v).await
     }
 
     /// Inserts a value after the first value equal to `pivot` (`LINSERT`).
@@ -352,23 +368,22 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.linsert(ListLocation::After, pivot, v).await
+        self.linsert("AFTER", pivot, v).await
     }
 
-    async fn linsert<Q>(&self, location: ListLocation, pivot: &Q, v: &Q) -> Result<Option<usize>>
+    async fn linsert<Q>(&self, location: &str, pivot: &Q, v: &Q) -> Result<Option<usize>>
     where
         Q: Serialize + ?Sized + Sync,
     {
         let length: i64 = self
             .key
-            .core
-            .redis()
-            .linsert(
-                self.key.redis_key(),
-                location,
-                self.codec.encode(pivot)?,
-                self.codec.encode(v)?,
-            )
+            .query({
+                let mut cmd = self.key.key_cmd("LINSERT");
+                cmd.arg(location)
+                    .arg(&self.codec.encode(pivot)?[..])
+                    .arg(&self.codec.encode(v)?[..]);
+                cmd
+            })
             .await?;
         Ok(usize::try_from(length).ok().filter(|length| *length > 0))
     }
@@ -379,9 +394,11 @@ where
         let index = redis_index(index)?;
         let raw: Option<Bytes> = if index == 0 {
             self.key
-                .core
-                .redis_no_retry()
-                .lpop(self.key.redis_key(), None)
+                .query_once({
+                    let mut cmd = redis::cmd("LPOP");
+                    cmd.arg(self.key.redis_key());
+                    cmd
+                })
                 .await?
         } else {
             self.key
@@ -420,9 +437,13 @@ where
         };
         let raw: std::vec::Vec<Bytes> = self
             .key
-            .core
-            .redis()
-            .lrange(self.key.redis_key(), start, stop)
+            .query({
+                let mut cmd = redis::cmd("LRANGE");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(start);
+                cmd.arg(stop);
+                cmd
+            })
             .await?;
         list::decode_all(&self.codec, &raw)
     }
@@ -433,9 +454,13 @@ where
             return self.clear().await;
         };
         self.key
-            .core
-            .redis()
-            .ltrim::<(), _>(self.key.redis_key(), start, stop)
+            .query::<()>({
+                let mut cmd = redis::cmd("LTRIM");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(start);
+                cmd.arg(stop);
+                cmd
+            })
             .await?;
         Ok(())
     }

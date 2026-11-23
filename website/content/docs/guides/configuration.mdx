@@ -52,14 +52,7 @@ let client = Client::builder()
 | `fair_lock_wait_timeout` | 5 min | `fairLockWaitTimeout` | how long a `FairLock` waiter keeps its place |
 | `eviction_interval` | 5 s | `minCleanUpDelay` | first pause of the cache clean-up task |
 | `codec` | JSON | `codec` | how values are turned into bytes, see [Codecs](/docs/guides/codecs) |
-| `unresponsive_timeout` | off | none | reopen a connection whose command waits longer than this for its reply, see [Connection checks](#connection-checks) |
-| `reconnect_on_auth_error` | false | none | reconnect when the server answers `NOAUTH`, for example ElastiCache after a failover |
-| `commands_per_flush` | 200 | none | how many commands a connection writes before it flushes, see [Tuning](#tuning) |
-| `command_queue_limit` | 0, no limit | none | fail a command at once when this many already wait for a connection |
-| `internal_command_timeout` | 10 s | none | how long `AUTH`, `SELECT`, `HELLO`, `CLUSTER SLOTS` and `READONLY` may take |
-| `max_redirections` | 5 | none | how many `MOVED` or `ASK` replies one command follows in a cluster |
-| `cluster_cache_update_delay` | 0 | none | pause after `MOVED` before the client reads the cluster's slots again |
-| `cluster_health_check` | true | none | check `CLUSTER INFO` when connecting to a cluster |
+| `check_slots_coverage` | true | `checkSlotsCoverage` | fail `build` for Redis Cluster while a slot has no master |
 
 ## Credentials
 
@@ -111,13 +104,11 @@ A command is sent again as soon as its connection is back, so the pause before i
 | `FullJitter { base, max }` | `FullJitterDelay` | `e = min(base × 2ⁿ, max)`, then a random value between 0 and `e` |
 | `DecorrelatedJitter { min, max }` | `DecorrelatedJitterDelay` | a random value between `min` and `min + 3 × previous pause`, at most `max` |
 
-For `reconnection_delay` the jitter is fixed by the underlying client, so the jitter strategies become an exponential pause from about the base to `max`.
-
 ## Connection checks
 
-Every `ping_connection_interval` each pooled connection and the pub/sub connection get a `PING`. A connection that does not answer within `timeout` is closed and opened again. This finds connections that a firewall or a load balancer dropped without a word.
+Every `ping_connection_interval` each pooled connection, the pub/sub connection and every idle batch connection get a `PING`. A connection that does not answer within `timeout` is closed and opened again. This finds connections that a firewall or a load balancer dropped without a word.
 
-`unresponsive_timeout` finds connections that are busy but stuck: when a command waits longer than this for its reply, the connection is closed and opened again, and the waiting commands are sent again on the new one, within `retry_attempts`. `ping_connection_interval` finds idle connections that died, `unresponsive_timeout` finds stuck ones under load. It applies to the pooled connections only. Blocking calls, batches and the pub/sub connection wait on purpose and are not checked. A lock write in Sentinel or Cluster waits up to `replicas_sync_timeout` for replicas on a pooled connection, so `unresponsive_timeout` must be longer, or `build()` fails with `Error::Config`.
+A command that waits longer than `timeout` fails with `Error::Timeout`, and its connection is checked by the next `PING`. Batches, blocking calls and the pub/sub connection wait on purpose: a batch waits `timeout` for its replies, a blocking call as long as it was asked to.
 
 The pub/sub connection is opened when an object first needs it: a lock or semaphore that waits, a `Topic` subscriber, cache events, a `LocalCachedMap` or a `DelayedQueue`.
 
@@ -126,16 +117,14 @@ The pub/sub connection is opened when an object first needs it: a lock or semaph
 The defaults suit most programs, and on a real network the round trip costs far more than any of these settings save. [Benchmarks](/docs/guides/benchmarks) on one machine showed no gain from more connections than the default 4.
 
 - `pool_size`: more connections help when many tasks send large values at once. One connection already carries many commands at a time, because commands are pipelined.
-- `commands_per_flush`: a connection writes the commands that are queued and flushes when it has nothing more to write, or after this many. A smaller value sends the first commands of a burst sooner, a larger one makes fewer, larger writes.
-- `command_queue_limit`: without a limit, commands wait in memory while Redis is slow or a connection is down. With a limit, the commands above it fail at once with an `Error::Redis` that says `Backpressure`, so the program can shed load instead of piling it up. A batch and the pub/sub connection are not limited, so a batch or a resubscription is never cut short.
+- `timeout` and `retry_attempts`: a command that is not answered fails after `timeout`, and one whose connection failed is sent again up to `retry_attempts` times. Commands that must not run twice, such as a lock or a pop, are sent once.
 
 ```rust
 let client = Client::builder()
     .url("redis://127.0.0.1:6379")
     .pool_size(8)
-    .commands_per_flush(64)
-    .command_queue_limit(10_000)
-    .unresponsive_timeout(Duration::from_secs(5))
+    .timeout(Duration::from_secs(1))
+    .retry_attempts(2)
     .build()
     .await?;
 ```

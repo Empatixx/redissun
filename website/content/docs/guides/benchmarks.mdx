@@ -12,9 +12,9 @@ These benchmarks answer one question: **what does an object cost on top of the p
 ## What it shows
 
 - **A single call costs the same everywhere.** A get, a set and a map insert take about 75 µs on every library. This is the Redis round trip on one machine. The client adds under 3 µs, so on a real network, where one round trip takes 100 to 1000 times longer, the differences disappear.
-- **Under load redissun is a little behind the bare clients.** With 64 tasks it is 4 to 13 % below redis-rs, whose single multiplexed connection is the leanest setup, and within a few percent of fred. Redisson uses a blocking API with 64 threads and reaches about a third of the Rust numbers.
-- **A lock costs more than `SET NX`, on purpose.** A redissun lock takes 177 µs, a bare `SET NX PX` plus a Lua compare-and-delete takes 155 µs. The difference buys a reentrant lock, an immediate wake-up of waiting owners through pub/sub and a watchdog that renews the lease. Against Redisson's lock it is faster (177 against 206 µs) and handles more than twice as many locks under load.
-- **`Batch` has room to improve.** 100 queued sets take 303 µs, a fred pipeline 235 µs and a redis-rs pipeline 137 µs. redis-rs writes the whole pipeline at once, while fred, which redissun is built on, sends each command on its own. The rest is redissun's own work: it takes a connection for the batch and creates a handle for every reply.
+- **Under load redissun is a little behind the bare redis-rs.** With 64 tasks it is 6 to 15 % below hand-written redis-rs, whose single multiplexed connection is the leanest setup, and as fast as fred (from 6 % behind to 8 % ahead). Redisson uses a blocking API with 64 threads and reaches about a third of the Rust numbers.
+- **A lock costs more than `SET NX`, on purpose.** A redissun lock takes 170 µs, a bare `SET NX PX` plus a Lua compare-and-delete takes 158 µs on redis-rs. The difference buys a reentrant lock, an immediate wake-up of waiting owners through pub/sub and a watchdog that renews the lease. Against Redisson's lock it is faster (170 against 206 µs) and handles more than twice as many locks under load.
+- **`Batch` is close to a bare pipeline.** 100 queued sets take 159 µs, a hand-written redis-rs pipeline 136 µs, Redisson's `RBatch` 176 µs and a fred pipeline 229 µs. redissun writes each node's commands as one pipeline, as redis-rs does; the rest is its own work: it takes a connection for the batch and creates a handle for every reply.
 
 ## How it was measured
 
@@ -31,7 +31,7 @@ These benchmarks answer one question: **what does an object cost on top of the p
 - The Rust libraries take turns going first: each operation starts with a different library, and each run shifts the order again, so no library is always measured on a machine that has not warmed up yet.
 - **Throughput** is operations per second from 64 tasks (64 threads for Redisson), each on its own key.
 - Every library runs with its default settings. redissun uses 4 connections, fred is set to 4, redis-rs uses one multiplexed connection and Redisson uses its default pool of 64.
-- Each number is the median of three runs. The machine was an Apple M5 Pro running other programs, so expect about 10 % of noise. The versions are redissun 0.19, redis-rs 1.8.2, fred 10.1.0, Redisson 4.8.0, Rust 1.98, JDK 25 and Redis 8.10.
+- Each number is the median of five runs, three for Redisson. The machine was an Apple M5 Pro running other programs, so expect about 10 % of noise. The versions are redissun 0.21 on redis-rs, redis-rs 1.8.2, fred 10.1.0, Redisson 4.8.0, Rust 1.98, JDK 25 and Redis 8.10.
 
 ## Run it yourself
 

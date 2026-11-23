@@ -1,15 +1,15 @@
 use crate::client::core::Core;
+use crate::client::request::{command, Arg, Request};
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-static EXPIRE_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static EXPIRE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         for j = 1, #KEYS, 1 do
             if redis.call('PEXPIRE', KEYS[j], ARGV[1]) == 1 then
@@ -20,8 +20,8 @@ static EXPIRE_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PERSIST_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PERSIST_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         for j = 1, #KEYS, 1 do
             if redis.call('PERSIST', KEYS[j]) == 1 then
@@ -32,8 +32,8 @@ static PERSIST_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RENAME_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RENAME_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local half = #KEYS / 2
         for j = 1, half, 1 do
             if redis.call('EXISTS', KEYS[j]) == 1 then
@@ -124,8 +124,15 @@ impl Key {
     }
 
     pub(crate) async fn get_i64_or_zero(&self) -> Result<i64> {
-        let value: Option<i64> = self.core.redis().get(self.redis_key()).await?;
+        let value: Option<i64> = self.query(self.key_cmd("GET")).await?;
         Ok(value.unwrap_or(0))
+    }
+
+    /// The command `name` with this object's key as its first argument.
+    pub(crate) fn key_cmd(&self, name: &str) -> redis::Cmd {
+        let mut cmd = redis::cmd(name);
+        cmd.arg(self.redis_key());
+        cmd
     }
 
     pub(crate) fn redis_key(&self) -> String {
@@ -136,13 +143,15 @@ impl Key {
         let keys: Vec<String> = std::iter::once(self.redis_key())
             .chain(companions)
             .collect();
-        let removed: i64 = self.core.redis().del(keys).await?;
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(keys);
+        let removed: i64 = self.query(cmd).await?;
         Ok(removed > 0)
     }
 
     pub(crate) async fn del_with(
         &self,
-        script: &Script,
+        script: &Lua,
         keys: Vec<String>,
         args: Vec<Bytes>,
     ) -> Result<bool> {
@@ -178,7 +187,7 @@ impl Key {
 
     pub(crate) async fn expire_with(
         &self,
-        script: &Script,
+        script: &Lua,
         ttl: Duration,
         companions: Vec<String>,
     ) -> Result<bool> {
@@ -193,11 +202,7 @@ impl Key {
         Ok(applied == 1)
     }
 
-    pub(crate) async fn persist_with(
-        &self,
-        script: &Script,
-        companions: Vec<String>,
-    ) -> Result<bool> {
+    pub(crate) async fn persist_with(&self, script: &Lua, companions: Vec<String>) -> Result<bool> {
         let cleared: i64 = self
             .core
             .eval(script, self.with(companions), Vec::new())
@@ -230,57 +235,63 @@ impl Key {
             .collect()
     }
 
+    /// Sends the command `name` with `args`, routed by this object's key, and returns the reply as it came.
     pub(crate) async fn command(
         &self,
-        name: &'static str,
-        args: Vec<fred::types::Value>,
-        key_offset: usize,
-    ) -> Result<fred::types::Value> {
-        let command = fred::types::CustomCommand::new_static(
-            name,
-            fred::types::ClusterHash::Offset(key_offset),
-            false,
-        );
-        Ok(fred::interfaces::ClientLike::custom(self.core.redis(), command, args).await?)
+        name: &str,
+        args: std::vec::Vec<Arg>,
+    ) -> Result<redis::Value> {
+        self.query(command(name, args)).await
+    }
+
+    /// Sends `cmd`, routed by this object's key, and reads the reply as `T`.
+    pub(crate) async fn query<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        self.core
+            .query(Request::new(cmd).key(self.redis_key().as_bytes()))
+            .await
+    }
+
+    /// Like [`query`](Key::query) for a command that is never sent again after its connection failed.
+    pub(crate) async fn query_once<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        self.core
+            .query(Request::new(cmd).key(self.redis_key().as_bytes()).once())
+            .await
     }
 
     pub(crate) async fn exists(&self) -> Result<bool> {
-        let found: i64 = self.core.redis().exists(self.redis_key()).await?;
+        let found: i64 = self.query(self.key_cmd("EXISTS")).await?;
         Ok(found > 0)
     }
 
     pub(crate) async fn rename(&self, new_name: &str) -> Result<()> {
-        self.core
-            .redis()
-            .rename::<(), _, _>(self.redis_key(), new_name.to_string())
-            .await?;
+        let mut cmd = self.key_cmd("RENAME");
+        cmd.arg(new_name);
+        let () = self.query(cmd).await?;
         Ok(())
     }
 
     pub(crate) async fn expire(&self, ttl: Duration) -> Result<bool> {
-        let applied: bool = self
-            .core
-            .redis()
-            .pexpire(self.redis_key(), millis(ttl)?, None)
-            .await?;
+        let mut cmd = self.key_cmd("PEXPIRE");
+        cmd.arg(millis(ttl)?);
+        let applied: bool = self.query(cmd).await?;
         Ok(applied)
     }
 
     pub(crate) async fn ttl(&self) -> Result<Option<Duration>> {
-        let millis: i64 = self.core.redis().pttl(self.redis_key()).await?;
+        let millis: i64 = self.query(self.key_cmd("PTTL")).await?;
         Ok((millis >= 0).then(|| Duration::from_millis(millis as u64)))
     }
 
     pub(crate) async fn persist(&self) -> Result<bool> {
-        let cleared: bool = self.core.redis().persist(self.redis_key()).await?;
+        let cleared: bool = self.query(self.key_cmd("PERSIST")).await?;
         Ok(cleared)
     }
 }
 
 mod sealed {
     use super::Key;
+    use crate::lua::Lua;
     use bytes::Bytes;
-    use fred::types::scripts::Script;
 
     pub trait HasKey {
         fn key(&self) -> &Key;
@@ -297,15 +308,15 @@ mod sealed {
             new_name.to_string()
         }
 
-        fn del_script(&self) -> Option<(&'static Script, Vec<String>, Vec<Bytes>)> {
+        fn del_script(&self) -> Option<(&'static Lua, Vec<String>, Vec<Bytes>)> {
             None
         }
 
-        fn expire_script(&self) -> Option<&'static Script> {
+        fn expire_script(&self) -> Option<&'static Lua> {
             None
         }
 
-        fn persist_script(&self) -> Option<&'static Script> {
+        fn persist_script(&self) -> Option<&'static Lua> {
             None
         }
     }

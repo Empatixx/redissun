@@ -1,11 +1,11 @@
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
+use crate::lua::Lua;
 use crate::object::{millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
-use fred::interfaces::HashesInterface;
-use fred::types::scripts::Script;
 use futures::future::select_all;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
@@ -137,11 +137,11 @@ end
 local field = ARGV[1]
 ";
 
-fn script(body: &str) -> Script {
-    Script::from_lua(format!("{BASE}{PRELUDE}{body}"))
+fn script(body: &str) -> Lua {
+    Lua::from_lua(format!("{BASE}{PRELUDE}{body}"))
 }
 
-static GET: LazyLock<Script> = LazyLock::new(|| {
+static GET: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -158,7 +158,7 @@ static GET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
+static CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -175,7 +175,7 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT: LazyLock<Script> = LazyLock::new(|| {
+static PUT: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         local exists = false
@@ -198,7 +198,7 @@ static PUT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
+static PUT_WITH_LIMITS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local ttl, idle = tonumber(ARGV[3]), tonumber(ARGV[4])
         local raw = redis.call('HGET', MAIN, field)
@@ -220,7 +220,7 @@ static PUT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
+static PUT_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -244,7 +244,7 @@ static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
+static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local ttl, idle = tonumber(ARGV[3]), tonumber(ARGV[4])
         local raw = redis.call('HGET', MAIN, field)
@@ -262,7 +262,7 @@ static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -281,7 +281,7 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
+static ENTRY_TTL: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -299,8 +299,8 @@ static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SCAN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static SCAN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{BASE}local res = redis.call('HSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
         local result = {{}}
         for i = 1, #res[2], 2 do
@@ -329,8 +329,8 @@ static SCAN: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static EVICT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static EVICT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{BASE}if ARGV[3] == '1' and not redis.call('SET', KEYS[6], 1, 'NX', 'PX', ARGV[2]) then
             return -1
         end
@@ -357,8 +357,8 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static TRY_SET_MAX_SIZE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_SET_MAX_SIZE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('HSETNX', KEYS[1], 'max-size', ARGV[1])
         return redis.call('HSETNX', KEYS[1], 'mode', ARGV[2])",
     )
@@ -722,11 +722,11 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
         ])
     }
 
-    fn expire_script(&self) -> Option<&'static Script> {
+    fn expire_script(&self) -> Option<&'static Lua> {
         Some(&EXPIRE)
     }
 
-    fn persist_script(&self) -> Option<&'static Script> {
+    fn persist_script(&self) -> Option<&'static Lua> {
         Some(&PERSIST)
     }
 }
@@ -747,8 +747,8 @@ fn options_key(key: &str) -> String {
     format!("redissun__map_cache_options:{key}")
 }
 
-static EXPIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static EXPIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local maxSize = tonumber(redis.call('HGET', KEYS[5], 'max-size'))
         if maxSize ~= nil and maxSize ~= 0 then
             redis.call('ZADD', KEYS[4], 92233720368547758, 'redissun__expiretag')
@@ -763,8 +763,8 @@ static EXPIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PERSIST: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PERSIST: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local maxSize = tonumber(redis.call('HGET', KEYS[5], 'max-size'))
         if maxSize ~= nil and maxSize ~= 0 then
             redis.call('PERSIST', KEYS[5])
@@ -809,6 +809,15 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
 
     fn options_key(&self) -> String {
         options_key(&self.key.redis_key())
+    }
+
+    /// Sends `cmd`, routed by the options key, which lives in its own slot unless the cache's name has a hash tag.
+    async fn on_options<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        let options = self.options_key();
+        self.key
+            .core
+            .query(Request::new(cmd).key(options.as_bytes()))
+            .await
     }
 
     fn channel(&self, kind: EventKind) -> String {
@@ -926,18 +935,12 @@ where
 
     /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client. Only entries written or read while a limit is set are tracked, so older entries are never dropped for space.
     pub async fn set_max_size(&self, max: usize, mode: EvictionMode) -> Result<()> {
-        let _: i64 = self
-            .key
-            .core
-            .redis()
-            .hset(
-                self.options_key(),
-                vec![
-                    ("max-size", max.to_string()),
-                    ("mode", mode.as_str().to_string()),
-                ],
-            )
-            .await?;
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(self.options_key()).arg(vec![
+            ("max-size", max.to_string()),
+            ("mode", mode.as_str().to_string()),
+        ]);
+        let _: i64 = self.on_options(cmd).await?;
         Ok(())
     }
 
@@ -946,7 +949,7 @@ where
         let set: i64 = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &TRY_SET_MAX_SIZE,
                 vec![self.options_key()],
                 vec![Bytes::from(max.to_string()), Bytes::from(mode.as_str())],
@@ -964,12 +967,9 @@ where
     ///
     /// As in Redisson, the first listener marks the cache in Redis, and from then on every write publishes its changes until the cache is deleted with [`Object::del`](crate::Object::del). Expired entries are always published by the clean-up.
     pub async fn events_of(&self, kinds: &[EventKind]) -> Result<Events<K, V, C>> {
-        let _: i64 = self
-            .key
-            .core
-            .redis()
-            .hset(self.options_key(), ("has-listeners", 1))
-            .await?;
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(self.options_key()).arg(("has-listeners", 1));
+        let _: i64 = self.on_options(cmd).await?;
         let mut sources = std::vec::Vec::new();
         for kind in EventKind::ALL {
             if kinds.contains(&kind) {
@@ -1051,7 +1051,14 @@ where
 
     /// Number of entries in Redis. As in Redisson, expired entries count until the clean-up deletes them.
     pub async fn len(&self) -> Result<usize> {
-        let len: usize = self.key.core.redis().hlen(self.key.redis_key()).await?;
+        let len: usize = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HLEN");
+                cmd.arg(self.key.redis_key());
+                cmd
+            })
+            .await?;
         Ok(len)
     }
 

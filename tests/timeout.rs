@@ -38,7 +38,7 @@ async fn a_command_fails_after_the_timeout() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let started = std::time::Instant::now();
     let outcome = bucket.get().await;
-    assert!(matches!(outcome, Err(Error::Redis(_))), "{outcome:?}");
+    assert!(matches!(outcome, Err(Error::Timeout)), "{outcome:?}");
     assert!(started.elapsed() < Duration::from_millis(600));
     busy.await.unwrap();
     bucket.get().await.unwrap();

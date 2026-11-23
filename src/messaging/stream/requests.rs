@@ -1,9 +1,9 @@
 use super::*;
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
-use crate::reply::{array, bytes, int, malformed, number, text};
+use crate::reply::{array, int, malformed, number, text};
 use bytes::Bytes;
-use fred::types::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::future::{Future, IntoFuture};
@@ -70,15 +70,15 @@ where
                     "a stream entry needs at least one field".into(),
                 ));
             }
-            let mut args = vec![Value::from(self.stream.key.redis_key())];
+            let mut args = vec![Arg::from(self.stream.key.redis_key())];
             if let Some(trim) = &self.trim {
                 args.extend(trim_args(trim, self.strict, self.limit));
             }
-            args.push(Value::from(
+            args.push(Arg::from(
                 self.id.map_or_else(|| "*".to_string(), |id| id.0),
             ));
-            args.extend(fields.into_iter().map(Value::Bytes));
-            let reply = self.stream.run("XADD", args, 0, Mode::Once).await?;
+            args.extend(fields.into_iter().map(Arg::from));
+            let reply = self.stream.run("XADD", args, Mode::Once).await?;
             id_of(&reply)
         })
     }
@@ -118,9 +118,9 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let mut args = vec![Value::from(self.stream.key.redis_key())];
+            let mut args = vec![Arg::from(self.stream.key.redis_key())];
             args.extend(trim_args(&self.trim, self.strict, self.limit));
-            let reply = self.stream.run("XTRIM", args, 0, Mode::Retry).await?;
+            let reply = self.stream.run("XTRIM", args, Mode::Retry).await?;
             Ok(number(&reply).unwrap_or(0) as usize)
         })
     }
@@ -162,7 +162,7 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let (args, offset) = self.stream.group_args(
+            let args = self.stream.group_args(
                 self.group,
                 self.consumer,
                 self.count,
@@ -170,10 +170,7 @@ where
                 self.no_ack,
                 self.after.as_ref(),
             );
-            let reply = self
-                .stream
-                .run("XREADGROUP", args, offset, Mode::Retry)
-                .await?;
+            let reply = self.stream.run("XREADGROUP", args, Mode::Retry).await?;
             self.stream.read_reply(&reply)
         })
     }
@@ -216,18 +213,18 @@ where
         self
     }
 
-    fn args(&self) -> Vec<Value> {
-        let mut args = vec![Value::from(self.group.to_string())];
+    fn args(&self) -> Vec<Arg> {
+        let mut args = vec![Arg::from(self.group.to_string())];
         if let Some(min_idle) = self.min_idle {
-            args.extend([Value::from("IDLE"), int(min_idle.as_millis())]);
+            args.extend([Arg::from("IDLE"), int(min_idle.as_millis())]);
         }
         args.extend([
-            Value::from(self.from.0.clone()),
-            Value::from(self.to.0.clone()),
+            Arg::from(self.from.0.clone()),
+            Arg::from(self.to.0.clone()),
             int(self.count),
         ]);
         if let Some(consumer) = self.consumer {
-            args.push(Value::from(consumer.to_string()));
+            args.push(Arg::from(consumer.to_string()));
         }
         args
     }
@@ -236,10 +233,10 @@ where
     pub async fn messages(self) -> Result<Vec<StreamEntry<K, V>>> {
         let args = self
             .args()
-            .iter()
-            .map(|value| bytes(value).ok_or_else(malformed))
-            .collect::<Result<Vec<Bytes>>>()?;
-        let reply: Value = self
+            .into_iter()
+            .map(Arg::into_bytes)
+            .collect::<Vec<Bytes>>();
+        let reply: redis::Value = self
             .stream
             .key
             .core
@@ -260,9 +257,9 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let mut args = vec![Value::from(self.stream.key.redis_key())];
+            let mut args = vec![Arg::from(self.stream.key.redis_key())];
             args.extend(self.args());
-            let reply = self.stream.run("XPENDING", args, 0, Mode::Retry).await?;
+            let reply = self.stream.run("XPENDING", args, Mode::Retry).await?;
             array(&reply)
                 .iter()
                 .map(|raw| match array(raw) {

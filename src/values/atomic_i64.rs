@@ -1,13 +1,12 @@
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::sync::LazyLock;
 
-static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static COMPARE_AND_SET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         if current == ARGV[1] or (tonumber(ARGV[1]) == 0 and current == false) then
             redis.call('SET', KEYS[1], ARGV[2])
@@ -17,8 +16,8 @@ static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static COMPARE_AND_DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         if current == false then
             return 0
@@ -42,16 +41,16 @@ pub(crate) static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static GET_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static GET_AND_DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         redis.call('DEL', KEYS[1])
         return current",
     )
 });
 
-pub(crate) static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static SET_IF_LESS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         current = current == false and 0 or tonumber(current)
         if current < tonumber(ARGV[1]) then
@@ -62,8 +61,8 @@ pub(crate) static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static SET_IF_GREATER: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static SET_IF_GREATER: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         current = current == false and 0 or tonumber(current)
         if current > tonumber(ARGV[1]) then
@@ -128,7 +127,7 @@ impl AtomicI64 {
         Self { key }
     }
 
-    async fn flag(&self, script: &Script, args: Vec<Bytes>) -> Result<bool> {
+    async fn flag(&self, script: &Lua, args: Vec<Bytes>) -> Result<bool> {
         let done: i64 = self
             .key
             .core
@@ -145,9 +144,11 @@ impl AtomicI64 {
     /// Sets the value.
     pub async fn set(&self, value: i64) -> Result<()> {
         self.key
-            .core
-            .redis()
-            .set::<(), _, _>(self.key.redis_key(), value, None, None, false)
+            .query::<()>({
+                let mut cmd = self.key.key_cmd("SET");
+                cmd.arg(value);
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -156,9 +157,11 @@ impl AtomicI64 {
     pub async fn get_and_set(&self, value: i64) -> Result<i64> {
         let previous: Option<i64> = self
             .key
-            .core
-            .redis()
-            .getset(self.key.redis_key(), value)
+            .query({
+                let mut cmd = self.key.key_cmd("GETSET");
+                cmd.arg(value);
+                cmd
+            })
             .await?;
         Ok(previous.unwrap_or(0))
     }
@@ -225,9 +228,11 @@ impl AtomicI64 {
     pub async fn add_and_get(&self, delta: i64) -> Result<i64> {
         let value: i64 = self
             .key
-            .core
-            .redis()
-            .incr_by(self.key.redis_key(), delta)
+            .query({
+                let mut cmd = self.key.key_cmd("INCRBY");
+                cmd.arg(delta);
+                cmd
+            })
             .await?;
         Ok(value)
     }
@@ -239,13 +244,13 @@ impl AtomicI64 {
 
     /// Adds 1 and returns the new value.
     pub async fn incr(&self) -> Result<i64> {
-        let value: i64 = self.key.core.redis().incr(self.key.redis_key()).await?;
+        let value: i64 = self.key.query(self.key.key_cmd("INCR")).await?;
         Ok(value)
     }
 
     /// Subtracts 1 and returns the new value.
     pub async fn decr(&self) -> Result<i64> {
-        let value: i64 = self.key.core.redis().decr(self.key.redis_key()).await?;
+        let value: i64 = self.key.query(self.key.key_cmd("DECR")).await?;
         Ok(value)
     }
 

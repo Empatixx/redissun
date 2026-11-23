@@ -1,9 +1,11 @@
+use super::int;
 use super::*;
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::millis as to_millis;
-use crate::reply::{int, malformed, number, text};
-use fred::types::Value;
+use crate::reply::{malformed, number, text};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -24,20 +26,15 @@ macro_rules! typed_view {
                 Self { batch, name, _marker: PhantomData }
             }
 
-            fn key(&self) -> Value {
-                Value::from(self.name.clone())
+            fn key(&self) -> Arg {
+                Arg::from(self.name.clone())
             }
         }
     };
 }
 
-fn lua(script: &fred::types::scripts::Script) -> Value {
-    Value::from(
-        script
-            .lua()
-            .map(|source| source.to_string())
-            .unwrap_or_default(),
-    )
+fn lua(script: &Lua) -> Arg {
+    Arg::from(script.source().to_string())
 }
 
 typed_view!(BatchHashMap<K, V>, "A [`HashMap`](crate::HashMap) whose methods queue commands in a [`Batch`].");
@@ -59,10 +56,10 @@ where
         let args = (|| {
             Ok(vec![
                 lua(&crate::collections::hash_map::INSERT),
-                Value::Integer(1),
+                Arg::Int(1),
                 self.key(),
-                Value::Bytes(self.batch.codec.encode(k)?),
-                Value::Bytes(self.batch.codec.encode(v)?),
+                Arg::from(self.batch.codec.encode(k)?),
+                Arg::from(self.batch.codec.encode(v)?),
             ])
         })();
         let codec = self.batch.codec.clone();
@@ -80,7 +77,7 @@ where
             .batch
             .codec
             .encode(k)
-            .map(|field| vec![self.key(), Value::Bytes(field)]);
+            .map(|field| vec![self.key(), Arg::from(field)]);
         let codec = self.batch.codec.clone();
         self.batch
             .queue("HGET", args, 0, move |reply| decode_optional(&codec, reply))
@@ -95,9 +92,9 @@ where
         let args = self.batch.codec.encode(k).map(|field| {
             vec![
                 lua(&crate::collections::hash_map::REMOVE),
-                Value::Integer(1),
+                Arg::Int(1),
                 self.key(),
-                Value::Bytes(field),
+                Arg::from(field),
             ]
         });
         let codec = self.batch.codec.clone();
@@ -115,7 +112,7 @@ where
             .batch
             .codec
             .encode(k)
-            .map(|field| vec![self.key(), Value::Bytes(field)]);
+            .map(|field| vec![self.key(), Arg::from(field)]);
         self.batch
             .queue("HEXISTS", args, 0, |reply| Ok(number(reply) == Some(1)))
     }
@@ -147,7 +144,7 @@ where
             .batch
             .codec
             .encode(value)
-            .map(|raw| vec![self.key(), Value::Bytes(raw)]);
+            .map(|raw| vec![self.key(), Arg::from(raw)]);
         self.batch.queue("SET", args, 0, |_| Ok(()))
     }
 
@@ -160,9 +157,9 @@ where
         let args = (|| {
             Ok(vec![
                 self.key(),
-                Value::Bytes(self.batch.codec.encode(value)?),
-                Value::from("PX"),
-                Value::Integer(to_millis(ttl)?),
+                Arg::from(self.batch.codec.encode(value)?),
+                Arg::from("PX"),
+                Arg::Int(to_millis(ttl)?),
             ])
         })();
         self.batch.queue("SET", args, 0, |_| Ok(()))
@@ -197,7 +194,7 @@ where
             .batch
             .codec
             .encode(v)
-            .map(|raw| vec![self.key(), Value::Bytes(raw)]);
+            .map(|raw| vec![self.key(), Arg::from(raw)]);
         self.batch
             .queue(name, args, 0, |reply| Ok(number(reply) == Some(1)))
     }
@@ -243,13 +240,13 @@ pub struct BatchAtomicI64<'a, C: Codec> {
 }
 
 impl<C: Codec> BatchAtomicI64<'_, C> {
-    fn key(&self) -> Value {
-        Value::from(self.name.clone())
+    fn key(&self) -> Arg {
+        Arg::from(self.name.clone())
     }
 
     fn integer(&self, name: &'static str, extra: Option<i64>) -> BatchFuture<i64> {
         let mut args = vec![self.key()];
-        args.extend(extra.map(Value::Integer));
+        args.extend(extra.map(Arg::Int));
         self.batch
             .queue(name, Ok(args), 0, |reply| Ok(number(reply).unwrap_or(0)))
     }
@@ -263,7 +260,7 @@ impl<C: Codec> BatchAtomicI64<'_, C> {
 
     /// Queues a write.
     pub fn set(&self, value: i64) -> BatchFuture<()> {
-        let args = Ok(vec![self.key(), Value::Integer(value)]);
+        let args = Ok(vec![self.key(), Arg::Int(value)]);
         self.batch.queue("SET", args, 0, |_| Ok(()))
     }
 
@@ -303,7 +300,7 @@ where
             .batch
             .codec
             .encode(v)
-            .map(|raw| vec![self.key(), Value::Bytes(raw)]);
+            .map(|raw| vec![self.key(), Arg::from(raw)]);
         self.batch.queue("RPUSH", args, 0, |_| Ok(()))
     }
 
@@ -342,7 +339,7 @@ where
             .batch
             .codec
             .encode(v)
-            .map(|raw| vec![self.key(), Value::Bytes(raw)]);
+            .map(|raw| vec![self.key(), Arg::from(raw)]);
         self.batch.queue(name, args, 0, |_| Ok(()))
     }
 
@@ -404,12 +401,12 @@ where
         name: &'static str,
         v: &impl Serialize,
         extra: Option<f64>,
-        decode: impl FnOnce(&Value) -> Result<T> + Send + 'static,
+        decode: impl FnOnce(&redis::Value) -> Result<T> + Send + 'static,
     ) -> BatchFuture<T> {
         let args = self.batch.codec.encode(v).map(|raw| {
             let mut args = vec![self.key()];
-            args.extend(extra.map(|score| Value::from(score.to_string())));
-            args.push(Value::Bytes(raw));
+            args.extend(extra.map(|score| Arg::from(score.to_string())));
+            args.push(Arg::from(raw));
             args
         });
         self.batch.queue(name, args, 0, decode)
@@ -451,13 +448,11 @@ where
                 |_| Ok(0.0),
             );
         }
-        let args = self.batch.codec.encode(v).map(|raw| {
-            vec![
-                self.key(),
-                Value::from(delta.to_string()),
-                Value::Bytes(raw),
-            ]
-        });
+        let args = self
+            .batch
+            .codec
+            .encode(v)
+            .map(|raw| vec![self.key(), Arg::from(delta.to_string()), Arg::from(raw)]);
         self.batch.queue("ZINCRBY", args, 0, |reply| {
             text(reply)
                 .and_then(|score| score.parse().ok())
@@ -512,7 +507,7 @@ where
             .batch
             .codec
             .encode(message)
-            .map(|raw| vec![self.key(), Value::Bytes(raw)]);
+            .map(|raw| vec![self.key(), Arg::from(raw)]);
         self.batch
             .queue("PUBLISH", args, 0, |reply| Ok(whole(reply)))
     }

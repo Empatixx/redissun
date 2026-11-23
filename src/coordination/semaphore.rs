@@ -1,18 +1,18 @@
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{millis, HasKey, Key};
 use crate::pending::Pending;
 use crate::shield::shielded;
 use crate::wait::wait_on;
 use bytes::Bytes;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::time::Instant;
 
-static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         if value ~= false and tonumber(value) >= tonumber(ARGV[1]) then
             redis.call('DECRBY', KEYS[1], ARGV[1])
@@ -22,15 +22,15 @@ static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RELEASE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('INCRBY', KEYS[1], ARGV[1])
         redis.call('PUBLISH', KEYS[2], value)",
     )
 });
 
-static RELEASE_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RELEASE_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('EXISTS', KEYS[1]) == 0 then
             return 0
         end
@@ -40,8 +40,8 @@ static RELEASE_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static TRY_SET_PERMITS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_SET_PERMITS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         if value == false then
             if ARGV[2] ~= nil then
@@ -56,8 +56,8 @@ static TRY_SET_PERMITS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static ADD_PERMITS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static ADD_PERMITS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         if value == false then
             value = 0
@@ -67,8 +67,8 @@ static ADD_PERMITS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static DRAIN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static DRAIN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         if value == false then
             return 0
@@ -115,7 +115,7 @@ async fn release_permits(key: &Key, permits: u64) -> Result<()> {
         return Ok(());
     }
     key.core
-        .eval_no_retry::<()>(&RELEASE, keys(key), vec![Bytes::from(permits.to_string())])
+        .eval_once::<()>(&RELEASE, keys(key), vec![Bytes::from(permits.to_string())])
         .await
 }
 
@@ -185,7 +185,7 @@ impl Semaphore {
         let released: i64 = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &RELEASE_IF_EXISTS,
                 keys(&self.key),
                 vec![Bytes::from(permits.to_string())],
@@ -209,7 +209,7 @@ impl Semaphore {
         shielded(async move {
             let taken: i64 = key
                 .core
-                .eval_no_retry(
+                .eval_once(
                     &TRY_ACQUIRE,
                     vec![key.redis_key()],
                     vec![Bytes::from(permits.to_string())],

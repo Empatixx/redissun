@@ -1,7 +1,9 @@
 pub(crate) mod config;
 pub(crate) mod core;
 pub(crate) mod credentials;
+pub(crate) mod request;
 pub(crate) mod retry;
+pub(crate) mod slot;
 #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
 pub(crate) mod tls;
 

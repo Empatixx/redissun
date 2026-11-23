@@ -3,8 +3,7 @@ use crate::client::retry::{DelayStrategy, Retry};
 use crate::client::Client;
 use crate::codec::{Codec, JsonCodec};
 use crate::error::{Error, Result};
-use fred::prelude::{Builder, Config};
-use fred::socket2::TcpKeepalive;
+use socket2::TcpKeepalive;
 use std::fmt;
 use std::time::Duration;
 
@@ -27,14 +26,7 @@ struct Settings {
     tcp_keep_alive_idle: Option<Duration>,
     tcp_keep_alive_interval: Option<Duration>,
     tcp_no_delay: bool,
-    commands_per_flush: u64,
-    command_queue_limit: usize,
-    internal_command_timeout: Duration,
-    unresponsive_timeout: Duration,
-    reconnect_on_auth_error: bool,
-    max_redirections: u32,
-    cluster_cache_update_delay: Duration,
-    cluster_health_check: bool,
+    check_slots_coverage: bool,
     client_name: Option<String>,
     database: Option<u8>,
     username: Option<String>,
@@ -85,20 +77,7 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             )
             .field("keep_alive", &settings.keep_alive)
             .field("tcp_no_delay", &settings.tcp_no_delay)
-            .field("commands_per_flush", &settings.commands_per_flush)
-            .field("command_queue_limit", &settings.command_queue_limit)
-            .field(
-                "internal_command_timeout",
-                &settings.internal_command_timeout,
-            )
-            .field("unresponsive_timeout", &settings.unresponsive_timeout)
-            .field("reconnect_on_auth_error", &settings.reconnect_on_auth_error)
-            .field("max_redirections", &settings.max_redirections)
-            .field(
-                "cluster_cache_update_delay",
-                &settings.cluster_cache_update_delay,
-            )
-            .field("cluster_health_check", &settings.cluster_health_check)
+            .field("check_slots_coverage", &settings.check_slots_coverage)
             .field("client_name", &settings.client_name)
             .field("database", &settings.database)
             .field("username", &settings.username)
@@ -135,14 +114,7 @@ impl ClientBuilder<JsonCodec> {
                 tcp_keep_alive_idle: None,
                 tcp_keep_alive_interval: None,
                 tcp_no_delay: true,
-                commands_per_flush: 200,
-                command_queue_limit: 0,
-                internal_command_timeout: Duration::from_secs(10),
-                unresponsive_timeout: Duration::ZERO,
-                reconnect_on_auth_error: false,
-                max_redirections: 5,
-                cluster_cache_update_delay: Duration::ZERO,
-                cluster_health_check: true,
+                check_slots_coverage: true,
                 client_name: None,
                 database: None,
                 username: None,
@@ -260,53 +232,9 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
-    /// How many commands a connection writes to its socket before it flushes. A connection also flushes as soon as it has nothing more to write, so this matters only when commands queue up faster than they are written. Fewer means smaller writes sent sooner, more means fewer, larger writes. Defaults to 200 and must be at least 1.
-    pub fn commands_per_flush(mut self, commands: u64) -> Self {
-        self.settings.commands_per_flush = commands;
-        self
-    }
-
-    /// How many commands may wait for a pooled connection before a new one fails at once with an `Error::Redis` that says `Backpressure`, instead of waiting in an unbounded queue. Use it to fail fast when Redis cannot keep up or a connection is down. A batch and the pub/sub connection are not limited, so a batch or a resubscription is never cut short. Defaults to 0, no limit.
-    pub fn command_queue_limit(mut self, limit: usize) -> Self {
-        self.settings.command_queue_limit = limit;
-        self
-    }
-
-    /// How long the commands a connection sends for itself may take: `AUTH`, `SELECT`, `HELLO`, `CLUSTER SLOTS` and `READONLY`. Defaults to 10 seconds and must be positive.
-    pub fn internal_command_timeout(mut self, timeout: Duration) -> Self {
-        self.settings.internal_command_timeout = timeout;
-        self
-    }
-
-    /// Closes and reopens a connection when a command it sent waited longer than this for its reply. Unlike [`timeout`](ClientBuilder::timeout), the commands that were waiting are not failed but sent again on the new connection, within [`retry_attempts`](ClientBuilder::retry_attempts). It works next to [`ping_connection_interval`](ClientBuilder::ping_connection_interval), which finds a dead connection that is idle. The check runs every quarter of this time, at most every 2 seconds.
-    ///
-    /// It applies to the pooled connections, not to those of batches, pub/sub and blocking calls such as `pop_front_wait`, which wait for their reply on purpose. A lock write in Sentinel or Cluster waits up to [`replicas_sync_timeout`](ClientBuilder::replicas_sync_timeout) on a pooled connection, so this must be longer. Defaults to zero, off.
-    pub fn unresponsive_timeout(mut self, timeout: Duration) -> Self {
-        self.settings.unresponsive_timeout = timeout;
-        self
-    }
-
-    /// Reconnects when the server answers a command with `NOAUTH`, as if the connection had failed, for servers that drop authentication while a connection stays open, such as Amazon ElastiCache after a failover. Defaults to `false`.
-    pub fn reconnect_on_auth_error(mut self, reconnect: bool) -> Self {
-        self.settings.reconnect_on_auth_error = reconnect;
-        self
-    }
-
-    /// How many `MOVED` or `ASK` redirections one command follows in Redis Cluster before it fails. Defaults to 5.
-    pub fn max_redirections(mut self, redirections: u32) -> Self {
-        self.settings.max_redirections = redirections;
-        self
-    }
-
-    /// How long the client waits after a `MOVED` reply before it reads the cluster's slots again. A pause lets a resharding finish moving several slots before the client asks, instead of asking after each one. Defaults to zero, at once.
-    pub fn cluster_cache_update_delay(mut self, delay: Duration) -> Self {
-        self.settings.cluster_cache_update_delay = delay;
-        self
-    }
-
-    /// Whether connecting to Redis Cluster first checks `CLUSTER INFO` and fails while the cluster state is not `ok`. Turn it off for servers that speak the cluster protocol but do not answer `CLUSTER INFO`. Defaults to `true`.
-    pub fn cluster_health_check(mut self, check: bool) -> Self {
-        self.settings.cluster_health_check = check;
+    /// Whether building a client for Redis Cluster fails while a slot has no master, like Redisson's `checkSlotsCoverage`. Defaults to `true`.
+    pub fn check_slots_coverage(mut self, check: bool) -> Self {
+        self.settings.check_slots_coverage = check;
         self
     }
 
@@ -431,101 +359,17 @@ impl<C: Codec> ClientBuilder<C> {
         if settings.pool_size == 0 {
             return Err(Error::Config("pool_size must be at least 1".into()));
         }
-        if settings.commands_per_flush == 0 {
-            return Err(Error::Config(
-                "commands_per_flush must be at least 1".into(),
-            ));
-        }
         let positive = [
             ("lock_lease", settings.lock_lease),
             ("connect_timeout", settings.connect_timeout),
             ("eviction_interval", settings.eviction_interval),
             ("replicas_sync_timeout", settings.replicas_sync_timeout),
             ("fair_lock_wait_timeout", settings.fair_lock_wait_timeout),
-            (
-                "internal_command_timeout",
-                settings.internal_command_timeout,
-            ),
         ];
         if let Some((name, _)) = positive.iter().find(|(_, value)| value.is_zero()) {
             return Err(Error::Config(format!("{name} must be positive")));
         }
-        let unresponsive = settings.unresponsive_timeout;
-        if !unresponsive.is_zero() && unresponsive <= settings.replicas_sync_timeout {
-            return Err(Error::Config(
-                "unresponsive_timeout must be longer than replicas_sync_timeout, or a lock write that waits for replicas reopens its connection".into(),
-            ));
-        }
         Ok(url)
-    }
-
-    fn fred_builder(&self, url: &str) -> Result<Builder> {
-        let settings = &self.settings;
-        let (url, tls) = match url.strip_prefix("rediss") {
-            Some(rest) => (format!("redis{rest}"), true),
-            None => (url.to_string(), false),
-        };
-        let mut config = Config::from_url(&url).map_err(|e| Error::Config(e.to_string()))?;
-        self.secure(&mut config, tls)?;
-        if settings.database.is_some() {
-            config.database = settings.database;
-        }
-        if settings.username.is_some() {
-            config.username = settings.username.clone();
-        }
-        if settings.password.is_some() {
-            config.password = settings.password.clone();
-        }
-        if let Some(resolver) = &settings.resolver {
-            let mut resolver = resolver.clone();
-            resolver.refresh = settings.credentials_refresh;
-            config.credential_provider = Some(std::sync::Arc::new(resolver));
-        }
-        let mut builder = Builder::from_config(config);
-        builder.set_policy(settings.reconnection_delay.reconnect_policy());
-        builder.with_performance_config(|performance| {
-            performance.broadcast_channel_capacity = 4096;
-            performance.default_command_timeout = settings.timeout;
-            performance.max_feed_count = settings.commands_per_flush;
-        });
-        builder.with_connection_config(|connection| {
-            connection.connection_timeout = settings.connect_timeout;
-            connection.max_command_attempts = settings.retry_attempts.saturating_add(1);
-            connection.tcp.nodelay = Some(settings.tcp_no_delay);
-            connection.tcp.keepalive = settings.keep_alive.then(|| self.keepalive());
-            connection.max_command_buffer_len = settings.command_queue_limit;
-            connection.internal_command_timeout = settings.internal_command_timeout;
-            connection.reconnect_on_auth_error = settings.reconnect_on_auth_error;
-            connection.max_redirections = settings.max_redirections;
-            connection.cluster_cache_update_delay = settings.cluster_cache_update_delay;
-            connection.disable_cluster_health_check = !settings.cluster_health_check;
-            if !settings.unresponsive_timeout.is_zero() {
-                connection.unresponsive.max_timeout = Some(settings.unresponsive_timeout);
-                connection.unresponsive.interval =
-                    unresponsive_check(settings.unresponsive_timeout);
-            }
-        });
-        Ok(builder)
-    }
-
-    #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
-    fn secure(&self, config: &mut Config, tls: bool) -> Result<()> {
-        if tls {
-            config.tls = Some(self.settings.tls.config()?);
-        } else if !self.settings.tls.is_default() {
-            return Err(Error::Config("TLS settings need a rediss:// URL".into()));
-        }
-        Ok(())
-    }
-
-    #[cfg(not(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc")))]
-    fn secure(&self, _config: &mut Config, tls: bool) -> Result<()> {
-        if tls {
-            return Err(Error::Config(
-                "rediss:// URLs need the tls-rustls or tls-rustls-aws-lc feature".into(),
-            ));
-        }
-        Ok(())
     }
 
     fn keepalive(&self) -> TcpKeepalive {
@@ -547,13 +391,100 @@ impl<C: Codec> ClientBuilder<C> {
         keepalive
     }
 
+    /// The servers behind the URL, and how every connection to them is opened.
+    fn topology(&self, url: &str) -> Result<crate::net::topology::Topology> {
+        use crate::net::node::{NodeCredentials, NodeSettings};
+        use crate::net::topology::{Cluster, Pool, Sentinel, Topology};
+        use crate::net::url::Kind;
+        let target = crate::net::url::parse(url)?;
+        let settings = &self.settings;
+        #[cfg(not(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc")))]
+        if target.tls {
+            return Err(Error::Config(
+                "rediss:// URLs need the tls-rustls or tls-rustls-aws-lc feature".into(),
+            ));
+        }
+        #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+        if !target.tls && !settings.tls.is_default() {
+            return Err(Error::Config("TLS settings need a rediss:// URL".into()));
+        }
+        let credentials = match &settings.resolver {
+            Some(resolver) => NodeCredentials::Resolver(resolver.clone()),
+            None => {
+                let username = settings
+                    .username
+                    .clone()
+                    .or_else(|| target.username.clone());
+                let password = settings
+                    .password
+                    .clone()
+                    .or_else(|| target.password.clone());
+                match (username, password) {
+                    (None, None) => NodeCredentials::None,
+                    (username, password) => {
+                        NodeCredentials::Fixed(crate::Credentials { username, password })
+                    }
+                }
+            }
+        };
+        let stream = crate::net::stream::StreamSettings {
+            connect_timeout: settings.connect_timeout,
+            tcp_no_delay: settings.tcp_no_delay,
+            keep_alive: settings.keep_alive.then(|| self.keepalive()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
+            tls: if target.tls {
+                Some(settings.tls.client_config()?)
+            } else {
+                None
+            },
+        };
+        let node = std::sync::Arc::new(NodeSettings {
+            stream: stream.clone(),
+            db: settings.database.or(target.database).map(i64::from),
+            credentials,
+            client_name: settings.client_name.clone(),
+            resp3: false,
+            push: None,
+            reconnection_delay: settings.reconnection_delay,
+        });
+        Ok(match target.kind {
+            Kind::Single => {
+                Topology::Single(Pool::new(&target.nodes[0], settings.pool_size, &node))
+            }
+            Kind::Sentinel { service } => {
+                // Sentinels are asked without the master's database, credentials or name.
+                let sentinels = std::sync::Arc::new(NodeSettings {
+                    stream,
+                    db: None,
+                    credentials: NodeCredentials::None,
+                    client_name: None,
+                    resp3: false,
+                    push: None,
+                    reconnection_delay: settings.reconnection_delay,
+                });
+                Topology::Sentinel(Sentinel::new(
+                    target.nodes,
+                    service,
+                    settings.pool_size,
+                    node,
+                    sentinels,
+                ))
+            }
+            Kind::Cluster => {
+                Topology::Cluster(Cluster::new(target.nodes, settings.pool_size, node))
+            }
+        })
+    }
+
     /// Connects and returns the client.
     pub async fn build(self) -> Result<Client<C>> {
         let url = self.validate()?;
-        let builder = self.fred_builder(&url)?;
+        let topology = self.topology(&url)?;
+        let check_slots_coverage = self.settings.check_slots_coverage;
         let settings = self.settings;
         let core = Core::connect(
-            builder,
+            topology,
+            check_slots_coverage,
             Startup {
                 pool_size: settings.pool_size,
                 lock_lease: settings.lock_lease,
@@ -570,7 +501,7 @@ impl<C: Codec> ClientBuilder<C> {
                     timeout: settings.timeout,
                 },
                 ping_interval: settings.ping_connection_interval,
-                client_name: settings.client_name,
+                credentials_refresh: settings.resolver.as_ref().and(settings.credentials_refresh),
             },
         )
         .await?;
@@ -578,115 +509,89 @@ impl<C: Codec> ClientBuilder<C> {
     }
 }
 
-/// How often fred looks for a connection that waits too long, a quarter of the limit: fred asks for less than half. Never more often than every 10 ms, nor less often than every 2 seconds, fred's default.
-fn unresponsive_check(timeout: Duration) -> Duration {
-    (timeout / 4).clamp(Duration::from_millis(10), Duration::from_secs(2))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fred::prelude::ReconnectPolicy;
+    use crate::net::node::{NodeCredentials, NodeSettings};
 
-    fn fred(builder: ClientBuilder) -> Builder {
+    fn node(builder: ClientBuilder) -> std::sync::Arc<NodeSettings> {
         let url = builder.validate().unwrap();
-        builder.fred_builder(&url).unwrap()
+        builder.topology(&url).unwrap().settings().clone()
     }
 
     #[test]
     fn defaults_follow_redisson() {
-        let built = fred(ClientBuilder::new().url("redis://127.0.0.1:6379"));
-        let connection = built.get_connection_config();
-        assert_eq!(connection.max_command_attempts, 5);
-        assert_eq!(connection.connection_timeout, Duration::from_secs(10));
-        assert_eq!(connection.tcp.nodelay, Some(true));
-        assert!(connection.tcp.keepalive.is_none());
+        let builder = ClientBuilder::new().url("redis://127.0.0.1:6379");
+        assert_eq!(builder.settings.retry_attempts, 4);
+        assert_eq!(builder.settings.timeout, Duration::from_secs(3));
+        let node = node(builder);
+        assert_eq!(node.stream.connect_timeout, Duration::from_secs(10));
+        assert!(node.stream.tcp_no_delay);
+        assert!(node.stream.keep_alive.is_none());
         assert_eq!(
-            built.get_performance_config().default_command_timeout,
-            Duration::from_secs(3)
+            node.reconnection_delay,
+            DelayStrategy::EqualJitter {
+                base: Duration::from_millis(100),
+                max: Duration::from_secs(10),
+            }
         );
-        assert_eq!(
-            built.get_policy(),
-            Some(&ReconnectPolicy::Exponential {
-                attempts: 0,
-                max_attempts: 0,
-                min_delay: 50,
-                max_delay: 10_000,
-                base: 2,
-                jitter: 50,
-            })
-        );
-        assert_eq!(built.get_config().unwrap().database, None);
+        assert_eq!(node.db, None);
+        assert!(matches!(node.credentials, NodeCredentials::None));
     }
 
     #[test]
-    fn settings_reach_the_redis_client() {
-        let built = fred(
+    fn settings_reach_every_connection() {
+        let node = node(
             ClientBuilder::new()
                 .url("redis://127.0.0.1:6379/2")
-                .retry_attempts(0)
-                .timeout(Duration::from_millis(1500))
                 .connect_timeout(Duration::from_secs(2))
                 .reconnection_delay(DelayStrategy::Constant(Duration::from_millis(250)))
                 .tcp_no_delay(false)
                 .keep_alive(true)
                 .tcp_keep_alive_idle(Duration::from_secs(60))
+                .client_name("worker")
                 .database(5),
         );
-        let connection = built.get_connection_config();
-        assert_eq!(connection.max_command_attempts, 1);
-        assert_eq!(connection.connection_timeout, Duration::from_secs(2));
-        assert_eq!(connection.tcp.nodelay, Some(false));
-        assert!(connection.tcp.keepalive.is_some());
+        assert_eq!(node.stream.connect_timeout, Duration::from_secs(2));
+        assert!(!node.stream.tcp_no_delay);
+        assert!(node.stream.keep_alive.is_some());
         assert_eq!(
-            built.get_performance_config().default_command_timeout,
-            Duration::from_millis(1500)
+            node.reconnection_delay,
+            DelayStrategy::Constant(Duration::from_millis(250))
         );
-        assert_eq!(
-            built.get_policy(),
-            Some(&ReconnectPolicy::Constant {
-                attempts: 0,
-                max_attempts: 0,
-                delay: 250,
-                jitter: 0,
-            })
-        );
-        assert_eq!(built.get_config().unwrap().database, Some(5));
+        assert_eq!(node.client_name.as_deref(), Some("worker"));
+        assert_eq!(node.db, Some(5));
     }
 
     #[test]
     fn the_url_database_is_kept_without_an_override() {
-        let built = fred(ClientBuilder::new().url("redis://127.0.0.1:6379/3"));
-        assert_eq!(built.get_config().unwrap().database, Some(3));
+        let node = node(ClientBuilder::new().url("redis://127.0.0.1:6379/3"));
+        assert_eq!(node.db, Some(3));
     }
 
     #[test]
     fn builder_credentials_replace_the_url_credentials() {
-        let built = fred(
+        let node = node(
             ClientBuilder::new()
                 .url("redis://old:secret@127.0.0.1:6379")
                 .username("new")
                 .password("better"),
         );
-        let config = built.get_config().unwrap();
-        assert_eq!(config.username.as_deref(), Some("new"));
-        assert_eq!(config.password.as_deref(), Some("better"));
-        assert!(config.credential_provider.is_none());
+        let NodeCredentials::Fixed(credentials) = &node.credentials else {
+            panic!("fixed credentials expected");
+        };
+        assert_eq!(credentials.username.as_deref(), Some("new"));
+        assert_eq!(credentials.password.as_deref(), Some("better"));
     }
 
     #[test]
-    fn the_resolver_becomes_the_credential_provider() {
-        let built = fred(
+    fn the_resolver_is_asked_instead_of_fixed_credentials() {
+        let node = node(
             ClientBuilder::new()
-                .url("redis://127.0.0.1:6379")
-                .credentials_refresh_interval(Duration::from_secs(60))
+                .url("redis://user:secret@127.0.0.1:6379")
                 .credentials_resolver(|_| async { Ok(crate::Credentials::default()) }),
         );
-        let provider = built.get_config().unwrap().credential_provider.clone();
-        assert_eq!(
-            provider.unwrap().refresh_interval(),
-            Some(Duration::from_secs(60))
-        );
+        assert!(matches!(node.credentials, NodeCredentials::Resolver(_)));
     }
 
     #[test]
@@ -694,83 +599,6 @@ mod tests {
         let text = format!("{:?}", ClientBuilder::new().password("hunter2"));
         assert!(!text.contains("hunter2"));
         assert!(text.contains("password_set: true"));
-    }
-
-    #[test]
-    fn connection_tuning_keeps_the_defaults_of_fred() {
-        let built = fred(ClientBuilder::new().url("redis://127.0.0.1:6379"));
-        let connection = built.get_connection_config();
-        assert_eq!(built.get_performance_config().max_feed_count, 200);
-        assert_eq!(connection.max_command_buffer_len, 0);
-        assert_eq!(connection.internal_command_timeout, Duration::from_secs(10));
-        assert_eq!(connection.unresponsive.max_timeout, None);
-        assert!(!connection.reconnect_on_auth_error);
-        assert_eq!(connection.max_redirections, 5);
-        assert_eq!(connection.cluster_cache_update_delay, Duration::ZERO);
-        assert!(!connection.disable_cluster_health_check);
-    }
-
-    #[test]
-    fn connection_tuning_reaches_fred() {
-        let built = fred(
-            ClientBuilder::new()
-                .url("redis://127.0.0.1:6379")
-                .commands_per_flush(16)
-                .command_queue_limit(1000)
-                .internal_command_timeout(Duration::from_secs(4))
-                .unresponsive_timeout(Duration::from_secs(2))
-                .reconnect_on_auth_error(true)
-                .max_redirections(9)
-                .cluster_cache_update_delay(Duration::from_millis(300))
-                .cluster_health_check(false),
-        );
-        let connection = built.get_connection_config();
-        assert_eq!(built.get_performance_config().max_feed_count, 16);
-        assert_eq!(connection.max_command_buffer_len, 1000);
-        assert_eq!(connection.internal_command_timeout, Duration::from_secs(4));
-        assert_eq!(
-            connection.unresponsive.max_timeout,
-            Some(Duration::from_secs(2))
-        );
-        assert_eq!(connection.unresponsive.interval, Duration::from_millis(500));
-        assert!(connection.reconnect_on_auth_error);
-        assert_eq!(connection.max_redirections, 9);
-        assert_eq!(
-            connection.cluster_cache_update_delay,
-            Duration::from_millis(300)
-        );
-        assert!(connection.disable_cluster_health_check);
-    }
-
-    #[test]
-    fn the_unresponsive_check_runs_four_times_per_timeout_within_fred_limits() {
-        assert_eq!(
-            unresponsive_check(Duration::from_secs(1)),
-            Duration::from_millis(250)
-        );
-        assert_eq!(
-            unresponsive_check(Duration::from_millis(20)),
-            Duration::from_millis(10)
-        );
-        assert_eq!(
-            unresponsive_check(Duration::from_secs(60)),
-            Duration::from_secs(2)
-        );
-    }
-
-    #[test]
-    fn connection_tuning_rejects_values_that_cannot_work() {
-        let url = || ClientBuilder::new().url("redis://127.0.0.1:6379");
-        for builder in [
-            url().commands_per_flush(0),
-            url().internal_command_timeout(Duration::ZERO),
-            url().unresponsive_timeout(Duration::from_secs(1)),
-            url()
-                .replicas_sync_timeout(Duration::from_secs(3))
-                .unresponsive_timeout(Duration::from_secs(2)),
-        ] {
-            assert!(matches!(builder.validate(), Err(Error::Config(_))));
-        }
     }
 
     #[test]

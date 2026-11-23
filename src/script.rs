@@ -1,11 +1,9 @@
 use crate::client::core::Core;
+use crate::client::request::Request;
 use crate::codec::{Codec, JsonCodec};
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use fred::clients::Client as RedisClient;
-use fred::interfaces::{ClientLike, ClusterInterface, FunctionInterface, LuaInterface};
-use fred::types::config::Server;
-use fred::types::{ClusterHash, CustomCommand, Value};
+use redis::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt;
@@ -36,7 +34,9 @@ impl LuaScript {
     /// Wraps the Lua `source` and computes its SHA-1 digest.
     pub fn new(source: impl Into<String>) -> Self {
         let source: String = source.into();
-        let sha1 = fred::util::sha1_hash(&source);
+        let sha1 = crate::lua::Lua::from_lua(source.as_str())
+            .sha1()
+            .to_string();
         Self {
             source: source.into(),
             sha1: sha1.into(),
@@ -65,7 +65,7 @@ impl fmt::Debug for LuaScript {
 mod sealed {
     use crate::codec::Codec;
     use crate::error::Result;
-    use fred::types::Value;
+    use redis::Value;
 
     pub trait FromReply: Sized {
         fn from_reply<C: Codec>(reply: Value, codec: &C) -> Result<Self>;
@@ -106,9 +106,10 @@ fn unexpected(reply: &Value, wanted: &str) -> Error {
 
 fn reply_text(reply: &Value) -> Option<String> {
     match reply {
-        Value::String(text) => Some(text.to_string()),
-        Value::Bytes(bytes) => String::from_utf8(bytes.to_vec()).ok(),
-        Value::Integer(number) => Some(number.to_string()),
+        Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        Value::SimpleString(text) => Some(text.clone()),
+        Value::Okay => Some("OK".into()),
+        Value::Int(number) => Some(number.to_string()),
         Value::Double(number) => Some(number.to_string()),
         Value::Boolean(flag) => Some(flag.to_string()),
         _ => None,
@@ -125,8 +126,8 @@ impl FromReply for bool {
     fn from_reply<C: Codec>(reply: Value, _codec: &C) -> Result<Self> {
         Ok(match reply {
             Value::Boolean(flag) => flag,
-            Value::Integer(number) => number == 1,
-            Value::Null => false,
+            Value::Int(number) => number == 1,
+            Value::Nil => false,
             other => match reply_text(&other).as_deref() {
                 Some("1") | Some("true") | Some("OK") => true,
                 Some(_) => false,
@@ -139,7 +140,7 @@ impl FromReply for bool {
 impl FromReply for i64 {
     fn from_reply<C: Codec>(reply: Value, _codec: &C) -> Result<Self> {
         match &reply {
-            Value::Integer(number) => Ok(*number),
+            Value::Int(number) => Ok(*number),
             other => reply_text(other)
                 .and_then(|text| text.parse().ok())
                 .ok_or_else(|| unexpected(&reply, "an integer")),
@@ -151,7 +152,7 @@ impl FromReply for f64 {
     fn from_reply<C: Codec>(reply: Value, _codec: &C) -> Result<Self> {
         match &reply {
             Value::Double(number) => Ok(*number),
-            Value::Integer(number) => Ok(*number as f64),
+            Value::Int(number) => Ok(*number as f64),
             other => reply_text(other)
                 .and_then(|text| text.parse().ok())
                 .ok_or_else(|| unexpected(&reply, "a number")),
@@ -181,7 +182,7 @@ impl<V: DeserializeOwned> FromReply for Decoded<V> {
 impl<T: FromReply> FromReply for Option<T> {
     fn from_reply<C: Codec>(reply: Value, codec: &C) -> Result<Self> {
         match reply {
-            Value::Null => Ok(None),
+            Value::Nil => Ok(None),
             other => T::from_reply(other, codec).map(Some),
         }
     }
@@ -190,11 +191,11 @@ impl<T: FromReply> FromReply for Option<T> {
 impl<T: FromReply> FromReply for Vec<T> {
     fn from_reply<C: Codec>(reply: Value, codec: &C) -> Result<Self> {
         match reply {
-            Value::Array(items) => items
+            Value::Array(items) | Value::Set(items) => items
                 .into_iter()
                 .map(|item| T::from_reply(item, codec))
                 .collect(),
-            Value::Null => Ok(Vec::new()),
+            Value::Nil => Ok(Vec::new()),
             other => Err(unexpected(&other, "a list")),
         }
     }
@@ -331,62 +332,64 @@ impl<'a, C: Codec, R> ScriptCall<'a, C, R> {
     }
 }
 
-fn custom(name: &'static str, keys: &[String]) -> CustomCommand {
-    let hash = match keys.first() {
-        Some(key) => ClusterHash::Custom(fred::util::redis_keyslot(key.as_bytes())),
-        None => ClusterHash::Random,
-    };
-    CustomCommand::new_static(name, hash, false)
+fn starts_with(error: &Error, prefix: &str) -> bool {
+    matches!(error, Error::Redis(message) if message.starts_with(prefix))
 }
 
-fn command_args(head: &str, keys: &[String], args: &[Bytes]) -> Vec<Value> {
-    let mut values = Vec::with_capacity(keys.len() + args.len() + 2);
-    values.push(Value::from(head));
-    values.push(Value::Integer(keys.len() as i64));
-    values.extend(keys.iter().map(|key| Value::from(key.as_str())));
-    values.extend(args.iter().map(|arg| Value::Bytes(arg.clone())));
-    values
+fn unknown_command(error: &Error) -> bool {
+    matches!(error, Error::Redis(message) if message.to_lowercase().contains("unknown command"))
 }
 
-fn starts_with(error: &fred::error::Error, prefix: &str) -> bool {
-    error.details().starts_with(prefix)
-}
-
-fn unknown_command(error: &fred::error::Error) -> bool {
-    error.details().to_lowercase().contains("unknown command")
-}
-
+/// Sends `name head numkeys keys… args…`, routed by the first key.
 async fn send(
-    client: &RedisClient,
-    name: &'static str,
+    core: &Core,
+    name: &str,
     head: &str,
     keys: &[String],
     args: &[Bytes],
-) -> std::result::Result<Value, fred::error::Error> {
-    client
-        .custom(custom(name, keys), command_args(head, keys, args))
+) -> Result<Value> {
+    let mut cmd = redis::cmd(name);
+    cmd.arg(head).arg(keys.len()).arg(keys);
+    for arg in args {
+        cmd.arg(&arg[..]);
+    }
+    let request = match keys.first() {
+        Some(key) => Request::new(cmd).key(key.as_bytes()),
+        None => Request::new(cmd),
+    };
+    core.query_value(request).await
+}
+
+/// Sends `cmd` to every master (the one server, or every master of a cluster) and returns their replies.
+async fn on_every_master(core: &Core, cmd: &redis::Cmd) -> Result<Vec<Value>> {
+    core.topology()
+        .send_to_masters(cmd)
         .await
+        .map_err(Error::from)
 }
 
 impl<C: Codec, R> ScriptCall<'_, C, R> {
     async fn reply(self) -> Result<Value> {
         let args = self.args?;
         let keys = self.keys;
-        let client = self.core.redis();
+        let core = self.core;
         let read_only = self.mode == ScriptMode::ReadOnly
             && self.core.read_only_scripts.load(Ordering::Acquire);
         let (sha, source) = match self.body {
-            Body::Source(source) => (fred::util::sha1_hash(source), Some(source)),
+            Body::Source(source) => (
+                crate::lua::Lua::from_lua(source).sha1().to_string(),
+                Some(source),
+            ),
             Body::Sha(sha) => (sha.to_string(), None),
             Body::Lua(script) => (script.sha1().to_string(), Some(script.source())),
             Body::Function(name) => {
                 let command = if read_only { "FCALL_RO" } else { "FCALL" };
-                return match send(client, command, name, &keys, &args).await {
+                return match send(core, command, name, &keys, &args).await {
                     Err(error) if read_only && unknown_command(&error) => {
                         self.core.read_only_scripts.store(false, Ordering::Release);
-                        Ok(send(client, "FCALL", name, &keys, &args).await?)
+                        Ok(send(core, "FCALL", name, &keys, &args).await?)
                     }
-                    reply => Ok(reply?),
+                    reply => reply,
                 };
             }
         };
@@ -395,7 +398,7 @@ impl<C: Codec, R> ScriptCall<'_, C, R> {
         } else {
             ("EVALSHA", "EVAL")
         };
-        let error = match send(client, evalsha, &sha, &keys, &args).await {
+        let error = match send(core, evalsha, &sha, &keys, &args).await {
             Ok(reply) => return Ok(reply),
             Err(error) => error,
         };
@@ -414,9 +417,9 @@ impl<C: Codec, R> ScriptCall<'_, C, R> {
         }
         match source {
             Some(source) if starts_with(&error, "NOSCRIPT") => {
-                Ok(send(client, eval, source, &keys, &args).await?)
+                Ok(send(core, eval, source, &keys, &args).await?)
             }
-            _ => Err(error.into()),
+            _ => Err(error),
         }
     }
 }
@@ -432,16 +435,6 @@ impl<'a, C: Codec, R: ScriptOutput + Send + 'a> IntoFuture for ScriptCall<'a, C,
             R::from_reply(reply, codec)
         })
     }
-}
-
-async fn primaries(client: &RedisClient) -> Vec<Option<Server>> {
-    if !client.is_clustered() {
-        return vec![None];
-    }
-    client
-        .cached_cluster_state()
-        .map(|state| state.unique_primary_nodes().into_iter().map(Some).collect())
-        .unwrap_or_default()
 }
 
 impl<C: Codec> Script<C> {
@@ -466,12 +459,13 @@ impl<C: Codec> Script<C> {
 
     /// Loads the script into the script cache and returns its SHA-1 digest (`SCRIPT LOAD`), like Redisson's `scriptLoad`. In Redis Cluster it loads it on every master.
     pub async fn script_load(&self, source: &str) -> Result<String> {
-        let client = self.core.redis();
-        if client.is_clustered() {
-            Ok(client.script_load_cluster(source).await?)
-        } else {
-            Ok(client.script_load(source).await?)
-        }
+        let mut cmd = redis::cmd("SCRIPT");
+        cmd.arg("LOAD").arg(source);
+        let replies = on_every_master(&self.core, &cmd).await?;
+        replies
+            .first()
+            .and_then(crate::reply::text)
+            .ok_or_else(crate::reply::malformed)
     }
 
     /// For each digest, whether Redis has the script (`SCRIPT EXISTS`), like Redisson's `scriptExists`. In Redis Cluster a script counts only when every master has it.
@@ -479,22 +473,14 @@ impl<C: Codec> Script<C> {
         if sha1s.is_empty() {
             return Ok(Vec::new());
         }
-        let digests: Vec<String> = sha1s.iter().map(|sha| sha.to_string()).collect();
-        let client = self.core.redis();
+        let mut cmd = redis::cmd("SCRIPT");
+        cmd.arg("EXISTS").arg(sha1s);
         let mut found = vec![true; sha1s.len()];
-        for server in primaries(client).await {
-            let answer: Vec<bool> = match server {
-                Some(server) => {
-                    client
-                        .with_cluster_node(server)
-                        .script_exists(digests.clone())
-                        .await?
-                }
-                None => client.script_exists(digests.clone()).await?,
-            };
+        for reply in on_every_master(&self.core, &cmd).await? {
+            let here: Vec<bool> = redis::FromRedisValue::from_redis_value(reply)?;
             found
                 .iter_mut()
-                .zip(answer)
+                .zip(here)
                 .for_each(|(found, here)| *found &= here);
         }
         Ok(found)
@@ -502,22 +488,16 @@ impl<C: Codec> Script<C> {
 
     /// Removes every script from the script cache (`SCRIPT FLUSH`), like Redisson's `scriptFlush`. In Redis Cluster on every master.
     pub async fn script_flush(&self) -> Result<()> {
-        let client = self.core.redis();
-        if client.is_clustered() {
-            Ok(client.script_flush_cluster(false).await?)
-        } else {
-            Ok(client.script_flush(false).await?)
-        }
+        let mut cmd = redis::cmd("SCRIPT");
+        cmd.arg("FLUSH");
+        on_every_master(&self.core, &cmd).await.map(drop)
     }
 
     /// Stops the script that is running now (`SCRIPT KILL`), like Redisson's `scriptKill`. Fails with a `NOTBUSY` error when no script runs, and with `UNKILLABLE` when the script already wrote. In Redis Cluster on every master.
     pub async fn script_kill(&self) -> Result<()> {
-        let client = self.core.redis();
-        if client.is_clustered() {
-            Ok(client.script_kill_cluster().await?)
-        } else {
-            Ok(client.script_kill().await?)
-        }
+        let mut cmd = redis::cmd("SCRIPT");
+        cmd.arg("KILL");
+        on_every_master(&self.core, &cmd).await.map(drop)
     }
 }
 
@@ -560,38 +540,38 @@ impl<C: Codec> Function<C> {
     }
 
     async fn load_library(&self, replace: bool, code: &str) -> Result<String> {
-        let client = self.core.redis();
-        if client.is_clustered() {
-            Ok(client.function_load_cluster(replace, code).await?)
-        } else {
-            Ok(client.function_load(replace, code).await?)
+        let mut cmd = redis::cmd("FUNCTION");
+        cmd.arg("LOAD");
+        if replace {
+            cmd.arg("REPLACE");
         }
+        cmd.arg(code);
+        let replies = on_every_master(&self.core, &cmd).await?;
+        replies
+            .first()
+            .and_then(crate::reply::text)
+            .ok_or_else(crate::reply::malformed)
     }
 
     /// Deletes a library (`FUNCTION DELETE`), like Redisson's `delete`. In Redis Cluster on every master.
     pub async fn delete(&self, library: &str) -> Result<()> {
-        let client = self.core.redis();
-        if client.is_clustered() {
-            Ok(client.function_delete_cluster(library).await?)
-        } else {
-            Ok(client.function_delete(library).await?)
-        }
+        let mut cmd = redis::cmd("FUNCTION");
+        cmd.arg("DELETE").arg(library);
+        on_every_master(&self.core, &cmd).await.map(drop)
     }
 
     /// Deletes every library (`FUNCTION FLUSH`), like Redisson's `flush`. In Redis Cluster on every master.
     pub async fn flush(&self) -> Result<()> {
-        let client = self.core.redis();
-        if client.is_clustered() {
-            Ok(client.function_flush_cluster(false).await?)
-        } else {
-            Ok(client.function_flush(false).await?)
-        }
+        let mut cmd = redis::cmd("FUNCTION");
+        cmd.arg("FLUSH");
+        on_every_master(&self.core, &cmd).await.map(drop)
     }
 
     /// Stops the function that is running now (`FUNCTION KILL`), like Redisson's `kill`. Fails with a `NOTBUSY` error when none runs.
     pub async fn kill(&self) -> Result<()> {
-        let _: Value = self.core.redis().function_kill().await?;
-        Ok(())
+        let mut cmd = redis::cmd("FUNCTION");
+        cmd.arg("KILL");
+        self.core.query_value(Request::new(cmd)).await.map(drop)
     }
 
     /// Calls the function `name` (`FCALL`), like Redisson's `call`. Add keys and arguments, then `.await` it; `.read_only()` uses `FCALL_RO`.

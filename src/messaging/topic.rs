@@ -1,9 +1,9 @@
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::Key;
 use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
-use fred::interfaces::PubsubInterface;
 use futures::{stream, Stream};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -78,11 +78,14 @@ where
         M: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let channel = self.key.redis_key();
+        let mut cmd = redis::cmd("PUBLISH");
+        cmd.arg(&channel).arg(&self.codec.encode(message)?[..]);
+        // Routed by the channel's slot, as fred did: in Redis Cluster a reply counts only the receivers on the node that got it.
         let receivers: usize = self
             .key
             .core
-            .redis()
-            .publish(self.key.redis_key(), self.codec.encode(message)?)
+            .query(Request::new(cmd).key(channel.as_bytes()))
             .await?;
         Ok(receivers)
     }
@@ -108,8 +111,14 @@ where
     /// Number of Redis connections subscribed to the topic, across all programs, like Redisson's `countSubscribers`.
     pub async fn subscriber_count(&self) -> Result<usize> {
         let channel = self.key.redis_key();
-        let counts: HashMap<String, usize> =
-            self.key.core.redis().pubsub_numsub(channel.clone()).await?;
+        let mut cmd = redis::cmd("PUBSUB");
+        cmd.arg("NUMSUB").arg(&channel);
+        // Routed by the channel's slot, the node a subscriber of this client listens on.
+        let counts: HashMap<String, usize> = self
+            .key
+            .core
+            .query(Request::new(cmd).key(channel.as_bytes()))
+            .await?;
         Ok(counts.get(&channel).copied().unwrap_or(0))
     }
 }

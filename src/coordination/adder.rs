@@ -1,3 +1,4 @@
+use crate::client::request::Request;
 use crate::coordination::rate_limiter::suffix_name;
 use crate::coordination::semaphore::Semaphore;
 use crate::error::{Error, Result};
@@ -7,7 +8,6 @@ use crate::pubsub::Subscription;
 use crate::values::atomic_f64::AtomicF64;
 use crate::values::atomic_i64::AtomicI64;
 use bytes::Bytes;
-use fred::interfaces::PubsubInterface;
 use std::any::Any;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -214,10 +214,13 @@ impl<N: Summable> Adder<N> {
     async fn ask(&self, kind: &str, wait: Option<Duration>) -> Result<Option<String>> {
         let key = &self.shared.key;
         let id = Uuid::new_v4().simple().to_string();
+        let channel = channel(key.name());
+        let mut cmd = redis::cmd("PUBLISH");
+        cmd.arg(&channel).arg(format!("{kind}:{id}"));
+        // Routed by the channel's slot, as fred did: in Redis Cluster a reply counts only the receivers on the node that got it, and the adder waits for that many answers.
         let listeners: u64 = key
             .core
-            .redis()
-            .publish(channel(key.name()), format!("{kind}:{id}"))
+            .query(Request::new(cmd).key(channel.as_bytes()))
             .await?;
         let semaphore = Semaphore::new(part(key, &id, "semaphore"));
         let answered = match wait {

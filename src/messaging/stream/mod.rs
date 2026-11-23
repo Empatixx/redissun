@@ -7,15 +7,14 @@ pub use types::{
     StreamInfo,
 };
 
-use crate::client::core::no_retry;
+use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;
 use crate::reply::{array, bytes, int, malformed, number, text};
-use fred::interfaces::ClientLike;
-use fred::types::scripts::Script;
-use fred::types::{ClusterHash, CustomCommand, Value};
+use redis::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -24,8 +23,8 @@ use std::marker::PhantomData;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-static PENDING_RANGE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PENDING_RANGE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local pending = redis.call('XPENDING', KEYS[1], unpack(ARGV))
         local result = {}
         for i = 1, #pending, 1 do
@@ -42,20 +41,20 @@ enum Trim {
     MinId(StreamId),
 }
 
-fn trim_args(trim: &Trim, strict: bool, limit: Option<u64>) -> Vec<Value> {
+fn trim_args(trim: &Trim, strict: bool, limit: Option<u64>) -> Vec<Arg> {
     let mut args = match trim {
-        Trim::MaxLen(_) => vec![Value::from("MAXLEN")],
-        Trim::MinId(_) => vec![Value::from("MINID")],
+        Trim::MaxLen(_) => vec![Arg::from("MAXLEN")],
+        Trim::MinId(_) => vec![Arg::from("MINID")],
     };
     if !strict {
-        args.push(Value::from("~"));
+        args.push(Arg::from("~"));
     }
     args.push(match trim {
         Trim::MaxLen(max_len) => int(*max_len),
-        Trim::MinId(id) => Value::from(id.0.clone()),
+        Trim::MinId(id) => Arg::from(id.0.clone()),
     });
     if let Some(limit) = limit {
-        args.extend([Value::from("LIMIT"), int(limit)]);
+        args.extend([Arg::from("LIMIT"), int(limit)]);
     }
     args
 }
@@ -71,10 +70,8 @@ fn fields(value: &Value) -> Vec<(String, Value)> {
             .filter_map(|pair| Some((text(&pair[0])?, pair.get(1)?.clone())))
             .collect(),
         Value::Map(map) => map
-            .clone()
-            .inner()
-            .into_iter()
-            .filter_map(|(key, value)| Some((key.as_str()?.to_string(), value)))
+            .iter()
+            .filter_map(|(key, value)| Some((text(key)?, value.clone())))
             .collect(),
         _ => Vec::new(),
     }
@@ -84,7 +81,7 @@ fn field<'v>(fields: &'v [(String, Value)], name: &str) -> &'v Value {
     fields
         .iter()
         .find(|(key, _)| key == name)
-        .map_or(&Value::Null, |(_, value)| value)
+        .map_or(&Value::Nil, |(_, value)| value)
 }
 
 fn count_of(fields: &[(String, Value)], name: &str) -> u64 {
@@ -105,8 +102,8 @@ fn id_of(value: &Value) -> Result<StreamId> {
     text(value).map(StreamId).ok_or_else(malformed)
 }
 
-fn ids(ids: &[StreamId]) -> Vec<Value> {
-    ids.iter().map(|id| Value::from(id.0.clone())).collect()
+fn ids(ids: &[StreamId]) -> Vec<Arg> {
+    ids.iter().map(|id| Arg::from(id.0.clone())).collect()
 }
 
 /// A distributed append-only log of entries stored in a Redis Stream, with consumer groups, as in Redisson's `RStream`. Each entry has an id and fields.
@@ -151,20 +148,15 @@ impl<K, V, C: Codec> Stream<K, V, C> {
         }
     }
 
-    async fn run(
-        &self,
-        name: &'static str,
-        args: Vec<Value>,
-        key_offset: usize,
-        mode: Mode,
-    ) -> Result<Value> {
-        let command = CustomCommand::new_static(name, ClusterHash::Offset(key_offset), false);
+    /// Every key a stream command names is this stream's key, so the command is routed by it.
+    async fn run(&self, name: &'static str, args: Vec<Arg>, mode: Mode) -> Result<Value> {
+        let cmd = command(name, args);
         match mode {
-            Mode::Retry => self.key.command(name, args, key_offset).await,
-            Mode::Once => Ok(self.key.core.redis_no_retry().custom(command, args).await?),
+            Mode::Retry => self.key.query(cmd).await,
+            Mode::Once => self.key.query_once(cmd).await,
             Mode::Block => {
-                let connection = self.key.core.blocking_client().await?;
-                Ok(no_retry(&*connection).custom(command, args).await?)
+                let key = self.key.redis_key();
+                self.key.core.blocking(key.as_bytes(), cmd).await
             }
         }
     }
@@ -180,7 +172,7 @@ where
         let [id, fields] = array(raw) else {
             return Ok(None);
         };
-        if matches!(fields, Value::Null) {
+        if matches!(fields, Value::Nil) {
             return Ok(Some(StreamEntry {
                 id: id_of(id)?,
                 fields: Vec::new(),
@@ -251,12 +243,7 @@ where
     /// Number of entries.
     pub async fn len(&self) -> Result<usize> {
         let reply = self
-            .run(
-                "XLEN",
-                vec![Value::from(self.key.redis_key())],
-                0,
-                Mode::Retry,
-            )
+            .run("XLEN", vec![Arg::from(self.key.redis_key())], Mode::Retry)
             .await?;
         Ok(number(&reply).unwrap_or(0) as usize)
     }
@@ -274,14 +261,14 @@ where
         count: Option<usize>,
     ) -> Result<Vec<StreamEntry<K, V>>> {
         let mut args = vec![
-            Value::from(self.key.redis_key()),
-            Value::from(first.0.clone()),
-            Value::from(second.0.clone()),
+            Arg::from(self.key.redis_key()),
+            Arg::from(first.0.clone()),
+            Arg::from(second.0.clone()),
         ];
         if let Some(count) = count {
-            args.extend([Value::from("COUNT"), int(count)]);
+            args.extend([Arg::from("COUNT"), int(count)]);
         }
-        let reply = self.run(name, args, 0, Mode::Retry).await?;
+        let reply = self.run(name, args, Mode::Retry).await?;
         self.entries(&reply)
     }
 
@@ -310,9 +297,9 @@ where
         if entries.is_empty() {
             return Ok(0);
         }
-        let mut args = vec![Value::from(self.key.redis_key())];
+        let mut args = vec![Arg::from(self.key.redis_key())];
         args.extend(ids(entries));
-        let reply = self.run("XDEL", args, 0, Mode::Retry).await?;
+        let reply = self.run("XDEL", args, Mode::Retry).await?;
         Ok(number(&reply).unwrap_or(0) as usize)
     }
 
@@ -336,24 +323,18 @@ where
         }
     }
 
-    fn read_args(
-        &self,
-        after: &StreamId,
-        count: Option<usize>,
-        block: Option<u64>,
-    ) -> (Vec<Value>, usize) {
+    fn read_args(&self, after: &StreamId, count: Option<usize>, block: Option<u64>) -> Vec<Arg> {
         let mut args = Vec::new();
         if let Some(count) = count {
-            args.extend([Value::from("COUNT"), int(count)]);
+            args.extend([Arg::from("COUNT"), int(count)]);
         }
         if let Some(block) = block {
-            args.extend([Value::from("BLOCK"), int(block)]);
+            args.extend([Arg::from("BLOCK"), int(block)]);
         }
-        args.push(Value::from("STREAMS"));
-        let offset = args.len();
-        args.push(Value::from(self.key.redis_key()));
-        args.push(Value::from(after.0.clone()));
-        (args, offset)
+        args.push(Arg::from("STREAMS"));
+        args.push(Arg::from(self.key.redis_key()));
+        args.push(Arg::from(after.0.clone()));
+        args
     }
 
     /// Returns the entries added after `after`, oldest first, without waiting. [`StreamId::zero`] returns everything.
@@ -362,8 +343,8 @@ where
         after: &StreamId,
         count: Option<usize>,
     ) -> Result<Vec<StreamEntry<K, V>>> {
-        let (args, offset) = self.read_args(after, count, None);
-        let reply = self.run("XREAD", args, offset, Mode::Retry).await?;
+        let args = self.read_args(after, count, None);
+        let reply = self.run("XREAD", args, Mode::Retry).await?;
         self.read_reply(&reply)
     }
 
@@ -380,8 +361,8 @@ where
                 Some(wait) if wait.is_zero() => self.read(after, count).await?,
                 _ => {
                     let block = wait.map_or(0, block_millis);
-                    let (args, offset) = self.read_args(after, count, Some(block));
-                    let reply = self.run("XREAD", args, offset, Mode::Block).await?;
+                    let args = self.read_args(after, count, Some(block));
+                    let reply = self.run("XREAD", args, Mode::Block).await?;
                     self.read_reply(&reply)?
                 }
             };
@@ -392,13 +373,13 @@ where
     /// Creates a consumer group that starts after `start` ([`StreamId::zero`] for all entries, [`StreamId::latest`] for new ones only), and creates the stream when it does not exist. Returns `false` when the group already existed.
     pub async fn create_group(&self, group: &str, start: &StreamId) -> Result<bool> {
         let args = vec![
-            Value::from("CREATE"),
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(start.0.clone()),
-            Value::from("MKSTREAM"),
+            Arg::from("CREATE"),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(start.0.clone()),
+            Arg::from("MKSTREAM"),
         ];
-        match self.run("XGROUP", args, 1, Mode::Retry).await {
+        match self.run("XGROUP", args, Mode::Retry).await {
             Ok(_) => Ok(true),
             Err(Error::Redis(message)) if message.contains("BUSYGROUP") => Ok(false),
             Err(error) => Err(error),
@@ -408,47 +389,47 @@ where
     /// Deletes a consumer group (`XGROUP DESTROY`); returns whether it existed.
     pub async fn destroy_group(&self, group: &str) -> Result<bool> {
         let args = vec![
-            Value::from("DESTROY"),
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
+            Arg::from("DESTROY"),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
         ];
-        let reply = self.run("XGROUP", args, 1, Mode::Retry).await?;
+        let reply = self.run("XGROUP", args, Mode::Retry).await?;
         Ok(number(&reply) == Some(1))
     }
 
     /// Creates a consumer in a group (`XGROUP CREATECONSUMER`); returns `false` when it already existed.
     pub async fn create_consumer(&self, group: &str, consumer: &str) -> Result<bool> {
         let args = vec![
-            Value::from("CREATECONSUMER"),
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(consumer.to_string()),
+            Arg::from("CREATECONSUMER"),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(consumer.to_string()),
         ];
-        let reply = self.run("XGROUP", args, 1, Mode::Retry).await?;
+        let reply = self.run("XGROUP", args, Mode::Retry).await?;
         Ok(number(&reply) == Some(1))
     }
 
     /// Deletes a consumer from a group (`XGROUP DELCONSUMER`) and returns how many entries it still held pending; they are dropped.
     pub async fn remove_consumer(&self, group: &str, consumer: &str) -> Result<u64> {
         let args = vec![
-            Value::from("DELCONSUMER"),
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(consumer.to_string()),
+            Arg::from("DELCONSUMER"),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(consumer.to_string()),
         ];
-        let reply = self.run("XGROUP", args, 1, Mode::Retry).await?;
+        let reply = self.run("XGROUP", args, Mode::Retry).await?;
         Ok(number(&reply).unwrap_or(0).max(0) as u64)
     }
 
     /// Moves the last delivered id of a group to `id` (`XGROUP SETID`), so entries after it are delivered again.
     pub async fn update_group_message_id(&self, group: &str, id: &StreamId) -> Result<()> {
         let args = vec![
-            Value::from("SETID"),
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(id.0.clone()),
+            Arg::from("SETID"),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(id.0.clone()),
         ];
-        self.run("XGROUP", args, 1, Mode::Retry).await?;
+        self.run("XGROUP", args, Mode::Retry).await?;
         Ok(())
     }
 
@@ -460,26 +441,25 @@ where
         block: Option<u64>,
         no_ack: bool,
         after: Option<&StreamId>,
-    ) -> (Vec<Value>, usize) {
+    ) -> Vec<Arg> {
         let mut args = vec![
-            Value::from("GROUP"),
-            Value::from(group.to_string()),
-            Value::from(consumer.to_string()),
+            Arg::from("GROUP"),
+            Arg::from(group.to_string()),
+            Arg::from(consumer.to_string()),
         ];
         if let Some(count) = count {
-            args.extend([Value::from("COUNT"), int(count)]);
+            args.extend([Arg::from("COUNT"), int(count)]);
         }
         if let Some(block) = block {
-            args.extend([Value::from("BLOCK"), int(block)]);
+            args.extend([Arg::from("BLOCK"), int(block)]);
         }
         if no_ack {
-            args.push(Value::from("NOACK"));
+            args.push(Arg::from("NOACK"));
         }
-        args.push(Value::from("STREAMS"));
-        let offset = args.len();
-        args.push(Value::from(self.key.redis_key()));
-        args.push(Value::from(after.map_or(">", |id| id.as_str()).to_string()));
-        (args, offset)
+        args.push(Arg::from("STREAMS"));
+        args.push(Arg::from(self.key.redis_key()));
+        args.push(Arg::from(after.map_or(">", |id| id.as_str()).to_string()));
+        args
     }
 
     /// Takes the entries that no consumer of the group has received yet, without waiting. Each stays pending for `consumer` until it is acknowledged. Add `.no_ack()` to skip the pending list, or `.after(id)` to re-read this consumer's pending entries instead.
@@ -511,9 +491,8 @@ where
                 Some(wait) if wait.is_zero() => self.read_group(group, consumer, count).await?,
                 _ => {
                     let block = wait.map_or(0, block_millis);
-                    let (args, offset) =
-                        self.group_args(group, consumer, count, Some(block), false, None);
-                    let reply = self.run("XREADGROUP", args, offset, Mode::Block).await?;
+                    let args = self.group_args(group, consumer, count, Some(block), false, None);
+                    let reply = self.run("XREADGROUP", args, Mode::Block).await?;
                     self.read_reply(&reply)?
                 }
             };
@@ -527,21 +506,21 @@ where
             return Ok(0);
         }
         let mut args = vec![
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
         ];
         args.extend(ids(entries));
-        let reply = self.run("XACK", args, 0, Mode::Retry).await?;
+        let reply = self.run("XACK", args, Mode::Retry).await?;
         Ok(number(&reply).unwrap_or(0) as usize)
     }
 
     /// Summary of the pending entries of a group.
     pub async fn pending(&self, group: &str) -> Result<PendingSummary> {
         let args = vec![
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
         ];
-        let reply = self.run("XPENDING", args, 0, Mode::Retry).await?;
+        let reply = self.run("XPENDING", args, Mode::Retry).await?;
         let [count, first, last, consumers] = array(&reply) else {
             return Err(malformed());
         };
@@ -589,13 +568,13 @@ where
             return Ok(Vec::new());
         }
         let mut args = vec![
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(consumer.to_string()),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(consumer.to_string()),
             int(min_idle.as_millis()),
         ];
         args.extend(ids(entries));
-        let reply = self.run("XCLAIM", args, 0, Mode::Retry).await?;
+        let reply = self.run("XCLAIM", args, Mode::Retry).await?;
         self.entries(&reply)
     }
 
@@ -611,14 +590,14 @@ where
             return Ok(Vec::new());
         }
         let mut args = vec![
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(consumer.to_string()),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(consumer.to_string()),
             int(min_idle.as_millis()),
         ];
         args.extend(ids(entries));
-        args.push(Value::from("JUSTID"));
-        let reply = self.run("XCLAIM", args, 0, Mode::Retry).await?;
+        args.push(Arg::from("JUSTID"));
+        let reply = self.run("XCLAIM", args, Mode::Retry).await?;
         id_list(&reply)
     }
 
@@ -629,14 +608,14 @@ where
         min_idle: Duration,
         start: &StreamId,
         count: usize,
-    ) -> Vec<Value> {
+    ) -> Vec<Arg> {
         vec![
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
-            Value::from(consumer.to_string()),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
+            Arg::from(consumer.to_string()),
             int(min_idle.as_millis()),
-            Value::from(start.0.clone()),
-            Value::from("COUNT"),
+            Arg::from(start.0.clone()),
+            Arg::from("COUNT"),
             int(count),
         ]
     }
@@ -651,7 +630,7 @@ where
         count: usize,
     ) -> Result<AutoClaim<K, V>> {
         let args = self.auto_claim_args(group, consumer, min_idle, start, count);
-        let reply = self.run("XAUTOCLAIM", args, 0, Mode::Retry).await?;
+        let reply = self.run("XAUTOCLAIM", args, Mode::Retry).await?;
         let parts = array(&reply);
         let (Some(next), Some(entries)) = (parts.first(), parts.get(1)) else {
             return Err(malformed());
@@ -673,8 +652,8 @@ where
         count: usize,
     ) -> Result<(StreamId, Vec<StreamId>)> {
         let mut args = self.auto_claim_args(group, consumer, min_idle, start, count);
-        args.push(Value::from("JUSTID"));
-        let reply = self.run("XAUTOCLAIM", args, 0, Mode::Retry).await?;
+        args.push(Arg::from("JUSTID"));
+        let reply = self.run("XAUTOCLAIM", args, Mode::Retry).await?;
         let parts = array(&reply);
         let (Some(next), Some(claimed)) = (parts.first(), parts.get(1)) else {
             return Err(malformed());
@@ -684,8 +663,8 @@ where
 
     /// Returns length, radix tree size, group count, last generated id and the first and last entry (`XINFO STREAM`). Fails when the stream does not exist.
     pub async fn info(&self) -> Result<StreamInfo<K, V>> {
-        let args = vec![Value::from("STREAM"), Value::from(self.key.redis_key())];
-        let reply = self.run("XINFO", args, 1, Mode::Retry).await?;
+        let args = vec![Arg::from("STREAM"), Arg::from(self.key.redis_key())];
+        let reply = self.run("XINFO", args, Mode::Retry).await?;
         let info = fields(&reply);
         Ok(StreamInfo {
             length: count_of(&info, "length"),
@@ -700,8 +679,8 @@ where
 
     /// Lists the consumer groups (`XINFO GROUPS`).
     pub async fn groups(&self) -> Result<Vec<StreamGroup>> {
-        let args = vec![Value::from("GROUPS"), Value::from(self.key.redis_key())];
-        let reply = self.run("XINFO", args, 1, Mode::Retry).await?;
+        let args = vec![Arg::from("GROUPS"), Arg::from(self.key.redis_key())];
+        let reply = self.run("XINFO", args, Mode::Retry).await?;
         array(&reply)
             .iter()
             .map(|raw| {
@@ -719,11 +698,11 @@ where
     /// Lists the consumers of a group (`XINFO CONSUMERS`).
     pub async fn consumers(&self, group: &str) -> Result<Vec<StreamConsumer>> {
         let args = vec![
-            Value::from("CONSUMERS"),
-            Value::from(self.key.redis_key()),
-            Value::from(group.to_string()),
+            Arg::from("CONSUMERS"),
+            Arg::from(self.key.redis_key()),
+            Arg::from(group.to_string()),
         ];
-        let reply = self.run("XINFO", args, 1, Mode::Retry).await?;
+        let reply = self.run("XINFO", args, Mode::Retry).await?;
         array(&reply)
             .iter()
             .map(|raw| {

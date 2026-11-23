@@ -5,7 +5,6 @@ use crate::locks::{
     WRITE_FORCE_UNLOCK,
 };
 use crate::object::{HasKey, Key};
-use fred::interfaces::HashesInterface;
 use std::fmt;
 
 /// Proof that a read lock is held. It is the same type as a [`LockGuard`].
@@ -65,12 +64,9 @@ impl RwLock {
 
     /// Returns whether any owner holds the write lock.
     pub async fn is_write_locked(&self) -> Result<bool> {
-        let mode: Option<String> = self
-            .key
-            .core
-            .redis()
-            .hget(self.key.redis_key(), "mode")
-            .await?;
+        let mut cmd = self.key.key_cmd("HGET");
+        cmd.arg("mode");
+        let mode: Option<String> = self.key.query(cmd).await?;
         Ok(mode.as_deref() == Some("write"))
     }
 

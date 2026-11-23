@@ -1,11 +1,8 @@
 use crate::error::Result;
-use fred::error::{Error as FredError, ErrorKind};
-use fred::types::config::{CredentialProvider, Server};
 use futures::future::BoxFuture;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// A username and password for `AUTH`, like Redisson's `Credentials`. `Debug` never prints the password.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -40,7 +37,6 @@ type Resolve = dyn Fn(String) -> BoxFuture<'static, Result<Credentials>> + Send 
 #[derive(Clone)]
 pub(crate) struct Resolver {
     resolve: Arc<Resolve>,
-    pub(crate) refresh: Option<Duration>,
 }
 
 impl Resolver {
@@ -51,33 +47,19 @@ impl Resolver {
     {
         Self {
             resolve: Arc::new(move |address| Box::pin(resolve(address))),
-            refresh: None,
         }
+    }
+}
+
+impl Resolver {
+    /// Asks for the credentials of a new connection to `address` (`host:port`).
+    pub(crate) async fn resolve(&self, address: &str) -> Result<Credentials> {
+        (self.resolve)(address.to_string()).await
     }
 }
 
 impl fmt::Debug for Resolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Resolver")
-            .field("refresh", &self.refresh)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait::async_trait]
-impl CredentialProvider for Resolver {
-    async fn fetch(
-        &self,
-        server: Option<&Server>,
-    ) -> std::result::Result<(Option<String>, Option<String>), FredError> {
-        let address = server.map(|server| server.to_string()).unwrap_or_default();
-        let credentials = (self.resolve)(address)
-            .await
-            .map_err(|error| FredError::new(ErrorKind::Auth, error.to_string()))?;
-        Ok((credentials.username, credentials.password))
-    }
-
-    fn refresh_interval(&self) -> Option<Duration> {
-        self.refresh
+        f.debug_struct("Resolver").finish_non_exhaustive()
     }
 }

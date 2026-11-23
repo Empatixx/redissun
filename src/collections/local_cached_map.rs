@@ -1,12 +1,12 @@
 use crate::client::core::Core;
+use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{tagged, HasKey, Key};
 use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface, PubsubInterface, SortedSetsInterface};
-use fred::types::scripts::Script;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -31,8 +31,8 @@ const UPDATES_LOG_TIME: Duration = Duration::from_secs(10 * 60);
 const UPDATES_LOG_KEEP: Duration = Duration::from_secs(11 * 60);
 const EXPIRED_EVENTS: &str = "__keyevent@*:expired";
 
-static PUT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PUT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
         if ARGV[4] == '1' then
@@ -47,8 +47,8 @@ static PUT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         if redis.call('HDEL', KEYS[1], ARGV[1]) == 1 then
             if ARGV[4] == '1' then
@@ -64,8 +64,8 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CLEAR_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CLEAR_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('DEL', KEYS[1], KEYS[2]) > 0 and ARGV[2] ~= '0' then
             redis.call('PUBLISH', ARGV[1], ARGV[3])
             return 1
@@ -514,19 +514,16 @@ async fn load_after_reconnection(local: &Local, core: Weak<Core>, keys: &[String
     let Some(core) = core.upgrade() else {
         return;
     };
-    let exists: Result<i64> = core
-        .redis()
-        .exists(keys[0].clone())
-        .await
-        .map_err(Into::into);
+    let mut cmd = redis::cmd("EXISTS");
+    cmd.arg(&keys[0]);
+    let exists: Result<i64> = core.query(Request::new(cmd).key(keys[0].as_bytes())).await;
     match exists {
         Ok(0) => local.forget_all(),
         Ok(_) => {
-            let changed: Result<std::vec::Vec<Bytes>> = core
-                .redis()
-                .zrangebyscore(keys[1].clone(), since as f64, "+inf", false, None)
-                .await
-                .map_err(Into::into);
+            let mut cmd = redis::cmd("ZRANGEBYSCORE");
+            cmd.arg(&keys[1]).arg(since).arg("+inf");
+            let changed: Result<std::vec::Vec<Bytes>> =
+                core.query(Request::new(cmd).key(keys[1].as_bytes())).await;
             match changed {
                 Ok(changed) => changed
                     .iter()
@@ -624,7 +621,7 @@ impl<K, V, C: Codec> HasKey for LocalCachedMap<K, V, C> {
         &self.key
     }
 
-    fn del_script(&self) -> Option<(&'static Script, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
+    fn del_script(&self) -> Option<(&'static Lua, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
         self.local.forget_all();
         Some((&CLEAR_ALL, self.clear_keys(), self.clear_arguments()))
     }
@@ -683,13 +680,9 @@ where
             _ => {}
         }
         self.local.begin_read(&field);
-        let read: Result<Option<Bytes>> = self
-            .key
-            .core
-            .redis()
-            .hget(self.key.redis_key(), field.clone())
-            .await
-            .map_err(Into::into);
+        let mut cmd = self.key.key_cmd("HGET");
+        cmd.arg(&field[..]);
+        let read: Result<Option<Bytes>> = self.key.query(cmd).await;
         let raw = match read {
             Ok(raw) => raw,
             Err(error) => {
@@ -832,11 +825,15 @@ where
     /// Empties the local cache of this instance and tells every other instance to empty theirs, like Redisson's `clearLocalCache`. Redis is not changed. It returns once the message is published, without waiting for the others.
     pub async fn clear_local_everywhere(&self) -> Result<()> {
         self.local.forget_all();
+        let channel = channel(&self.key);
+        let mut cmd = redis::cmd("PUBLISH");
+        cmd.arg(&channel)
+            .arg(&message(&self.local.id, CLEAR, &[])[..]);
+        // Routed by the channel's slot, as fred did.
         let _: i64 = self
             .key
             .core
-            .redis()
-            .publish(channel(&self.key), message(&self.local.id, CLEAR, &[]))
+            .query(Request::new(cmd).key(channel.as_bytes()))
             .await?;
         Ok(())
     }

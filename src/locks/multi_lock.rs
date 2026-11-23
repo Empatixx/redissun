@@ -2,7 +2,6 @@ use crate::error::{Error, Result};
 use crate::locks::{acquire, is_held_by_current, LockGuard, Mode, Wait};
 use crate::object::{millis, Key};
 use crate::pending::{Pending, PendingTimeout};
-use fred::interfaces::KeysInterface;
 use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
@@ -189,11 +188,9 @@ impl MultiLock {
         if let Some(lease) = lease {
             for guard in &acquired {
                 if let Some(key) = guard.key() {
-                    let _: bool = key
-                        .core
-                        .redis()
-                        .pexpire(key.redis_key(), millis(lease)?, None)
-                        .await?;
+                    let mut cmd = key.key_cmd("PEXPIRE");
+                    cmd.arg(millis(lease)?);
+                    let _: bool = key.query(cmd).await?;
                 }
             }
         }

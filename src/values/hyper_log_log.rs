@@ -1,8 +1,8 @@
+use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::Result;
 use crate::object::{HasKey, Key};
 use crate::reply::number;
-use fred::types::Value;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
@@ -58,7 +58,7 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.add(vec![Value::Bytes(self.codec.encode(v)?)]).await
+        self.add(vec![Arg::from(self.codec.encode(v)?)]).await
     }
 
     /// Adds many values with one `PFADD`; returns whether the estimate changed, or the key was created.
@@ -69,16 +69,16 @@ where
     {
         let encoded = values
             .into_iter()
-            .map(|v| Ok(Value::Bytes(self.codec.encode(v)?)))
-            .collect::<Result<Vec<Value>>>()?;
+            .map(|v| Ok(Arg::from(self.codec.encode(v)?)))
+            .collect::<Result<Vec<Arg>>>()?;
         self.add(encoded).await
     }
 
-    async fn add(&self, values: Vec<Value>) -> Result<bool> {
-        let args = std::iter::once(Value::from(self.key.redis_key()))
+    async fn add(&self, values: Vec<Arg>) -> Result<bool> {
+        let args = std::iter::once(Arg::from(self.key.redis_key()))
             .chain(values)
             .collect();
-        let reply = self.key.command("PFADD", args, 0).await?;
+        let reply = self.key.command("PFADD", args).await?;
         Ok(number(&reply) == Some(1))
     }
 
@@ -89,20 +89,20 @@ where
 
     /// Estimated number of different values in this log and the logs named in `others` together, without changing any of them (`PFCOUNT`). In Redis Cluster all names must share a hash slot.
     pub async fn count_with(&self, others: &[&str]) -> Result<u64> {
-        let reply = self.key.command("PFCOUNT", self.names(others), 0).await?;
+        let reply = self.key.command("PFCOUNT", self.names(others)).await?;
         Ok(number(&reply).unwrap_or(0) as u64)
     }
 
     /// Merges the logs named in `others` into this one (`PFMERGE`). In Redis Cluster all names must share a hash slot.
     pub async fn merge_from(&self, others: &[&str]) -> Result<()> {
-        self.key.command("PFMERGE", self.names(others), 0).await?;
+        self.key.command("PFMERGE", self.names(others)).await?;
         Ok(())
     }
 
-    fn names(&self, others: &[&str]) -> Vec<Value> {
+    fn names(&self, others: &[&str]) -> Vec<Arg> {
         std::iter::once(self.key.redis_key())
             .chain(others.iter().map(|name| name.to_string()))
-            .map(Value::from)
+            .map(Arg::from)
             .collect()
     }
 }

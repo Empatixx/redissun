@@ -1,15 +1,14 @@
+use crate::error::Error;
 use crate::error::Result;
+use crate::net::node::{Node, NodeSettings, Subscription as Command};
+use crate::net::topology::Topology;
 use bytes::Bytes;
-use fred::clients::Client as RedisClient;
-use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
-use fred::types::config::Server;
-use fred::types::{KeyspaceEvent, Message, MessageKind};
+use redis::{PushInfo, PushKind, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
 const MESSAGE_BUFFER: usize = 256;
@@ -70,11 +69,6 @@ impl<T: Clone> Entry<T> {
     fn sender(&self) -> std::sync::MutexGuard<'_, Option<broadcast::Sender<T>>> {
         self.messages.lock().unwrap_or_else(|e| e.into_inner())
     }
-
-    fn missed(&self, count: usize) {
-        self.notify.notify_waiters();
-        let _ = self.lost.send(count);
-    }
 }
 
 #[derive(Default)]
@@ -117,11 +111,16 @@ impl Delivery for PatternMessage {
 }
 
 pub(crate) struct PubSub {
-    client: RedisClient,
+    topology: Arc<Topology>,
+    push: mpsc::UnboundedSender<PushInfo>,
+    node: Mutex<Arc<Node>>,
     registry: Mutex<Registry>,
     reconnects: broadcast::Sender<()>,
     activations: mpsc::UnboundedSender<Activation>,
 }
+
+/// Any key: the pub/sub connection goes to the master of its slot. Redis Cluster passes a published message to every node, so one node hears every channel.
+const PUBSUB_KEY: &[u8] = b"redissun:pubsub";
 
 pub(crate) struct Subscription<T: Delivery = Bytes> {
     pubsub: Arc<PubSub>,
@@ -153,49 +152,29 @@ impl<T: Delivery> Drop for Subscription<T> {
     }
 }
 
-async fn listen(client: &RedisClient, names: Vec<String>, pattern: bool) -> Result<()> {
-    if pattern {
-        client.psubscribe(names).await?;
-    } else {
-        client.subscribe(names).await?;
-    }
-    Ok(())
-}
-
-async fn unlisten(client: &RedisClient, name: String, pattern: bool) {
-    let _ = if pattern {
-        client.punsubscribe(name).await
-    } else {
-        client.unsubscribe(name).await
-    };
-}
-
 impl PubSub {
-    pub(crate) async fn start(client: RedisClient) -> Result<Arc<Self>> {
-        client.init().await?;
-        let receiver = client.message_rx();
-        let events = client.keyspace_event_rx();
+    /// Opens the pub/sub connection: RESP3, so messages arrive as push frames, to the master that serves `PUBSUB_KEY`.
+    pub(crate) async fn start(topology: Arc<Topology>) -> Result<Arc<Self>> {
+        let (push, pushes) = mpsc::unbounded_channel();
+        let node = open(&topology, &push).await?;
+        node.send(&redis::cmd("PING")).await.map_err(Error::from)?;
         let reconnects = broadcast::channel(16).0;
-        let reconnected = client.reconnect_rx();
         let (activations, requests) = mpsc::unbounded_channel();
         let pubsub = Arc::new(Self {
-            client,
+            topology,
+            push,
+            node: Mutex::new(node),
             registry: Mutex::new(Registry::default()),
             reconnects,
             activations,
         });
-        tokio::spawn(resubscribe(Arc::downgrade(&pubsub), reconnected));
-        tokio::spawn(dispatch(
-            Arc::downgrade(&pubsub),
-            receiver,
-            events,
-            requests,
-        ));
+        tokio::spawn(dispatch(Arc::downgrade(&pubsub), pushes, requests));
         Ok(pubsub)
     }
 
-    pub(crate) fn client(&self) -> &RedisClient {
-        &self.client
+    /// The pub/sub connection, for the `PING` check.
+    pub(crate) async fn node(&self) -> Arc<Node> {
+        self.node.lock().await.clone()
     }
 
     pub(crate) fn reconnects(&self) -> broadcast::Receiver<()> {
@@ -203,7 +182,30 @@ impl PubSub {
     }
 
     pub(crate) async fn quit(&self) {
-        let _ = self.client.quit().await;
+        self.node.lock().await.reset().await;
+    }
+
+    async fn listen(&self, names: Vec<String>, pattern: bool) -> Result<()> {
+        let command = if pattern {
+            Command::Psubscribe
+        } else {
+            Command::Subscribe
+        };
+        let node = self.node().await;
+        node.subscription(command, &names)
+            .await
+            .map_err(Error::from)?;
+        Ok(())
+    }
+
+    async fn unlisten(&self, name: String, pattern: bool) {
+        let command = if pattern {
+            Command::Punsubscribe
+        } else {
+            Command::Unsubscribe
+        };
+        let node = self.node().await;
+        let _ = node.subscription(command, &[name]).await;
     }
 
     pub(crate) async fn subscribe(self: &Arc<Self>, channel: &str) -> Result<Subscription> {
@@ -231,19 +233,42 @@ impl PubSub {
         self: &Arc<Self>,
         name: &str,
     ) -> Result<(Subscription<T>, broadcast::Receiver<T>)> {
+        // Subscribing runs to its end on a task of its own, even when the caller stops waiting (a lock wait that times out), so a channel Redis subscribed always gets its entry. A subscription nobody took comes back here, and dropping it unsubscribes.
+        let (handoff, taken) = oneshot::channel();
+        let this = self.clone();
+        let owned = name.to_string();
+        tokio::spawn(async move {
+            let _ = handoff.send(this.enter::<T>(&owned).await);
+        });
+        let (subscription, receiver) = taken
+            .await
+            .map_err(|_| Error::Redis("the subscription was abandoned".into()))??;
+        self.activate(&subscription.entry.active).await;
+        Ok((subscription, receiver))
+    }
+
+    async fn enter<T: Delivery>(
+        self: &Arc<Self>,
+        name: &str,
+    ) -> Result<(Subscription<T>, broadcast::Receiver<T>)> {
         let (subscription, receiver) = {
             let mut registry = self.registry.lock().await;
-            let entries = T::entries(&mut registry);
-            let entry = match entries.get(name) {
+            let existing = T::entries(&mut registry).get(name).cloned();
+            let entry = match existing {
                 Some(entry) => {
                     entry.holders.fetch_add(1, Ordering::AcqRel);
-                    entry.clone()
+                    entry
                 }
                 None => {
-                    listen(&self.client, vec![name.to_string()], T::PATTERN).await?;
-                    self.client.ping::<()>(None).await?;
+                    self.listen(vec![name.to_string()], T::PATTERN).await?;
+                    // The reply to PING comes after the subscription's confirmation, so the subscription is in place once it arrives.
+                    self.node()
+                        .await
+                        .send(&redis::cmd("PING"))
+                        .await
+                        .map_err(Error::from)?;
                     let entry = Entry::new();
-                    entries.insert(name.to_string(), entry.clone());
+                    T::entries(&mut registry).insert(name.to_string(), entry.clone());
                     entry
                 }
             };
@@ -255,7 +280,6 @@ impl PubSub {
             };
             (subscription, receiver)
         };
-        self.activate(&subscription.entry.active).await;
         Ok((subscription, receiver))
     }
 
@@ -284,7 +308,7 @@ impl PubSub {
         let mut registry = self.registry.lock().await;
         if let Some(entry) = T::entries(&mut registry).remove(name) {
             entry.close();
-            unlisten(&self.client, name.to_string(), T::PATTERN).await;
+            self.unlisten(name.to_string(), T::PATTERN).await;
         }
     }
 
@@ -296,22 +320,30 @@ impl PubSub {
             .is_some_and(|entry| entry.holders.load(Ordering::Acquire) == 0);
         if unused {
             entries.remove(&name);
-            unlisten(&self.client, name, T::PATTERN).await;
+            self.unlisten(name, T::PATTERN).await;
         }
     }
 
+    /// Subscribes every channel and pattern again after the connection was lost, on the node that serves `PUBSUB_KEY` now, which moves after a failover.
     async fn restore(&self) -> Result<()> {
         let registry = self.registry.lock().await;
         let channels: Vec<String> = registry.channels.keys().cloned().collect();
         let patterns: Vec<String> = registry.patterns.keys().cloned().collect();
         let outcome = async {
+            let node = open(&self.topology, &self.push).await?;
+            node.send(&redis::cmd("PING")).await.map_err(Error::from)?;
+            *self.node.lock().await = node;
             if !channels.is_empty() {
-                listen(&self.client, channels, false).await?;
+                self.listen(channels, false).await?;
             }
             if !patterns.is_empty() {
-                listen(&self.client, patterns, true).await?;
+                self.listen(patterns, true).await?;
             }
-            self.client.ping::<()>(None).await?;
+            self.node()
+                .await
+                .send(&redis::cmd("PING"))
+                .await
+                .map_err(Error::from)?;
             Ok(())
         }
         .await;
@@ -320,19 +352,33 @@ impl PubSub {
     }
 }
 
-async fn resubscribe(pubsub: Weak<PubSub>, mut reconnected: broadcast::Receiver<Server>) {
-    while !matches!(reconnected.recv().await, Err(RecvError::Closed)) {
-        loop {
-            let Some(pubsub) = pubsub.upgrade() else {
-                return;
-            };
-            if pubsub.restore().await.is_ok() {
-                let _ = pubsub.reconnects.send(());
-                break;
-            }
-            drop(pubsub);
-            tokio::time::sleep(RESUBSCRIBE_PAUSE).await;
+/// A pub/sub `Node` to the master that serves `PUBSUB_KEY`, with the client's settings, RESP3 and the push sender.
+async fn open(topology: &Topology, push: &mpsc::UnboundedSender<PushInfo>) -> Result<Arc<Node>> {
+    let pool = topology
+        .pool_for(Some(PUBSUB_KEY))
+        .await
+        .map_err(Error::from)?;
+    let mut settings = NodeSettings::clone(topology.settings());
+    settings.resp3 = true;
+    settings.push = Some(push.clone());
+    Ok(Arc::new(Node::new(
+        pool.address().clone(),
+        Arc::new(settings),
+    )))
+}
+
+/// Subscribes everything again until it succeeds, then tells the listeners, which re-check what they wait for.
+async fn resubscribe(pubsub: Weak<PubSub>) {
+    loop {
+        let Some(strong) = pubsub.upgrade() else {
+            return;
+        };
+        if strong.restore().await.is_ok() {
+            let _ = strong.reconnects.send(());
+            return;
         }
+        drop(strong);
+        tokio::time::sleep(RESUBSCRIBE_PAUSE).await;
     }
 }
 
@@ -344,20 +390,17 @@ struct Burst {
 
 async fn dispatch(
     pubsub: Weak<PubSub>,
-    mut receiver: broadcast::Receiver<Message>,
-    mut events: broadcast::Receiver<KeyspaceEvent>,
+    mut pushes: mpsc::UnboundedReceiver<PushInfo>,
     mut activations: mpsc::UnboundedReceiver<Activation>,
 ) {
     let mut burst: Option<Burst> = None;
     loop {
         tokio::select! {
-            message = receiver.recv() => {
-                if !handle(&pubsub, &mut burst, message).await {
+            push = pushes.recv() => {
+                let Some(push) = push else {
                     return;
-                }
-            }
-            event = events.recv() => {
-                if !handle_event(&pubsub, &mut burst, event).await {
+                };
+                if !handle(&pubsub, &mut burst, push).await {
                     return;
                 }
             }
@@ -365,25 +408,9 @@ async fn dispatch(
                 let Some(activation) = activation else {
                     return;
                 };
-                loop {
-                    let message = match receiver.try_recv() {
-                        Ok(message) => Ok(message),
-                        Err(TryRecvError::Lagged(missed)) => Err(RecvError::Lagged(missed)),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Closed) => Err(RecvError::Closed),
-                    };
-                    if !handle(&pubsub, &mut burst, message).await {
-                        return;
-                    }
-                }
-                loop {
-                    let event = match events.try_recv() {
-                        Ok(event) => Ok(event),
-                        Err(TryRecvError::Lagged(missed)) => Err(RecvError::Lagged(missed)),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Closed) => Err(RecvError::Closed),
-                    };
-                    if !handle_event(&pubsub, &mut burst, event).await {
+                // Messages that arrived before the subscriber took its receiver are delivered first.
+                while let Ok(push) = pushes.try_recv() {
+                    if !handle(&pubsub, &mut burst, push).await {
                         return;
                     }
                 }
@@ -394,78 +421,56 @@ async fn dispatch(
     }
 }
 
-async fn handle(
-    pubsub: &Weak<PubSub>,
-    burst: &mut Option<Burst>,
-    message: std::result::Result<Message, RecvError>,
-) -> bool {
-    let Some(pubsub) = pubsub.upgrade() else {
+fn text_of(value: &Value) -> Option<String> {
+    match value {
+        Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        Value::SimpleString(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn bytes_of(value: &Value) -> Option<Bytes> {
+    match value {
+        Value::BulkString(bytes) => Some(Bytes::copy_from_slice(bytes)),
+        Value::SimpleString(text) => Some(Bytes::copy_from_slice(text.as_bytes())),
+        _ => None,
+    }
+}
+
+async fn handle(pubsub: &Weak<PubSub>, burst: &mut Option<Burst>, push: PushInfo) -> bool {
+    let Some(strong) = pubsub.upgrade() else {
         return false;
     };
-    let registry = pubsub.registry.lock().await;
-    match message {
-        Ok(message) => {
-            let Ok(payload) = message.value.convert::<Bytes>() else {
-                return true;
-            };
-            if message.kind == MessageKind::PMessage {
-                let channel = message.channel.to_string();
+    match push.kind {
+        PushKind::Message => {
+            let registry = strong.registry.lock().await;
+            if let (Some(channel), Some(payload)) = (
+                push.data.first().and_then(text_of),
+                push.data.get(1).and_then(bytes_of),
+            ) {
+                if let Some(entry) = registry.channels.get(&channel) {
+                    entry.deliver(payload);
+                }
+            }
+        }
+        PushKind::PMessage => {
+            let registry = strong.registry.lock().await;
+            if let (Some(channel), Some(payload)) = (
+                push.data.get(1).and_then(text_of),
+                push.data.get(2).and_then(bytes_of),
+            ) {
                 if let Some(entry) = next_pattern(&registry, burst, &channel, &payload) {
                     entry.deliver((channel, payload));
                 }
-            } else if let Some(entry) = registry.channels.get(&*message.channel) {
-                entry.deliver(payload);
             }
-            true
         }
-        Err(RecvError::Lagged(missed)) => {
-            lagged(&pubsub, &registry, burst, missed);
-            true
+        PushKind::Disconnection => {
+            *burst = None;
+            tokio::spawn(resubscribe(pubsub.clone()));
         }
-        Err(RecvError::Closed) => false,
+        _ => {}
     }
-}
-
-fn lagged(pubsub: &PubSub, registry: &Registry, burst: &mut Option<Burst>, missed: u64) {
-    let missed = usize::try_from(missed).unwrap_or(usize::MAX);
-    *burst = None;
-    registry
-        .channels
-        .values()
-        .for_each(|entry| entry.missed(missed));
-    registry
-        .patterns
-        .values()
-        .for_each(|entry| entry.missed(missed));
-    let _ = pubsub.reconnects.send(());
-}
-
-async fn handle_event(
-    pubsub: &Weak<PubSub>,
-    burst: &mut Option<Burst>,
-    event: std::result::Result<KeyspaceEvent, RecvError>,
-) -> bool {
-    let Some(pubsub) = pubsub.upgrade() else {
-        return false;
-    };
-    let registry = pubsub.registry.lock().await;
-    match event {
-        Ok(event) => {
-            let channel = format!("__keyevent@{}__:{}", event.db, event.operation);
-            let payload = Bytes::copy_from_slice(event.key.as_bytes());
-            if let Some(entry) = next_pattern(&registry, burst, &channel, &payload) {
-                entry.deliver((channel, payload));
-            } else if let Some(entry) = registry.channels.get(&channel) {
-                entry.deliver(payload);
-            }
-            true
-        }
-        Err(RecvError::Lagged(missed)) => {
-            lagged(&pubsub, &registry, burst, missed);
-            true
-        }
-        Err(RecvError::Closed) => false,
-    }
+    true
 }
 
 fn next_pattern(

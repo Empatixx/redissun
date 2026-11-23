@@ -96,18 +96,18 @@ Every object follows Redisson's logic and is tested with Redisson's own tests, p
 redissun runs the same operations as hand-written code on [redis-rs](https://crates.io/crates/redis) and [fred](https://crates.io/crates/fred), and as [Redisson](https://github.com/redisson/redisson) in Java. Redis runs on the same machine, so the charts show what the client costs, not the network.
 
 <p align="center">
-  <img src="website/public/bench/latency.svg" alt="Latency of one operation: redissun, redis-rs, fred and Redisson are within 3 microseconds for get and set; a redissun lock and batch are slower">
+  <img src="website/public/bench/latency.svg" alt="Latency of one operation: redissun, redis-rs, fred and Redisson are within 3 microseconds for get and set; a redissun lock is slower, its batch is second after redis-rs">
 </p>
 <p align="center">
-  <img src="website/public/bench/throughput.svg" alt="Throughput with 64 tasks: redissun is 4 to 13 percent below redis-rs and close to fred; Redisson reaches about a third">
+  <img src="website/public/bench/throughput.svg" alt="Throughput with 64 tasks: redissun is 6 to 15 percent below redis-rs and as fast as fred; Redisson reaches about a third">
 </p>
 
 - **One call:** a get, a set and a map insert take about 75 µs on every library. That is the Redis round trip on this machine, and the client adds under 3 µs.
-- **64 tasks:** redissun is 4 to 13 % below the hand-written redis-rs and about as fast as fred. Redisson's blocking API with 64 threads reaches about a third.
-- **Lock:** a redissun lock is slower than a bare `SET NX` plus a Lua unlock (177 against 155 µs), because it is reentrant, wakes waiters through pub/sub and renews its lease. Against Redisson it is faster (177 against 206 µs) and handles more than twice as many locks under load.
-- **Batch:** redissun's `Batch` is the slowest of the four for 100 commands (303 µs, fred needs 235 µs and redis-rs 137 µs). redis-rs writes the whole pipeline at once, while fred, which redissun is built on, sends each command on its own; redissun adds a connection taken for the batch and a handle for every reply.
+- **64 tasks:** redissun is 6 to 15 % below the hand-written redis-rs, whose single multiplexed connection is the leanest setup, and as fast as fred. Redisson's blocking API with 64 threads reaches about a third.
+- **Lock:** a redissun lock is slower than a bare `SET NX` plus a Lua unlock (170 against 158 µs), because it is reentrant, wakes waiters through pub/sub and renews its lease. Against Redisson it is faster (170 against 206 µs) and handles more than twice as many locks under load.
+- **Batch:** 100 queued sets take 159 µs, after a hand-written redis-rs pipeline (136 µs) and ahead of Redisson (176 µs) and fred (229 µs). redissun writes each node's commands as one pipeline, like redis-rs, and adds a connection taken for the batch and a handle for every reply.
 
-Median of three runs on an Apple M5 Pro with Redis 8.10 on the same machine, which was not idle. How it was measured, what the hand-written code does, and how to run it yourself: [Benchmarks](https://empatixx.github.io/redissun/docs/guides/benchmarks).
+Median of five runs (three for Redisson) on an Apple M5 Pro with Redis 8.10 on the same machine, which was not idle. How it was measured, what the hand-written code does, and how to run it yourself: [Benchmarks](https://empatixx.github.io/redissun/docs/guides/benchmarks).
 
 ## Documentation
 

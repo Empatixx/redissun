@@ -1,9 +1,8 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::Key;
 use bytes::Bytes;
-use fred::interfaces::{KeysInterface, ListInterface};
-use fred::types::scripts::Script;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -11,20 +10,20 @@ use std::sync::LazyLock;
 
 const PAGE: i64 = 100;
 
-static POP_FRONT_MANY: LazyLock<Script> = LazyLock::new(|| pop_many_script("lpop"));
+static POP_FRONT_MANY: LazyLock<Lua> = LazyLock::new(|| pop_many_script("lpop"));
 
-static POP_BACK_MANY: LazyLock<Script> = LazyLock::new(|| pop_many_script("rpop"));
+static POP_BACK_MANY: LazyLock<Lua> = LazyLock::new(|| pop_many_script("rpop"));
 
-static DRAIN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static DRAIN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local vals = redis.call('lrange', KEYS[1], 0, -1)
         redis.call('del', KEYS[1])
         return vals",
     )
 });
 
-static DRAIN_UP_TO: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static DRAIN_UP_TO: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local elemNum = math.min(ARGV[1], redis.call('llen', KEYS[1])) - 1
         local vals = redis.call('lrange', KEYS[1], 0, elemNum)
         redis.call('ltrim', KEYS[1], elemNum + 1, -1)
@@ -32,8 +31,8 @@ static DRAIN_UP_TO: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-fn pop_many_script(command: &str) -> Script {
-    Script::from_lua(format!(
+fn pop_many_script(command: &str) -> Lua {
+    Lua::from_lua(format!(
         "local result = {{}}
         for i = 1, ARGV[1], 1 do
             local value = redis.call('{command}', KEYS[1])
@@ -86,7 +85,7 @@ where
     };
     let raw: Vec<Bytes> = key
         .core
-        .eval_no_retry(
+        .eval_once(
             script,
             vec![key.redis_key()],
             vec![Bytes::from(limit.to_string())],
@@ -125,7 +124,15 @@ where
     V: DeserializeOwned,
     C: Codec,
 {
-    let raw: Vec<Bytes> = key.core.redis().lrange(key.redis_key(), 0, -1).await?;
+    let raw: Vec<Bytes> = key
+        .query({
+            let mut cmd = redis::cmd("LRANGE");
+            cmd.arg(key.redis_key());
+            cmd.arg(0);
+            cmd.arg(-1);
+            cmd
+        })
+        .await?;
     decode_all(codec, &raw)
 }
 
@@ -134,17 +141,12 @@ where
     Q: Serialize + ?Sized,
     C: Codec,
 {
-    let index: Option<i64> = key
-        .core
-        .redis()
-        .lpos(
-            key.redis_key(),
-            codec.encode(v)?,
-            last.then_some(-1),
-            None,
-            None,
-        )
-        .await?;
+    let mut cmd = key.key_cmd("LPOS");
+    cmd.arg(&codec.encode(v)?[..]);
+    if last {
+        cmd.arg("RANK").arg(-1);
+    }
+    let index: Option<i64> = key.query(cmd).await?;
     Ok(index.map(|index| index as usize))
 }
 
@@ -154,20 +156,35 @@ where
     C: Codec,
 {
     let removed: usize = key
-        .core
-        .redis()
-        .lrem(key.redis_key(), count, codec.encode(v)?)
+        .query({
+            let mut cmd = redis::cmd("LREM");
+            cmd.arg(key.redis_key());
+            cmd.arg(count);
+            cmd.arg(&codec.encode(v)?[..]);
+            cmd
+        })
         .await?;
     Ok(removed)
 }
 
 pub(crate) async fn len(key: &Key) -> Result<usize> {
-    let len: usize = key.core.redis().llen(key.redis_key()).await?;
+    let len: usize = key
+        .query({
+            let mut cmd = redis::cmd("LLEN");
+            cmd.arg(key.redis_key());
+            cmd
+        })
+        .await?;
     Ok(len)
 }
 
 pub(crate) async fn clear(key: &Key) -> Result<()> {
-    key.core.redis().del::<(), _>(key.redis_key()).await?;
+    key.query::<()>({
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(key.redis_key());
+        cmd
+    })
+    .await?;
     Ok(())
 }
 
@@ -202,9 +219,13 @@ where
             (offset, offset + PAGE - 1)
         };
         let raw: Vec<Bytes> = key
-            .core
-            .redis()
-            .lrange(key.redis_key(), start, stop)
+            .query({
+                let mut cmd = redis::cmd("LRANGE");
+                cmd.arg(key.redis_key());
+                cmd.arg(start);
+                cmd.arg(stop);
+                cmd
+            })
             .await?;
         if raw.is_empty() {
             return Ok(None);

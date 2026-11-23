@@ -1,7 +1,7 @@
+use crate::client::request::Request;
 use crate::error::Result;
 use crate::locks::{acquire, token_key, Lock, LockGuard, LockRequest, Mode, Wait};
 use crate::object::{HasKey, Key};
-use fred::interfaces::KeysInterface;
 use std::fmt;
 
 /// A [`Lock`] whose every acquisition gets a higher number, the fencing token, like Redisson's `RFencedLock`.
@@ -57,7 +57,14 @@ impl FencedLock {
 
     /// The token of the latest acquisition, or 0 when the lock was never taken.
     pub async fn current_token(&self) -> Result<u64> {
-        let token: Option<u64> = self.key.core.redis().get(token_key(&self.key)).await?;
+        let token_key = token_key(&self.key);
+        let mut cmd = redis::cmd("GET");
+        cmd.arg(&token_key);
+        let token: Option<u64> = self
+            .key
+            .core
+            .query(Request::new(cmd).key(token_key.as_bytes()))
+            .await?;
         Ok(token.unwrap_or(0))
     }
 

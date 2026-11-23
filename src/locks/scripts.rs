@@ -1,11 +1,11 @@
-use fred::types::scripts::Script;
+use crate::lua::Lua;
 use std::sync::LazyLock;
 
 pub(super) const UNLOCK_MESSAGE: &str = "0";
 pub(super) const READ_UNLOCK_MESSAGE: &str = "1";
 
-pub(super) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if ((redis.call('exists', KEYS[1]) == 0)
                 or (redis.call('hexists', KEYS[1], ARGV[2]) == 1)) then
             redis.call('hincrby', KEYS[1], ARGV[2], 1)
@@ -16,8 +16,8 @@ pub(super) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static FENCED_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static FENCED_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if (redis.call('exists', KEYS[1]) == 0
                 or (redis.call('hexists', KEYS[1], ARGV[2]) == 1)) then
             local token = redis.call('incr', KEYS[2])
@@ -29,8 +29,8 @@ pub(super) static FENCED_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static RELEASE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local val = redis.call('get', KEYS[2])
         if val ~= false then
             return tonumber(val)
@@ -52,8 +52,8 @@ pub(super) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static RENEW: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static RENEW: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then
             redis.call('pexpire', KEYS[1], ARGV[1])
             return 1
@@ -62,8 +62,8 @@ pub(super) static RENEW: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static FORCE_UNLOCK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if (redis.call('del', KEYS[1]) == 1) then
             redis.call('publish', ARGV[1], ARGV[2])
             return 1
@@ -73,8 +73,8 @@ pub(super) static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static READ_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local mode = redis.call('hget', KEYS[1], 'mode')
         if (mode == false) then
             redis.call('hset', KEYS[1], 'mode', 'read')
@@ -97,8 +97,8 @@ pub(super) static READ_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static WRITE_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static WRITE_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local mode = redis.call('hget', KEYS[1], 'mode')
         if (mode == false) then
             redis.call('hset', KEYS[1], 'mode', 'write')
@@ -118,8 +118,8 @@ pub(super) static WRITE_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static READ_RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static READ_RELEASE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local val = redis.call('get', KEYS[5])
         if val ~= false then
             return tonumber(val)
@@ -168,8 +168,8 @@ pub(super) static READ_RELEASE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static WRITE_RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static WRITE_RELEASE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local val = redis.call('get', KEYS[3])
         if val ~= false then
             return tonumber(val)
@@ -207,8 +207,8 @@ pub(super) static WRITE_RELEASE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(super) static READ_RENEW: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(super) static READ_RENEW: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local counter = redis.call('hget', KEYS[1], ARGV[2])
         if (counter ~= false) then
             for c = counter, 1, -1 do
@@ -221,8 +221,8 @@ pub(super) static READ_RENEW: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static READ_FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static READ_FORCE_UNLOCK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if (redis.call('hget', KEYS[1], 'mode') == 'read') then
             redis.call('del', KEYS[1])
             redis.call('publish', KEYS[2], ARGV[1])
@@ -232,8 +232,8 @@ pub(crate) static READ_FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static WRITE_FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static WRITE_FORCE_UNLOCK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if (redis.call('hget', KEYS[1], 'mode') == 'write') then
             redis.call('del', KEYS[1])
             redis.call('publish', KEYS[2], ARGV[1])
@@ -243,8 +243,8 @@ pub(crate) static WRITE_FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static READ_IS_LOCKED: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static READ_IS_LOCKED: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local mode = redis.call('hget', KEYS[1], 'mode')
         if (mode == 'read') or (mode == 'write' and redis.call('hlen', KEYS[1]) > 2) then
             return 1

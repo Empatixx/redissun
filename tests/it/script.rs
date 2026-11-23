@@ -478,3 +478,13 @@ async fn a_function_receives_its_keys_and_arguments() {
         .unwrap();
     assert_eq!(decoded.into_inner(), "argv1");
 }
+
+#[tokio::test]
+async fn a_flushed_script_is_loaded_again() {
+    let map = client().await.hash_map::<String, i64>(unique("flushed"));
+    assert_eq!(map.insert("a", &1).await.unwrap(), None);
+    assert!(crate::common::raw_command(&["SCRIPT", "FLUSH"])
+        .await
+        .starts_with("+OK"));
+    assert_eq!(map.insert("a", &2).await.unwrap(), Some(1));
+}

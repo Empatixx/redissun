@@ -1,9 +1,8 @@
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{millis, Key, Object};
 use crate::pending::Pending;
 use bytes::Bytes;
-use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::scripts::Script;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -47,8 +46,8 @@ else
 end
 ";
 
-static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static TRY_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{SETTINGS}{PERMITS_OF}
         if tonumber(rate) < tonumber(ARGV[1]) then
             return redis.error_reply('Requested permits amount cannot exceed defined rate')
@@ -97,8 +96,8 @@ static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static AVAILABLE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static AVAILABLE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{SETTINGS}{PERMITS_OF}
         local currentValue = redis.call('GET', valueName)
         if currentValue == false then
@@ -120,8 +119,8 @@ static AVAILABLE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static RELEASE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{SETTINGS}
         local toRelease = tonumber(ARGV[1])
         local values = redis.call('ZRANGE', permitsName, 0, -1, 'WITHSCORES')
@@ -156,8 +155,8 @@ static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static TRY_SET_RATE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_SET_RATE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('HSETNX', KEYS[1], 'rate', ARGV[1])
         redis.call('HSETNX', KEYS[1], 'interval', ARGV[2])
         redis.call('HSETNX', KEYS[1], 'keepAliveTime', ARGV[4])
@@ -169,8 +168,8 @@ static TRY_SET_RATE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET_RATE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static SET_RATE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local valueName = KEYS[2]
         local permitsName = KEYS[4]
         if ARGV[3] == '1' then
@@ -186,8 +185,8 @@ static SET_RATE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET_OR_UPDATE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static SET_OR_UPDATE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "if ARGV[7] == '1' and redis.call('EXISTS', KEYS[1]) == 0 then
             return 0
         end
@@ -229,8 +228,8 @@ static SET_OR_UPDATE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-pub(crate) static EXPIRE_ANY: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static EXPIRE_ANY: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         for i = 1, #KEYS do
             if redis.call('PEXPIRE', KEYS[i], ARGV[1]) == 1 then
@@ -241,8 +240,8 @@ pub(crate) static EXPIRE_ANY: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static PERSIST_ANY: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static PERSIST_ANY: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         for i = 1, #KEYS do
             if redis.call('PERSIST', KEYS[i]) == 1 then
@@ -409,7 +408,7 @@ impl RateLimiter {
         let set: i64 = self
             .key
             .core
-            .eval_no_retry(&TRY_SET_RATE, vec![self.key.redis_key()], args.settings()?)
+            .eval_once(&TRY_SET_RATE, vec![self.key.redis_key()], args.settings()?)
             .await?;
         Ok(set == 1)
     }
@@ -454,8 +453,7 @@ impl RateLimiter {
 
     /// The configured settings, or `None` when the limiter is not configured.
     pub async fn config(&self) -> Result<Option<RateLimiterConfig>> {
-        let fields: HashMap<String, String> =
-            self.key.core.redis().hgetall(self.key.redis_key()).await?;
+        let fields: HashMap<String, String> = self.key.query(self.key.key_cmd("HGETALL")).await?;
         if fields.is_empty() {
             return Ok(None);
         }
@@ -559,7 +557,9 @@ impl RateLimiter {
     }
 
     async fn delete_all(&self) -> Result<bool> {
-        let removed: i64 = self.key.core.redis().del(self.keys()).await?;
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(self.keys());
+        let removed: i64 = self.key.query(cmd).await?;
         Ok(removed > 0)
     }
 
