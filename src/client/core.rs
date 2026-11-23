@@ -31,6 +31,8 @@ pub(crate) struct Startup {
 
 pub(crate) struct Core {
     pool: Pool,
+    /// Builds the connections that only redissun uses: a batch's, the pub/sub one and those of blocking calls. They have no `command_queue_limit`, because a batch and a resubscription hand many commands over at once and a limit would fail part of them. They have no `unresponsive_timeout` either, because a blocking read or a `WAIT` for replicas waits for its reply on purpose.
+    own_connections: Builder,
     id: String,
     pub(crate) lock_lease: Duration,
     pub(crate) lock_settings: crate::locks::LockSettings,
@@ -53,6 +55,11 @@ impl Core {
         let pool = builder
             .build_pool(startup.pool_size)
             .map_err(|e| Error::Config(e.to_string()))?;
+        let mut own_connections = builder.clone();
+        own_connections.with_connection_config(|connection| {
+            connection.max_command_buffer_len = 0;
+            connection.unresponsive.max_timeout = None;
+        });
         match tokio::time::timeout(startup.connect_timeout, pool.init()).await {
             Ok(connected) => {
                 connected?;
@@ -67,6 +74,7 @@ impl Core {
         }
         let core = Arc::new(Self {
             pool,
+            own_connections,
             id: Uuid::new_v4().to_string(),
             lock_lease: startup.lock_lease,
             lock_settings: startup.lock_settings,
@@ -131,7 +139,7 @@ impl Core {
     pub(crate) async fn pubsub(&self) -> Result<&Arc<PubSub>> {
         self.pubsub
             .get_or_try_init(|| async {
-                let pubsub = PubSub::start(self.redis()).await?;
+                let pubsub = PubSub::start(self.own_connection()?).await?;
                 if let Err(error) = self.keep_named(pubsub.client()).await {
                     pubsub.quit().await;
                     return Err(error);
@@ -145,12 +153,19 @@ impl Core {
         self.pubsub.get()
     }
 
+    /// A new client, not connected yet, for a connection that only redissun uses. See `own_connections`.
+    pub(crate) fn own_connection(&self) -> Result<RedisClient> {
+        self.own_connections
+            .build()
+            .map_err(|e| Error::Config(e.to_string()))
+    }
+
     pub(crate) fn redis(&self) -> &RedisClient {
         self.pool.next()
     }
 
     pub(crate) async fn blocking_client(&self) -> Result<BlockingClient> {
-        let client = self.redis().clone_new();
+        let client = self.own_connection()?;
         client.update_perf_config(PerformanceConfig {
             default_command_timeout: Duration::ZERO,
             ..client.perf_config()

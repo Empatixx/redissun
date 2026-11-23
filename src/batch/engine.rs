@@ -271,7 +271,7 @@ impl Lease {
             tokio::spawn(async move { client.quit().await });
         }
         // Dropped unfinished, the lease closes the connection.
-        let lease = lease(core.redis().clone_new());
+        let lease = lease(core.own_connection()?);
         let opened = lease.client.init().await;
         opened.map_err(|error| Failure::Failed(error.into()))?;
         core.name(&lease.client).await?;

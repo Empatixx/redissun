@@ -171,8 +171,7 @@ async fn unlisten(client: &RedisClient, name: String, pattern: bool) {
 }
 
 impl PubSub {
-    pub(crate) async fn start(base: &RedisClient) -> Result<Arc<Self>> {
-        let client = base.clone_new();
+    pub(crate) async fn start(client: RedisClient) -> Result<Arc<Self>> {
         client.init().await?;
         let receiver = client.message_rx();
         let events = client.keyspace_event_rx();

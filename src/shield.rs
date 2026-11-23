@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -18,35 +18,38 @@ where
     .await
 }
 
-struct Shielded<F: Future + Send + 'static>
+struct Shielded<T, F>
 where
-    F::Output: Send + 'static,
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
 {
     work: Option<Pin<Box<F>>>,
 }
 
-impl<F> Future for Shielded<F>
+impl<T, F> Future for Shielded<T, F>
 where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
 {
-    type Output = F::Output;
+    type Output = Result<T>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let work = self
-            .work
-            .as_mut()
-            .expect("a shielded future is not polled after it finished");
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T>> {
+        // `shielded` awaits this once, so it is never polled after it finished; an error instead of a panic keeps that a bug report, not a crash.
+        let Some(work) = self.work.as_mut() else {
+            return Poll::Ready(Err(Error::Redis(
+                "a shielded call was polled after it finished".into(),
+            )));
+        };
         let output = std::task::ready!(work.as_mut().poll(cx));
         self.work = None;
         Poll::Ready(output)
     }
 }
 
-impl<F> Drop for Shielded<F>
+impl<T, F> Drop for Shielded<T, F>
 where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
 {
     fn drop(&mut self) {
         if let (Some(work), Ok(runtime)) = (self.work.take(), Handle::try_current()) {

@@ -1,0 +1,4 @@
+# Tests may panic: a panic there is a failed test. The library itself denies these calls in src/lib.rs.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
