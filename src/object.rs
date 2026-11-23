@@ -3,7 +3,6 @@ use crate::client::request::{command, Arg, Request};
 use crate::error::{Error, Result};
 use crate::lua::Lua;
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
@@ -125,8 +124,15 @@ impl Key {
     }
 
     pub(crate) async fn get_i64_or_zero(&self) -> Result<i64> {
-        let value: Option<i64> = self.core.redis().get(self.redis_key()).await?;
+        let value: Option<i64> = self.query(self.key_cmd("GET")).await?;
         Ok(value.unwrap_or(0))
+    }
+
+    /// The command `name` with this object's key as its first argument.
+    pub(crate) fn key_cmd(&self, name: &str) -> redis::Cmd {
+        let mut cmd = redis::cmd(name);
+        cmd.arg(self.redis_key());
+        cmd
     }
 
     pub(crate) fn redis_key(&self) -> String {
@@ -137,7 +143,9 @@ impl Key {
         let keys: Vec<String> = std::iter::once(self.redis_key())
             .chain(companions)
             .collect();
-        let removed: i64 = self.core.redis().del(keys).await?;
+        let mut cmd = redis::cmd("DEL");
+        cmd.arg(keys);
+        let removed: i64 = self.query(cmd).await?;
         Ok(removed > 0)
     }
 
@@ -251,38 +259,31 @@ impl Key {
     }
 
     pub(crate) async fn exists(&self) -> Result<bool> {
-        let mut cmd = redis::cmd("EXISTS");
-        cmd.arg(self.redis_key());
-        let found: i64 = self.query(cmd).await?;
+        let found: i64 = self.query(self.key_cmd("EXISTS")).await?;
         Ok(found > 0)
     }
 
     pub(crate) async fn rename(&self, new_name: &str) -> Result<()> {
-        self.core
-            .redis()
-            .rename::<(), _, _>(self.redis_key(), new_name.to_string())
-            .await?;
+        let mut cmd = self.key_cmd("RENAME");
+        cmd.arg(new_name);
+        let () = self.query(cmd).await?;
         Ok(())
     }
 
     pub(crate) async fn expire(&self, ttl: Duration) -> Result<bool> {
-        let applied: bool = self
-            .core
-            .redis()
-            .pexpire(self.redis_key(), millis(ttl)?, None)
-            .await?;
+        let mut cmd = self.key_cmd("PEXPIRE");
+        cmd.arg(millis(ttl)?);
+        let applied: bool = self.query(cmd).await?;
         Ok(applied)
     }
 
     pub(crate) async fn ttl(&self) -> Result<Option<Duration>> {
-        let mut cmd = redis::cmd("PTTL");
-        cmd.arg(self.redis_key());
-        let millis: i64 = self.query(cmd).await?;
+        let millis: i64 = self.query(self.key_cmd("PTTL")).await?;
         Ok((millis >= 0).then(|| Duration::from_millis(millis as u64)))
     }
 
     pub(crate) async fn persist(&self) -> Result<bool> {
-        let cleared: bool = self.core.redis().persist(self.redis_key()).await?;
+        let cleared: bool = self.query(self.key_cmd("PERSIST")).await?;
         Ok(cleared)
     }
 }

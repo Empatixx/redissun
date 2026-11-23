@@ -5,7 +5,6 @@ use crate::values::atomic_i64::{
     Comparison, COMPARE_AND_DELETE, GET_AND_DELETE, SET_IF_GREATER, SET_IF_LESS,
 };
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
 use std::fmt;
 use std::sync::LazyLock;
 
@@ -58,16 +57,18 @@ impl AtomicF64 {
 
     /// Returns the current value, or 0 when the number does not exist.
     pub async fn get(&self) -> Result<f64> {
-        let value: Option<f64> = self.key.core.redis().get(self.key.redis_key()).await?;
+        let value: Option<f64> = self.key.query(self.key.key_cmd("GET")).await?;
         Ok(value.unwrap_or(0.0))
     }
 
     /// Sets the value.
     pub async fn set(&self, value: f64) -> Result<()> {
         self.key
-            .core
-            .redis()
-            .set::<(), _, _>(self.key.redis_key(), value.to_string(), None, None, false)
+            .query::<()>({
+                let mut cmd = self.key.key_cmd("SET");
+                cmd.arg(value.to_string());
+                cmd
+            })
             .await?;
         Ok(())
     }
@@ -76,9 +77,11 @@ impl AtomicF64 {
     pub async fn get_and_set(&self, value: f64) -> Result<f64> {
         let previous: Option<f64> = self
             .key
-            .core
-            .redis()
-            .getset(self.key.redis_key(), value.to_string())
+            .query({
+                let mut cmd = self.key.key_cmd("GETSET");
+                cmd.arg(value.to_string());
+                cmd
+            })
             .await?;
         Ok(previous.unwrap_or(0.0))
     }
@@ -124,9 +127,11 @@ impl AtomicF64 {
     pub async fn add_and_get(&self, delta: f64) -> Result<f64> {
         let value: f64 = self
             .key
-            .core
-            .redis()
-            .incr_by_float(self.key.redis_key(), delta)
+            .query({
+                let mut cmd = self.key.key_cmd("INCRBYFLOAT");
+                cmd.arg(delta.to_string());
+                cmd
+            })
             .await?;
         Ok(value)
     }

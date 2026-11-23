@@ -4,7 +4,6 @@ use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::reply::{array, int, malformed, number};
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
 use std::fmt;
 use std::ops::Range;
 use std::sync::LazyLock;
@@ -219,7 +218,7 @@ impl BitSet {
 
     /// Returns the raw bytes of the string, empty when the key is missing, like Redisson's `toByteArray`.
     pub async fn to_bytes(&self) -> Result<Vec<u8>> {
-        let raw: Option<Bytes> = self.key.core.redis().get(self.key.redis_key()).await?;
+        let raw: Option<Bytes> = self.key.query(self.key.key_cmd("GET")).await?;
         Ok(raw.map(|raw| raw.to_vec()).unwrap_or_default())
     }
 
@@ -244,9 +243,11 @@ impl BitSet {
             return self.clear().await;
         }
         self.key
-            .core
-            .redis()
-            .set::<(), _, _>(self.key.redis_key(), Bytes::from(raw), None, None, false)
+            .query::<()>({
+                let mut cmd = self.key.key_cmd("SET");
+                cmd.arg(raw);
+                cmd
+            })
             .await?;
         Ok(())
     }

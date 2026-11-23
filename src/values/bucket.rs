@@ -4,8 +4,6 @@ use crate::error::Result;
 use crate::lua::Lua;
 use crate::object::{millis, HasKey, Key};
 use bytes::Bytes;
-use fred::interfaces::KeysInterface;
-use fred::types::{Expiration, SetOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -98,17 +96,21 @@ where
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
-    async fn set_with(
-        &self,
-        bytes: Bytes,
-        expire: Option<Expiration>,
-        options: Option<SetOptions>,
-    ) -> Result<bool> {
+    /// `SET key bytes` followed by `options` such as `PX <ms>`, `KEEPTTL`, `NX` or `XX`.
+    fn set_command(&self, bytes: &[u8], options: Vec<Arg>) -> redis::Cmd {
+        let mut cmd = redis::cmd("SET");
+        cmd.arg(self.key.redis_key()).arg(bytes);
+        for option in options {
+            cmd.arg(option);
+        }
+        cmd
+    }
+
+    /// A conditional `SET`, sent once as Redisson does; returns whether the value was stored.
+    async fn set_with(&self, bytes: Bytes, options: Vec<Arg>) -> Result<bool> {
         let stored: Option<String> = self
             .key
-            .core
-            .redis_no_retry()
-            .set(self.key.redis_key(), bytes, expire, options, false)
+            .query_once(self.set_command(&bytes, options))
             .await?;
         Ok(stored.is_some())
     }
@@ -128,17 +130,15 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        self.key
-            .core
-            .redis()
-            .set::<(), _, _>(self.key.redis_key(), bytes, None, None, false)
-            .await?;
+        let () = self.key.query(self.set_command(&bytes, Vec::new())).await?;
         Ok(())
     }
 
     /// Returns the value, or `None` when the key is missing.
     pub async fn get(&self) -> Result<Option<V>> {
-        let raw: Option<Bytes> = self.key.core.redis().get(self.key.redis_key()).await?;
+        let mut cmd = redis::cmd("GET");
+        cmd.arg(self.key.redis_key());
+        let raw: Option<Bytes> = self.key.query(cmd).await?;
         self.decode(raw)
     }
 
@@ -149,17 +149,8 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        self.key
-            .core
-            .redis()
-            .set::<(), _, _>(
-                self.key.redis_key(),
-                bytes,
-                Some(Expiration::PX(millis(ttl)?)),
-                None,
-                false,
-            )
-            .await?;
+        let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?)];
+        let () = self.key.query(self.set_command(&bytes, options)).await?;
         Ok(())
     }
 
@@ -170,17 +161,8 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        self.key
-            .core
-            .redis()
-            .set::<(), _, _>(
-                self.key.redis_key(),
-                bytes,
-                Some(Expiration::KEEPTTL),
-                None,
-                false,
-            )
-            .await?;
+        let options = vec![Arg::from("KEEPTTL")];
+        let () = self.key.query(self.set_command(&bytes, options)).await?;
         Ok(())
     }
 
@@ -204,12 +186,8 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        self.set_with(
-            bytes,
-            Some(Expiration::PX(millis(ttl)?)),
-            Some(SetOptions::NX),
-        )
-        .await
+        let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?), Arg::from("NX")];
+        self.set_with(bytes, options).await
     }
 
     /// Replaces the value only when the key exists; returns whether it was stored. Like Redisson `setIfExists`.
@@ -219,7 +197,7 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        self.set_with(bytes, None, Some(SetOptions::XX)).await
+        self.set_with(bytes, vec![Arg::from("XX")]).await
     }
 
     /// Replaces the value and sets a time to live only when the key exists; returns whether it was stored.
@@ -229,12 +207,8 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        self.set_with(
-            bytes,
-            Some(Expiration::PX(millis(ttl)?)),
-            Some(SetOptions::XX),
-        )
-        .await
+        let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?), Arg::from("XX")];
+        self.set_with(bytes, options).await
     }
 
     /// Stores the value and returns the previous one (`GETSET`). The time to live is cleared.
@@ -244,12 +218,9 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        let previous: Option<Bytes> = self
-            .key
-            .core
-            .redis()
-            .getset(self.key.redis_key(), bytes)
-            .await?;
+        let mut cmd = redis::cmd("GETSET");
+        cmd.arg(self.key.redis_key()).arg(&bytes[..]);
+        let previous: Option<Bytes> = self.key.query(cmd).await?;
         self.decode(previous)
     }
 
@@ -297,7 +268,9 @@ where
 
     /// Length of the encoded value in bytes (`STRLEN`); 0 when the key is missing.
     pub async fn size(&self) -> Result<usize> {
-        let size: usize = self.key.core.redis().strlen(self.key.redis_key()).await?;
+        let mut cmd = redis::cmd("STRLEN");
+        cmd.arg(self.key.redis_key());
+        let size: usize = self.key.query(cmd).await?;
         Ok(size)
     }
 
