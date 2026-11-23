@@ -192,7 +192,7 @@ async fn eventually_subscribers(topic: &redissun::Topic<i64, redissun::JsonCodec
 }
 
 #[tokio::test]
-async fn count_subscribers() {
+async fn subscriber_count_follows_subscribe_and_drop() {
     let topic = client().await.topic::<i64>(unique("topic"));
     assert_eq!(topic.subscriber_count().await.unwrap(), 0);
     let subscriber = topic.subscribe().await.unwrap();
@@ -202,7 +202,7 @@ async fn count_subscribers() {
 }
 
 #[tokio::test]
-async fn count_listeners() {
+async fn listener_count_is_kept_per_topic_handle() {
     let client = client().await;
     let first = client.topic::<i64>(unique("topic"));
     assert_eq!(first.listener_count().await, 0);
@@ -221,7 +221,7 @@ async fn count_listeners() {
 }
 
 #[tokio::test]
-async fn ping() {
+async fn three_hundred_spaced_messages_all_reach_the_subscriber() {
     let topic = client().await.topic::<String>(unique("topic"));
     let mut subscriber = topic.subscribe().await.unwrap();
     let count = 300;
@@ -241,7 +241,7 @@ async fn ping() {
 }
 
 #[tokio::test]
-async fn concurrent_topic() {
+async fn concurrent_subscribe_publish_and_drop_on_many_channels_finish() {
     let client = client().await;
     let prefix = unique("PUBSUB");
     let mut workers = Vec::new();
@@ -266,7 +266,7 @@ async fn concurrent_topic() {
 }
 
 #[tokio::test]
-async fn commands_ordering() {
+async fn a_message_published_after_subscribe_is_received() {
     let topic = client().await.topic::<i64>(unique("topic"));
     let mut subscriber = topic.subscribe().await.unwrap();
     topic.publish(&123).await.unwrap();
@@ -279,7 +279,7 @@ async fn commands_ordering() {
 }
 
 #[tokio::test]
-async fn topic_state() {
+async fn plain_and_pattern_subscribers_both_receive_on_every_resubscribe() {
     let client = client().await;
     let name = unique("test1");
     let topic = client.topic::<String>(name.clone());
@@ -321,7 +321,7 @@ async fn multi_type_connection() {
 }
 
 #[tokio::test]
-async fn sync_commands() {
+async fn commands_run_from_a_subscriber_task_do_not_block() {
     let client = client().await;
     let topic = client.topic::<String>(unique("system_bus"));
     let set = client.hash_set::<String>(unique("set1"));
@@ -358,7 +358,7 @@ async fn lambda_optimization_by_jvm() {
 }
 
 #[tokio::test]
-async fn inner_publish() {
+async fn publishing_from_a_subscriber_task_reaches_the_other_topic() {
     let first_client = client().await;
     let second_client = client().await;
     let topic1 = first_client.topic::<Message>(unique("topic1"));
@@ -393,7 +393,7 @@ async fn inner_publish() {
 }
 
 #[tokio::test]
-async fn unsubscribe() {
+async fn dropping_one_subscriber_keeps_the_other_receiving() {
     let client = client().await;
     let name = unique("topic1");
     let topic = client.topic::<Message>(name.clone());
@@ -430,7 +430,7 @@ async fn remove_all_listeners() {
 }
 
 #[tokio::test]
-async fn subscribe_limit() {
+async fn dropped_subscribers_of_a_thousand_channels_release_them_all() {
     let client = client().await;
     let prefix = unique("limit");
     let mut subscribers = std::collections::VecDeque::new();
@@ -484,7 +484,7 @@ async fn remove_by_instance() {
 }
 
 #[tokio::test]
-async fn lazy_unsubscribe() {
+async fn a_new_subscriber_after_a_drop_gets_each_message_once() {
     let name = unique("topic");
     let first = client().await.topic::<Message>(name.clone());
     let removed = first.subscribe().await.unwrap();
@@ -501,7 +501,7 @@ async fn lazy_unsubscribe() {
 }
 
 #[tokio::test]
-async fn test() {
+async fn subscribers_on_two_clients_both_get_the_message() {
     let name = unique("topic");
     let topic1 = client().await.topic::<Message>(name.clone());
     let mut first = topic1.subscribe().await.unwrap();
@@ -514,7 +514,7 @@ async fn test() {
 }
 
 #[tokio::test]
-async fn heavy_load() {
+async fn ten_thousand_messages_reach_two_subscribers_exactly_once() {
     let name = unique("topic");
     let topic1 = client().await.topic::<Message>(name.clone());
     let mut first = topic1.subscribe().await.unwrap();
@@ -551,7 +551,7 @@ async fn heavy_load() {
 }
 
 #[tokio::test]
-async fn listener_remove() {
+async fn publishing_after_the_only_subscriber_left_reaches_no_one() {
     let name = unique("topic");
     let topic1 = client().await.topic::<Message>(name.clone());
     let listener = topic1.subscribe().await.unwrap();

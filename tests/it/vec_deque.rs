@@ -77,7 +77,7 @@ async fn vec_and_vec_deque_share_one_list() {
 }
 
 #[tokio::test]
-async fn object_methods() {
+async fn expire_persist_and_rename_work_on_a_deque() {
     let client = client().await;
     let deque = client.vec_deque::<String>(unique("deque"));
     deque.push_back("a").await.unwrap();
@@ -135,8 +135,9 @@ async fn all(deque: &redissun::VecDeque<i32, redissun::JsonCodec>) -> Vec<i32> {
     deque.read_all().await.unwrap()
 }
 
+// Redisson: testAddIfExists
 #[tokio::test]
-async fn test_add_if_exists() {
+async fn extend_if_exists_only_adds_to_an_existing_deque() {
     let deque = deque().await;
     assert_eq!(deque.extend_front_if_exists(&[4, 5]).await.unwrap(), 0);
     assert!(!deque.exists().await.unwrap());
@@ -147,8 +148,9 @@ async fn test_add_if_exists() {
     assert_eq!(all(&deque).await, [5, 4, 1, 2, 3, 6]);
 }
 
+// Redisson: testMove
 #[tokio::test]
-async fn test_move() {
+async fn pop_push_moves_an_element_between_two_deques() {
     let deque1 = deque().await;
     let deque2 = deque().await;
     deque1.extend_back(&[1, 2, 3]).await.unwrap();
@@ -161,8 +163,9 @@ async fn test_move() {
     assert_eq!(all(&deque2).await, [4, 5, 6]);
 }
 
+// Redisson: testRemoveLastOccurrence
 #[tokio::test]
-async fn test_remove_last_occurrence() {
+async fn remove_last_occurrence_removes_the_value_nearest_the_back() {
     let deque = deque().await;
     for value in [3, 1, 2, 3] {
         deque.push_front(&value).await.unwrap();
@@ -172,8 +175,9 @@ async fn test_remove_last_occurrence() {
     assert!(!deque.remove_last_occurrence(&9).await.unwrap());
 }
 
+// Redisson: testRemoveFirstOccurrence
 #[tokio::test]
-async fn test_remove_first_occurrence() {
+async fn remove_first_occurrence_removes_the_value_nearest_the_front() {
     let deque = deque().await;
     for value in [3, 1, 2, 3] {
         deque.push_front(&value).await.unwrap();
@@ -182,8 +186,9 @@ async fn test_remove_first_occurrence() {
     assert_eq!(all(&deque).await, [2, 1, 3]);
 }
 
+// Redisson: testRemoveLast
 #[tokio::test]
-async fn test_remove_last() {
+async fn pop_back_returns_the_values_from_the_back() {
     let deque = deque().await;
     for value in [1, 2, 3] {
         deque.push_front(&value).await.unwrap();
@@ -193,8 +198,9 @@ async fn test_remove_last() {
     assert_eq!(deque.pop_back().await.unwrap(), Some(3));
 }
 
+// Redisson: testRemoveFirst
 #[tokio::test]
-async fn test_remove_first() {
+async fn pop_front_returns_the_values_from_the_front() {
     let deque = deque().await;
     for value in [1, 2, 3] {
         deque.push_front(&value).await.unwrap();
@@ -204,8 +210,9 @@ async fn test_remove_first() {
     assert_eq!(deque.pop_front().await.unwrap(), Some(1));
 }
 
+// Redisson: testPeek
 #[tokio::test]
-async fn test_peek() {
+async fn front_and_back_are_none_on_an_empty_deque() {
     let deque = deque().await;
     assert_eq!(deque.front().await.unwrap(), None);
     assert_eq!(deque.back().await.unwrap(), None);
@@ -214,8 +221,9 @@ async fn test_peek() {
     assert_eq!(deque.back().await.unwrap(), Some(2));
 }
 
+// Redisson: testPollLastAndOfferFirstTo
 #[tokio::test]
-async fn test_poll_last_and_offer_first_to() {
+async fn pop_back_push_front_moves_the_last_value_over() {
     let deque1 = deque().await;
     for value in [3, 2, 1] {
         deque1.push_front(&value).await.unwrap();
@@ -228,8 +236,9 @@ async fn test_poll_last_and_offer_first_to() {
     assert_eq!(all(&deque2).await, [3, 4, 5, 6]);
 }
 
+// Redisson: testAddFirstLastMulti
 #[tokio::test]
-async fn test_add_first_last_multi() {
+async fn extend_front_and_extend_back_add_several_values_at_once() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3, 4]).await.unwrap();
     assert_eq!(deque.extend_front(&[0, 1, 0]).await.unwrap(), 7);
@@ -240,8 +249,9 @@ async fn test_add_first_last_multi() {
     assert_eq!(all(&deque).await, [3, 2, 1]);
 }
 
+// Redisson: testAddFirst
 #[tokio::test]
-async fn test_add_first() {
+async fn push_front_puts_each_value_before_the_previous_ones() {
     let deque = deque().await;
     for value in [1, 2, 3] {
         deque.push_front(&value).await.unwrap();
@@ -249,8 +259,9 @@ async fn test_add_first() {
     assert_eq!(all(&deque).await, [3, 2, 1]);
 }
 
+// Redisson: testAddLast
 #[tokio::test]
-async fn test_add_last() {
+async fn push_back_keeps_the_insertion_order() {
     let deque = deque().await;
     for value in [1, 2, 3] {
         deque.push_back(&value).await.unwrap();
@@ -258,8 +269,9 @@ async fn test_add_last() {
     assert_eq!(all(&deque).await, [1, 2, 3]);
 }
 
+// Redisson: testDescendingIterator
 #[tokio::test]
-async fn test_descending_iterator() {
+async fn iter_rev_yields_the_values_back_to_front() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3]).await.unwrap();
     let read: Vec<i32> = deque.iter_rev().try_collect().await.unwrap();
@@ -275,8 +287,9 @@ async fn iter_rev_reads_more_than_one_page() {
     assert_eq!(read, values.into_iter().rev().collect::<Vec<_>>());
 }
 
+// Redisson: testPollLimited
 #[tokio::test]
-async fn test_poll_limited() {
+async fn pop_front_many_returns_at_most_the_asked_count() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3, 4, 5, 6, 7]).await.unwrap();
     assert_eq!(deque.pop_front_many(3).await.unwrap(), [1, 2, 3]);
@@ -293,8 +306,9 @@ async fn poll_last_limited() {
     assert_eq!(deque.pop_back_many(3).await.unwrap(), [1]);
 }
 
+// Redisson: testAddOffer
 #[tokio::test]
-async fn test_add_offer() {
+async fn pop_front_after_push_back_returns_the_oldest_value() {
     let deque = deque().await;
     for value in [1, 2, 3, 4] {
         deque.push_back(&value).await.unwrap();
@@ -305,8 +319,9 @@ async fn test_add_offer() {
     assert_eq!(deque.front().await.unwrap(), Some(2));
 }
 
+// Redisson: testRemoveWithCodec
 #[tokio::test]
-async fn test_remove_with_codec() {
+async fn contains_finds_a_tuple_value_read_by_front() {
     let deque = client()
         .await
         .vec_deque::<(String, String, i64)>(unique("deque"));
@@ -318,8 +333,9 @@ async fn test_remove_with_codec() {
     assert!(deque.contains(&peeked).await.unwrap());
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn pop_front_until_the_deque_is_empty() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3, 4]).await.unwrap();
     deque.pop_front().await.unwrap();
@@ -330,22 +346,25 @@ async fn test_remove() {
     assert!(deque.is_empty().await.unwrap());
 }
 
+// Redisson: testRemoveEmpty
 #[tokio::test]
-async fn test_remove_empty() {
+async fn pop_front_on_an_empty_deque_is_none() {
     let deque = deque().await;
     assert_eq!(deque.pop_front().await.unwrap(), None);
 }
 
+// Redisson: testIndexOf
 #[tokio::test]
-async fn test_index_of() {
+async fn position_returns_the_index_or_none() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3, 4]).await.unwrap();
     assert_eq!(deque.position(&4).await.unwrap(), Some(3));
     assert_eq!(deque.position(&9).await.unwrap(), None);
 }
 
+// Redisson: testDrainToSingle
 #[tokio::test]
-async fn test_drain_to_single() {
+async fn drain_takes_a_single_value_and_empties_the_deque() {
     let deque = deque().await;
     deque.push_back(&1).await.unwrap();
     assert_eq!(deque.len().await.unwrap(), 1);
@@ -353,8 +372,9 @@ async fn test_drain_to_single() {
     assert!(deque.is_empty().await.unwrap());
 }
 
+// Redisson: testDrainTo
 #[tokio::test]
-async fn test_drain_to() {
+async fn drain_up_to_takes_the_values_in_order_in_chunks() {
     let deque = deque().await;
     let values: Vec<i32> = (0..100).collect();
     deque.extend_back(values.iter()).await.unwrap();
@@ -370,8 +390,9 @@ async fn test_drain_to() {
     assert!(deque.drain_up_to(0).await.unwrap().is_empty());
 }
 
+// Redisson: testDrainToCollection
 #[tokio::test]
-async fn test_drain_to_collection() {
+async fn drain_returns_mixed_json_values_in_order() {
     let deque = client()
         .await
         .vec_deque::<serde_json::Value>(unique("deque"));
@@ -385,8 +406,9 @@ async fn test_drain_to_collection() {
     assert_eq!(deque.len().await.unwrap(), 0);
 }
 
+// Redisson: testDrainToCollectionLimited
 #[tokio::test]
-async fn test_drain_to_collection_limited() {
+async fn drain_up_to_stops_at_the_limit() {
     let deque = client()
         .await
         .vec_deque::<serde_json::Value>(unique("deque"));

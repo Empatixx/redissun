@@ -222,8 +222,9 @@ async fn due_times_come_from_the_client_clock() {
     );
 }
 
+// Redisson: testDestroy
 #[tokio::test]
-async fn test_destroy() {
+async fn dropping_every_handle_stops_the_delivery_of_pending_values() {
     let client = client().await;
     let (destination, delayed) = numbers(&client, &unique("test"));
     delayed.push(&1, Duration::from_secs(2)).await.unwrap();
@@ -239,8 +240,9 @@ async fn test_destroy() {
     assert_eq!(value, None);
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn a_removed_value_is_never_delivered_but_the_others_are() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("delay_queue"));
     delayed
@@ -258,8 +260,9 @@ async fn test_remove() {
     assert_eq!(contents(&destination).await, ["1_1_2"]);
 }
 
+// Redisson: testRemoveAll
 #[tokio::test]
-async fn test_remove_all() {
+async fn remove_all_drops_every_listed_value_before_delivery() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("delay_queue"));
     delayed
@@ -294,8 +297,9 @@ async fn three_two_one(delayed: &DelayedQueue<i32, JsonCodec>) {
     delayed.push(&2, Duration::from_secs(1)).await.unwrap();
 }
 
+// Redisson: testDealyedQueueRetainAll
 #[tokio::test]
-async fn test_dealyed_queue_retain_all() {
+async fn retain_all_keeps_only_the_listed_values_and_delivers_them() {
     let client = client().await;
     let (destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
@@ -310,16 +314,18 @@ async fn test_dealyed_queue_retain_all() {
     assert_eq!(delivered, [1, 2]);
 }
 
+// Redisson: testDealyedQueueReadAll
 #[tokio::test]
-async fn test_dealyed_queue_read_all() {
+async fn values_lists_the_pending_values_in_insertion_order() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
     assert_eq!(delayed.values().await.unwrap(), [3, 1, 2]);
 }
 
+// Redisson: testDealyedQueueRemoveAll
 #[tokio::test]
-async fn test_dealyed_queue_remove_all() {
+async fn remove_all_reports_true_when_any_listed_value_was_removed() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
@@ -329,8 +335,9 @@ async fn test_dealyed_queue_remove_all() {
     assert!(delayed.is_empty().await.unwrap());
 }
 
+// Redisson: testDealyedQueueContainsAll
 #[tokio::test]
-async fn test_dealyed_queue_contains_all() {
+async fn contains_all_is_true_when_every_value_is_pending() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
@@ -340,8 +347,9 @@ async fn test_dealyed_queue_contains_all() {
     assert!(delayed.contains_all(&[&1, &2, &1]).await.unwrap());
 }
 
+// Redisson: testDealyedQueueContains
 #[tokio::test]
-async fn test_dealyed_queue_contains() {
+async fn contains_finds_only_pending_values() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
@@ -349,8 +357,9 @@ async fn test_dealyed_queue_contains() {
     assert!(!delayed.contains(&4).await.unwrap());
 }
 
+// Redisson: testDealyedQueueRemove
 #[tokio::test]
-async fn test_dealyed_queue_remove() {
+async fn remove_reports_whether_the_value_was_pending() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
@@ -359,16 +368,18 @@ async fn test_dealyed_queue_remove() {
     assert_eq!(delayed.values().await.unwrap(), [1, 2]);
 }
 
+// Redisson: testDealyedQueuePeek
 #[tokio::test]
-async fn test_dealyed_queue_peek() {
+async fn peek_returns_the_first_inserted_value() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
     assert_eq!(delayed.peek().await.unwrap(), Some(3));
 }
 
+// Redisson: testDealyedQueuePollLastAndOfferFirstTo
 #[tokio::test]
-async fn test_dealyed_queue_poll_last_and_offer_first_to() {
+async fn poll_last_and_offer_first_to_moves_the_newest_value() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     delayed.push(&3, Duration::from_secs(5)).await.unwrap();
@@ -385,8 +396,9 @@ async fn test_dealyed_queue_poll_last_and_offer_first_to() {
     assert_eq!(contents(&other).await, [1, 6, 5, 4]);
 }
 
+// Redisson: testDelayedQueueOrder
 #[tokio::test]
-async fn test_delayed_queue_order() {
+async fn poll_returns_the_values_in_insertion_order_not_due_order() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("4", 4), ("3", 3), ("2", 2)] {
@@ -403,8 +415,9 @@ async fn test_delayed_queue_order() {
     assert_eq!(destination.pop_front().await.unwrap(), None);
 }
 
+// Redisson: testPollLimited
 #[tokio::test]
-async fn test_poll_limited() {
+async fn poll_many_takes_pending_values_so_none_are_delivered() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("2", 2), ("3", 3), ("4", 4)] {
@@ -421,8 +434,9 @@ async fn test_poll_limited() {
     assert_eq!(destination.pop_front().await.unwrap(), None);
 }
 
+// Redisson: testPoll
 #[tokio::test]
-async fn test_poll() {
+async fn polled_values_are_never_delivered() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("2", 2), ("3", 3), ("4", 4)] {
@@ -439,8 +453,9 @@ async fn test_poll() {
     assert_eq!(destination.pop_front().await.unwrap(), None);
 }
 
+// Redisson: testDealyedQueue
 #[tokio::test]
-async fn test_dealyed_queue() {
+async fn each_value_is_delivered_at_its_own_due_time() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("2", 5), ("4", 4), ("2", 2), ("3", 3)] {

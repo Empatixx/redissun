@@ -194,8 +194,9 @@ async fn a_zero_count_creates_an_open_latch() {
     assert!(!latch.exists().await.unwrap());
 }
 
+// Redisson: testAwaitTimeout
 #[tokio::test]
-async fn test_await_timeout() {
+async fn wait_with_a_timeout_returns_when_the_latch_opens() {
     let client = client().await;
     let name = unique("latch1");
     let latch = client.count_down_latch(name.clone());
@@ -215,8 +216,9 @@ async fn test_await_timeout() {
     counter.await.unwrap();
 }
 
+// Redisson: testAwaitTimeoutFail
 #[tokio::test]
-async fn test_await_timeout_fail() {
+async fn wait_with_a_timeout_gives_up_before_the_count_down() {
     let client = client().await;
     let name = unique("latch1");
     let latch = client.count_down_latch(name.clone());
@@ -236,8 +238,9 @@ async fn test_await_timeout_fail() {
     counter.await.unwrap();
 }
 
+// Redisson: testMultiAwait
 #[tokio::test]
-async fn test_multi_await() {
+async fn every_waiter_wakes_once_the_count_reaches_zero() {
     let client = client().await;
     let name = unique("latch");
     let latch = client.count_down_latch(name.clone());
@@ -280,8 +283,9 @@ async fn test_multi_await() {
     assert_eq!(counter.load(Ordering::SeqCst), 5);
 }
 
+// Redisson: testCountDown
 #[tokio::test]
-async fn test_count_down() {
+async fn count_down_stops_at_zero_and_wait_returns_at_once() {
     let client = client().await;
     let latch = client.count_down_latch(unique("latch"));
     latch.try_set_count(2).await.unwrap();
@@ -323,34 +327,39 @@ async fn test_count_down() {
     latch4.wait().await.unwrap();
 }
 
+// Redisson: testDelete
 #[tokio::test]
-async fn test_delete() {
+async fn del_removes_a_set_latch() {
     let latch = client().await.count_down_latch(unique("latch"));
     latch.try_set_count(1).await.unwrap();
     assert!(latch.del().await.unwrap());
 }
 
+// Redisson: testDeleteFailed
 #[tokio::test]
-async fn test_delete_failed() {
+async fn del_of_a_missing_latch_returns_false() {
     let latch = client().await.count_down_latch(unique("latch"));
     assert!(!latch.del().await.unwrap());
 }
 
+// Redisson: testTrySetCount
 #[tokio::test]
-async fn test_try_set_count() {
+async fn try_set_count_fails_while_the_latch_is_set() {
     let latch = client().await.count_down_latch(unique("latch"));
     assert!(latch.try_set_count(1).await.unwrap());
     assert!(!latch.try_set_count(2).await.unwrap());
 }
 
+// Redisson: testCount
 #[tokio::test]
-async fn test_count() {
+async fn count_of_a_missing_latch_is_zero() {
     let latch = client().await.count_down_latch(unique("latch"));
     assert_eq!(latch.count().await.unwrap(), 0);
 }
 
+// Redisson: testSingleCountDownAwaitSingleInstance
 #[tokio::test]
-async fn test_single_count_down_await_single_instance() {
+async fn concurrent_count_downs_release_every_waiter_on_one_client() {
     let iterations = 12;
     let client = client().await;
     let name = unique("latch");

@@ -119,8 +119,9 @@ async fn debug_shows_the_name() {
     assert!(format!("{counter:?}").contains(&name));
 }
 
+// Redisson: testCompareAndDelete
 #[tokio::test]
-async fn test_compare_and_delete() {
+async fn compare_and_delete_removes_the_key_when_the_comparison_holds() {
     let al = client().await.atomic_i64(unique("test"));
     al.set(10).await.unwrap();
     assert!(!al.compare_and_delete(Comparison::Less, 5).await.unwrap());
@@ -179,8 +180,9 @@ async fn test_compare_and_delete() {
     assert!(!al.compare_and_delete(Comparison::Less, 0).await.unwrap());
 }
 
+// Redisson: testSetIfLess
 #[tokio::test]
-async fn test_set_if_less() {
+async fn set_if_less_replaces_only_a_greater_value() {
     let al = client().await.atomic_i64(unique("test"));
     assert!(!al.set_if_less(0, 1).await.unwrap());
     assert_eq!(al.get().await.unwrap(), 0);
@@ -190,8 +192,9 @@ async fn test_set_if_less() {
     assert_eq!(al.get().await.unwrap(), 1);
 }
 
+// Redisson: testSetIfGreater
 #[tokio::test]
-async fn test_set_if_greater() {
+async fn set_if_greater_replaces_only_a_smaller_value() {
     let al = client().await.atomic_i64(unique("test"));
     assert!(!al.set_if_less(0, 1).await.unwrap());
     assert_eq!(al.get().await.unwrap(), 0);
@@ -201,20 +204,23 @@ async fn test_set_if_greater() {
     assert_eq!(al.get().await.unwrap(), 1);
 }
 
+// Redisson: testGetAndSet
 #[tokio::test]
-async fn test_get_and_set() {
+async fn get_and_set_on_a_missing_counter_returns_zero() {
     let al = client().await.atomic_i64(unique("test"));
     assert_eq!(al.get_and_set(12).await.unwrap(), 0);
 }
 
+// Redisson: testGetZero
 #[tokio::test]
-async fn test_get_zero() {
+async fn get_on_a_missing_counter_returns_zero() {
     let al = client().await.atomic_i64(unique("test"));
     assert_eq!(al.get().await.unwrap(), 0);
 }
 
+// Redisson: testGetAndDelete
 #[tokio::test]
-async fn test_get_and_delete() {
+async fn get_and_delete_returns_the_value_or_zero_when_missing() {
     let client = client().await;
     let al = client.atomic_i64(unique("test"));
     al.set(10).await.unwrap();
@@ -225,8 +231,9 @@ async fn test_get_and_delete() {
     assert_eq!(al2.get_and_delete().await.unwrap(), 0);
 }
 
+// Redisson: testCompareAndSetZero
 #[tokio::test]
-async fn test_compare_and_set_zero() {
+async fn compare_and_set_from_zero_works_on_a_missing_key() {
     let client = client().await;
     let al = client.atomic_i64(unique("test"));
     assert!(al.compare_and_set(0, 2).await.unwrap());
@@ -238,8 +245,9 @@ async fn test_compare_and_set_zero() {
     assert_eq!(al2.get().await.unwrap(), 2);
 }
 
+// Redisson: testCompareAndSet
 #[tokio::test]
-async fn test_compare_and_set() {
+async fn compare_and_set_with_the_wrong_expectation_leaves_the_value() {
     let al = client().await.atomic_i64(unique("test"));
     assert!(!al.compare_and_set(-1, 2).await.unwrap());
     assert_eq!(al.get().await.unwrap(), 0);
@@ -247,30 +255,33 @@ async fn test_compare_and_set() {
     assert_eq!(al.get().await.unwrap(), 2);
 }
 
+// Redisson: testSetThenIncrement
 #[tokio::test]
-async fn test_set_then_increment() {
+async fn get_and_incr_returns_the_stored_value_before_incrementing() {
     let al = client().await.atomic_i64(unique("test"));
     al.set(2).await.unwrap();
     assert_eq!(al.get_and_incr().await.unwrap(), 2);
     assert_eq!(al.get().await.unwrap(), 3);
 }
 
+// Redisson: testIncrementAndGet
 #[tokio::test]
-async fn test_increment_and_get() {
+async fn incr_on_a_missing_counter_returns_one() {
     let al = client().await.atomic_i64(unique("test"));
     assert_eq!(al.incr().await.unwrap(), 1);
     assert_eq!(al.get().await.unwrap(), 1);
 }
 
+// Redisson: testGetAndIncrement
 #[tokio::test]
-async fn test_get_and_increment() {
+async fn get_and_incr_on_a_missing_counter_returns_zero() {
     let al = client().await.atomic_i64(unique("test"));
     assert_eq!(al.get_and_incr().await.unwrap(), 0);
     assert_eq!(al.get().await.unwrap(), 1);
 }
 
 #[tokio::test]
-async fn test() {
+async fn the_counter_operations_agree_across_handles_up_to_large_values() {
     let client = client().await;
     let name = unique("test");
     let al = client.atomic_i64(name.clone());

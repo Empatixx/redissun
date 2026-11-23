@@ -168,8 +168,9 @@ async fn a_string_bucket_accepts_str_references() {
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("owned"));
 }
 
+// Redisson: testGetAndClearExpire
 #[tokio::test]
-async fn test_get_and_clear_expire() {
+async fn get_and_clear_expire_returns_the_value_without_a_ttl() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
     bucket.set_ex(&1, Duration::from_secs(1)).await.unwrap();
     assert_eq!(bucket.get_and_clear_expire().await.unwrap(), Some(1));
@@ -177,8 +178,9 @@ async fn test_get_and_clear_expire() {
     assert!(bucket.exists().await.unwrap());
 }
 
+// Redisson: testGetAndExpire
 #[tokio::test]
-async fn test_get_and_expire() {
+async fn get_and_expire_returns_the_value_and_sets_a_ttl() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
     bucket.set(&1).await.unwrap();
     assert_eq!(
@@ -191,8 +193,9 @@ async fn test_get_and_expire() {
     assert!(gone(&bucket).await);
 }
 
+// Redisson: testKeepTtl
 #[tokio::test]
-async fn test_keep_ttl() {
+async fn set_keep_ttl_replaces_the_value_but_keeps_the_ttl() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
     bucket.set_ex(&1234, Duration::from_secs(10)).await.unwrap();
     bucket.set_keep_ttl(&222).await.unwrap();
@@ -200,8 +203,9 @@ async fn test_keep_ttl() {
     assert_eq!(bucket.get().await.unwrap(), Some(222));
 }
 
+// Redisson: testGetAndDelete
 #[tokio::test]
-async fn test_get_and_delete() {
+async fn get_del_returns_the_value_once_and_then_none() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
     bucket.set(&10).await.unwrap();
     assert_eq!(bucket.get_del().await.unwrap(), Some(10));
@@ -209,16 +213,18 @@ async fn test_get_and_delete() {
     assert_eq!(bucket.get_del().await.unwrap(), None);
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn size_is_the_length_of_the_encoded_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert_eq!(bucket.size().await.unwrap(), 0);
     bucket.set("1234").await.unwrap();
     assert_eq!(bucket.size().await.unwrap(), 6);
 }
 
+// Redisson: testCompareAndSet
 #[tokio::test]
-async fn test_compare_and_set() {
+async fn compare_and_set_handles_missing_values_and_deletes_on_none() {
     let bucket = client().await.bucket::<Vec<String>>(unique("bucket"));
     let list = |value: &str| vec![value.to_string()];
     assert!(bucket
@@ -247,8 +253,9 @@ async fn test_compare_and_set() {
     assert!(!bucket.exists().await.unwrap());
 }
 
+// Redisson: testCompareAndSetArgsExpectedNullToNull
 #[tokio::test]
-async fn test_compare_and_set_args_expected_null_to_null() {
+async fn compare_and_set_none_to_none_needs_a_missing_key() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert!(bucket.compare_and_set(None::<&str>, None).await.unwrap());
     bucket.set("value").await.unwrap();
@@ -257,8 +264,9 @@ async fn test_compare_and_set_args_expected_null_to_null() {
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("value"));
 }
 
+// Redisson: testGetAndSetTtl
 #[tokio::test]
-async fn test_get_and_set_ttl() {
+async fn get_set_ex_swaps_the_value_and_sets_a_ttl() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket.set("value1").await.unwrap();
     assert_eq!(
@@ -274,8 +282,9 @@ async fn test_get_and_set_ttl() {
     assert_eq!(bucket.get().await.unwrap(), None);
 }
 
+// Redisson: testGetAndSet
 #[tokio::test]
-async fn test_get_and_set() {
+async fn get_set_returns_none_first_and_then_the_previous_value() {
     let bucket = client().await.bucket::<Vec<String>>(unique("bucket"));
     assert_eq!(bucket.get_set(&vec!["81".to_string()]).await.unwrap(), None);
     assert_eq!(
@@ -295,8 +304,9 @@ async fn get_set_clears_the_ttl_like_getset() {
     assert_eq!(bucket.ttl().await.unwrap(), None);
 }
 
+// Redisson: testSetIfExists
 #[tokio::test]
-async fn test_set_if_exists() {
+async fn set_xx_only_overwrites_an_existing_value() {
     let client = client().await;
     let first = client.bucket::<String>(unique("bucket"));
     assert!(!first.set_xx("0").await.unwrap());
@@ -313,16 +323,18 @@ async fn test_set_if_exists() {
     assert!(gone(&second).await);
 }
 
+// Redisson: testTrySet
 #[tokio::test]
-async fn test_try_set() {
+async fn set_nx_keeps_the_first_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert!(bucket.set_nx("3").await.unwrap());
     assert!(!bucket.set_nx("4").await.unwrap());
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("3"));
 }
 
+// Redisson: testTrySetTtl
 #[tokio::test]
-async fn test_try_set_ttl() {
+async fn set_nx_ex_keeps_the_first_value_until_it_expires() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert!(bucket
         .set_nx_ex("3", Duration::from_millis(500))
@@ -337,8 +349,9 @@ async fn test_try_set_ttl() {
     assert_eq!(bucket.get().await.unwrap(), None);
 }
 
+// Redisson: testExpire
 #[tokio::test]
-async fn test_expire() {
+async fn a_value_set_with_a_ttl_is_gone_after_it() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket
         .set_ex("someValue", Duration::from_secs(1))
@@ -348,8 +361,9 @@ async fn test_expire() {
     assert!(gone(&bucket).await);
 }
 
+// Redisson: testRename
 #[tokio::test]
-async fn test_rename() {
+async fn rename_moves_the_value_and_leaves_the_old_name_empty() {
     let client = client().await;
     let old = unique("bucket");
     let new = unique("bucket");
@@ -369,16 +383,18 @@ async fn rename_of_a_missing_key_fails() {
     assert!(bucket.rename(&unique("bucket")).await.is_err());
 }
 
+// Redisson: testSetGet
 #[tokio::test]
-async fn test_set_get() {
+async fn get_returns_the_value_that_was_set() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert_eq!(bucket.get().await.unwrap(), None);
     bucket.set("somevalue").await.unwrap();
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("somevalue"));
 }
 
+// Redisson: testSetDelete
 #[tokio::test]
-async fn test_set_delete() {
+async fn del_removes_the_value_and_reports_whether_it_existed() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket.set("somevalue").await.unwrap();
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("somevalue"));
@@ -387,8 +403,9 @@ async fn test_set_delete() {
     assert!(!bucket.del().await.unwrap());
 }
 
+// Redisson: testSetExist
 #[tokio::test]
-async fn test_set_exist() {
+async fn exists_is_true_after_set() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert_eq!(bucket.get().await.unwrap(), None);
     bucket.set("somevalue").await.unwrap();
@@ -396,8 +413,9 @@ async fn test_set_exist() {
     assert!(bucket.exists().await.unwrap());
 }
 
+// Redisson: testSetDeleteNotExist
 #[tokio::test]
-async fn test_set_delete_not_exist() {
+async fn exists_is_false_after_del() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert_eq!(bucket.get().await.unwrap(), None);
     bucket.set("somevalue").await.unwrap();
@@ -406,8 +424,9 @@ async fn test_set_delete_not_exist() {
     assert!(!bucket.exists().await.unwrap());
 }
 
+// Redisson: testCompareAndDeleteExpected
 #[tokio::test]
-async fn test_compare_and_delete_expected() {
+async fn compare_and_delete_removes_only_a_matching_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket.set("value1").await.unwrap();
     assert!(bucket.compare_and_delete("value1").await.unwrap());
@@ -419,8 +438,9 @@ async fn test_compare_and_delete_expected() {
     assert!(!bucket.compare_and_delete("anyValue").await.unwrap());
 }
 
+// Redisson: testKeysExpire
 #[tokio::test]
-async fn test_keys_expire() {
+async fn expire_extends_the_ttl_and_skips_a_missing_key() {
     let client = client().await;
     let first = client.bucket::<i32>(unique("expire-test1"));
     let second = client.bucket::<i32>(unique("expire-test2"));
@@ -436,8 +456,9 @@ async fn test_keys_expire() {
     assert_eq!(missing.ttl().await.unwrap(), None);
 }
 
+// Redisson: testKeysExists
 #[tokio::test]
-async fn test_keys_exists() {
+async fn exists_follows_whether_a_value_was_set() {
     let client = client().await;
     let bucket = client.bucket::<String>(unique("bucket"));
     assert!(!bucket.exists().await.unwrap());
