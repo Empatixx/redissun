@@ -1,12 +1,12 @@
 use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::reply::{self, malformed};
 use bytes::Bytes;
 use fred::interfaces::{KeysInterface, SetsInterface};
 use fred::types::scan::Scanner;
-use fred::types::scripts::Script;
 use futures::{stream, Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -17,8 +17,8 @@ use std::sync::LazyLock;
 
 const SCAN_PAGE: u32 = 100;
 
-static TRY_ADD: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_ADD: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "for i = 1, #ARGV, 1 do
             if redis.call('SISMEMBER', KEYS[1], ARGV[i]) == 1 then
                 return 0
@@ -31,8 +31,8 @@ static TRY_ADD: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RETAIN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RETAIN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local keep = {}
         for i = 1, #ARGV, 1 do
             keep[ARGV[i]] = true

@@ -1,11 +1,11 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
+use crate::lua::Lua;
 use crate::object::{millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
 use fred::interfaces::HashesInterface;
-use fred::types::scripts::Script;
 use futures::future::select_all;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
@@ -137,11 +137,11 @@ end
 local field = ARGV[1]
 ";
 
-fn script(body: &str) -> Script {
-    Script::from_lua(format!("{BASE}{PRELUDE}{body}"))
+fn script(body: &str) -> Lua {
+    Lua::from_lua(format!("{BASE}{PRELUDE}{body}"))
 }
 
-static GET: LazyLock<Script> = LazyLock::new(|| {
+static GET: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -158,7 +158,7 @@ static GET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
+static CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -175,7 +175,7 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT: LazyLock<Script> = LazyLock::new(|| {
+static PUT: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         local exists = false
@@ -198,7 +198,7 @@ static PUT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
+static PUT_WITH_LIMITS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local ttl, idle = tonumber(ARGV[3]), tonumber(ARGV[4])
         local raw = redis.call('HGET', MAIN, field)
@@ -220,7 +220,7 @@ static PUT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
+static PUT_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -244,7 +244,7 @@ static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
+static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local ttl, idle = tonumber(ARGV[3]), tonumber(ARGV[4])
         local raw = redis.call('HGET', MAIN, field)
@@ -262,7 +262,7 @@ static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -281,7 +281,7 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
+static ENTRY_TTL: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local raw = redis.call('HGET', MAIN, field)
         if raw == false then
@@ -299,8 +299,8 @@ static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SCAN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static SCAN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{BASE}local res = redis.call('HSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
         local result = {{}}
         for i = 1, #res[2], 2 do
@@ -329,8 +329,8 @@ static SCAN: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static EVICT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+static EVICT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{BASE}if ARGV[3] == '1' and not redis.call('SET', KEYS[6], 1, 'NX', 'PX', ARGV[2]) then
             return -1
         end
@@ -357,8 +357,8 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-static TRY_SET_MAX_SIZE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_SET_MAX_SIZE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('HSETNX', KEYS[1], 'max-size', ARGV[1])
         return redis.call('HSETNX', KEYS[1], 'mode', ARGV[2])",
     )
@@ -722,11 +722,11 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
         ])
     }
 
-    fn expire_script(&self) -> Option<&'static Script> {
+    fn expire_script(&self) -> Option<&'static Lua> {
         Some(&EXPIRE)
     }
 
-    fn persist_script(&self) -> Option<&'static Script> {
+    fn persist_script(&self) -> Option<&'static Lua> {
         Some(&PERSIST)
     }
 }
@@ -747,8 +747,8 @@ fn options_key(key: &str) -> String {
     format!("redissun__map_cache_options:{key}")
 }
 
-static EXPIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static EXPIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local maxSize = tonumber(redis.call('HGET', KEYS[5], 'max-size'))
         if maxSize ~= nil and maxSize ~= 0 then
             redis.call('ZADD', KEYS[4], 92233720368547758, 'redissun__expiretag')
@@ -763,8 +763,8 @@ static EXPIRE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PERSIST: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PERSIST: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local maxSize = tonumber(redis.call('HGET', KEYS[5], 'max-size'))
         if maxSize ~= nil and maxSize ~= 0 then
             redis.call('PERSIST', KEYS[5])
@@ -946,7 +946,7 @@ where
         let set: i64 = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &TRY_SET_MAX_SIZE,
                 vec![self.options_key()],
                 vec![Bytes::from(max.to_string()), Bytes::from(mode.as_str())],

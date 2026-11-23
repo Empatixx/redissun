@@ -1,11 +1,11 @@
 use crate::codec::Codec;
 use crate::collections::list;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::ListInterface;
 use fred::types::lists::ListLocation;
-use fred::types::scripts::Script;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -16,8 +16,8 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::LazyLock;
 use uuid::Uuid;
 
-static INSERT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static INSERT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local ind = table.remove(ARGV, 1)
         local size = redis.call('llen', KEYS[1])
         assert(tonumber(ind) <= size, 'index: ' .. ind .. ' but current size: ' .. size)
@@ -35,16 +35,16 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static SET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('lindex', KEYS[1], ARGV[1])
         redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         return v",
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('lindex', KEYS[1], ARGV[1])
         redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         redis.call('lrem', KEYS[1], 1, ARGV[2])
@@ -52,16 +52,16 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FAST_REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static FAST_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         redis.call('lrem', KEYS[1], 1, ARGV[2])
         return 1",
     )
 });
 
-static CONTAINS_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local items = redis.call('lrange', KEYS[1], 0, -1)
         for i = 1, #items, 1 do
             for j = #ARGV, 1, -1 do
@@ -74,8 +74,8 @@ static CONTAINS_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE_VALUES: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = 0
         for i = 1, #ARGV, 1 do
             if redis.call('lrem', KEYS[1], 0, ARGV[i]) > 0 then
@@ -86,8 +86,8 @@ static REMOVE_VALUES: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RETAIN_VALUES: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RETAIN_VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local changed = 0
         local items = redis.call('lrange', KEYS[1], 0, -1)
         for i = 1, #items, 1 do
@@ -329,7 +329,7 @@ where
             .collect();
         self.key
             .core
-            .eval_no_retry::<i64>(&INSERT, vec![self.key.redis_key()], args)
+            .eval_once::<i64>(&INSERT, vec![self.key.redis_key()], args)
             .await
             .map(|_| ())
             .map_err(out_of_range)

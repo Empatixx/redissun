@@ -3,14 +3,14 @@ use crate::client::request::Request;
 use crate::client::retry::Retry;
 use crate::client::slot::keyslot;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::pubsub::PubSub;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool, WithOptions};
 use fred::interfaces::{ClientInterface, ClientLike, ClusterInterface, EventInterface};
-use fred::prelude::{Builder, FromValue, Options};
+use fred::prelude::{Builder, Options};
 use fred::types::client::ClientKillFilter;
 use fred::types::config::PerformanceConfig;
-use fred::types::scripts::Script;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -230,55 +230,62 @@ impl Core {
         }
     }
 
-    pub(crate) async fn eval<R: FromValue>(
+    /// Runs `lua` with `EVALSHA`, routed by its first key. When that node does not know the script (`NOSCRIPT`), it is loaded there and run once more.
+    pub(crate) async fn eval<R: redis::FromRedisValue>(
         &self,
-        script: &Script,
+        lua: &Lua,
         keys: Vec<String>,
         args: Vec<Bytes>,
     ) -> Result<R> {
-        Ok(script.evalsha_with_reload(self.redis(), keys, args).await?)
+        self.run_lua(lua, &keys, &args, false).await
     }
 
-    /// Runs a script that must reach Redis at most once. `EVALSHA` goes out as a custom command: fred's own `evalsha` sends the script again after a reconnection even when it may send it only once, so a script whose reply was lost ran twice.
-    pub(crate) async fn eval_no_retry<R: FromValue>(
+    /// Like [`eval`](Core::eval) for a script that must reach Redis at most once: it is never sent again after its connection failed, so a script whose reply was lost does not run twice.
+    pub(crate) async fn eval_once<R: redis::FromRedisValue>(
         &self,
-        script: &Script,
+        lua: &Lua,
         keys: Vec<String>,
         args: Vec<Bytes>,
     ) -> Result<R> {
-        let client = self.redis();
-        match evalsha_once(client, script, &keys, &args).await {
-            Err(error) if error.details().starts_with("NOSCRIPT") => {
-                script.load(client).await?;
-                Ok(evalsha_once(client, script, &keys, &args).await?)
+        self.run_lua(lua, &keys, &args, true).await
+    }
+
+    async fn run_lua<R: redis::FromRedisValue>(
+        &self,
+        lua: &Lua,
+        keys: &[String],
+        args: &[Bytes],
+        once: bool,
+    ) -> Result<R> {
+        let request = |cmd: redis::Cmd| {
+            let request = match keys.first() {
+                Some(key) => Request::new(cmd).key(key.as_bytes()),
+                None => Request::new(cmd),
+            };
+            if once {
+                request.once()
+            } else {
+                request
             }
-            result => Ok(result?),
+        };
+        let evalsha = || {
+            let mut cmd = redis::cmd("EVALSHA");
+            cmd.arg(lua.sha1()).arg(keys.len()).arg(keys);
+            for arg in args {
+                cmd.arg(&arg[..]);
+            }
+            cmd
+        };
+        match self.query(request(evalsha())).await {
+            Err(Error::Redis(message)) if message.contains("NOSCRIPT") => {
+                let mut load = redis::cmd("SCRIPT");
+                load.arg("LOAD").arg(lua.source());
+                let _: String = self.query(request(load)).await?;
+                self.query(request(evalsha())).await
+            }
+            result => result,
         }
     }
-}
-
-async fn evalsha_once<R: FromValue>(
-    client: &RedisClient,
-    script: &Script,
-    keys: &[String],
-    args: &[Bytes],
-) -> std::result::Result<R, fred::error::Error> {
-    // fred routes a custom command only by an explicit slot, not by a key offset.
-    let hash = keys
-        .first()
-        .map_or(fred::types::ClusterHash::Random, |key| {
-            fred::types::ClusterHash::Custom(fred::util::redis_keyslot(key.as_bytes()))
-        });
-    let command = fred::types::CustomCommand::new_static("EVALSHA", hash, false);
-    let mut values: Vec<fred::types::Value> = Vec::with_capacity(2 + keys.len() + args.len());
-    values.push(script.sha1().to_string().into());
-    values.push((keys.len() as i64).into());
-    values.extend(
-        keys.iter()
-            .map(|key| fred::types::Value::from(key.as_str())),
-    );
-    values.extend(args.iter().cloned().map(fred::types::Value::Bytes));
-    no_retry(client).custom(command, values).await
 }
 
 async fn set_name(

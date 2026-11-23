@@ -1,16 +1,16 @@
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::values::atomic_i64::{
     Comparison, COMPARE_AND_DELETE, GET_AND_DELETE, SET_IF_GREATER, SET_IF_LESS,
 };
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::sync::LazyLock;
 
-static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static COMPARE_AND_SET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         if (value == false and tonumber(ARGV[1]) == 0) or (tonumber(value) == tonumber(ARGV[1])) then
             redis.call('SET', KEYS[1], ARGV[2])
@@ -43,7 +43,7 @@ impl AtomicF64 {
         Self { key }
     }
 
-    async fn flag(&self, script: &Script, args: [String; 2]) -> Result<bool> {
+    async fn flag(&self, script: &Lua, args: [String; 2]) -> Result<bool> {
         let done: i64 = self
             .key
             .core

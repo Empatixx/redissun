@@ -1,8 +1,8 @@
 use crate::error::Result;
 use crate::locks::sync::{synced_eval, with_sync_retry};
+use crate::lua::Lua;
 use crate::object::Key;
 use bytes::Bytes;
-use fred::types::scripts::Script;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
@@ -26,8 +26,8 @@ fn remove_stale(now: &str) -> String {
     REMOVE_STALE.replace("NOW", now)
 }
 
-pub(crate) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+pub(crate) static ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{}
         if (redis.call('exists', KEYS[1]) == 0)
             and ((redis.call('exists', KEYS[2]) == 0) or (redis.call('lindex', KEYS[2], 0) == ARGV[2])) then
@@ -67,8 +67,8 @@ pub(crate) static ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-pub(crate) static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+pub(crate) static TRY_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{}
         if (redis.call('exists', KEYS[1]) == 0)
             and ((redis.call('exists', KEYS[2]) == 0) or (redis.call('lindex', KEYS[2], 0) == ARGV[2])) then
@@ -92,8 +92,8 @@ pub(crate) static TRY_ACQUIRE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-pub(crate) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+pub(crate) static RELEASE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "local val = redis.call('get', KEYS[4])
         if val ~= false then
             return tonumber(val)
@@ -127,8 +127,8 @@ pub(crate) static RELEASE: LazyLock<Script> = LazyLock::new(|| {
     ))
 });
 
-pub(crate) static ACQUIRE_FAILED: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static ACQUIRE_FAILED: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local queue = redis.call('lrange', KEYS[1], 0, -1)
         local i = 1
         while i <= #queue and queue[i] ~= ARGV[1] do
@@ -145,8 +145,8 @@ pub(crate) static ACQUIRE_FAILED: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static FORCE_UNLOCK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(format!(
+pub(crate) static FORCE_UNLOCK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(format!(
         "{}
         if (redis.call('del', KEYS[1]) == 1) then
             local nextThreadId = redis.call('lindex', KEYS[2], 0)

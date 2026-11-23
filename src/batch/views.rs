@@ -2,6 +2,7 @@ use super::int;
 use super::*;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::millis as to_millis;
 use crate::reply::{malformed, number, text};
 use fred::types::Value;
@@ -32,13 +33,8 @@ macro_rules! typed_view {
     };
 }
 
-fn lua(script: &fred::types::scripts::Script) -> Value {
-    Value::from(
-        script
-            .lua()
-            .map(|source| source.to_string())
-            .unwrap_or_default(),
-    )
+fn lua(script: &Lua) -> Value {
+    Value::from(script.source().to_string())
 }
 
 typed_view!(BatchHashMap<K, V>, "A [`HashMap`](crate::HashMap) whose methods queue commands in a [`Batch`].");

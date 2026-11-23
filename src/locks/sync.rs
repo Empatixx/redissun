@@ -1,11 +1,12 @@
+use crate::client::fred_adapter::from_fred;
 use crate::client::retry::Retry;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::Key;
 use bytes::Bytes;
 use fred::clients::Client as RedisClient;
 use fred::interfaces::{ClientLike, ClusterInterface};
-use fred::prelude::{FromValue, Options};
-use fred::types::scripts::Script;
+use fred::prelude::Options;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use fred::util::redis_keyslot;
 use std::collections::HashMap;
@@ -89,9 +90,9 @@ fn custom(name: &'static str, slot: u16) -> CustomCommand {
     CustomCommand::new_static(name, ClusterHash::Custom(slot), false)
 }
 
-fn eval_args(script: &Script, keys: &[String], args: &[Bytes]) -> Vec<Value> {
+fn eval_args(script: &Lua, keys: &[String], args: &[Bytes]) -> Vec<Value> {
     let mut values = Vec::with_capacity(keys.len() + args.len() + 2);
-    values.push(Value::String(script.sha1().clone()));
+    values.push(Value::from(script.sha1()));
     values.push(Value::Integer(keys.len() as i64));
     values.extend(keys.iter().map(|key| Value::String(key.as_str().into())));
     values.extend(args.iter().map(|arg| Value::Bytes(arg.clone())));
@@ -110,9 +111,9 @@ fn is_noscript(error: &fred::error::Error) -> bool {
     error.details().starts_with("NOSCRIPT")
 }
 
-async fn plain_eval<R: FromValue>(
+async fn plain_eval<R: redis::FromRedisValue>(
     key: &Key,
-    script: &Script,
+    script: &Lua,
     keys: Vec<String>,
     args: Vec<Bytes>,
     retry: bool,
@@ -120,7 +121,7 @@ async fn plain_eval<R: FromValue>(
     if retry {
         key.core.eval(script, keys, args).await
     } else {
-        key.core.eval_no_retry(script, keys, args).await
+        key.core.eval_once(script, keys, args).await
     }
 }
 
@@ -171,9 +172,9 @@ async fn connected_replicas(client: &RedisClient, slot: u16) -> Result<i64> {
         .unwrap_or(0))
 }
 
-pub(crate) async fn synced_eval<R: FromValue>(
+pub(crate) async fn synced_eval<R: redis::FromRedisValue>(
     key: &Key,
-    script: &Script,
+    script: &Lua,
     keys: Vec<String>,
     args: Vec<Bytes>,
     retry: bool,
@@ -222,7 +223,12 @@ pub(crate) async fn synced_eval<R: FromValue>(
         let synced = replies.next().unwrap_or(Ok(Value::Integer(0)));
         let value = match evaluated {
             Err(error) if is_noscript(&error) && !reloaded => {
-                script.load(&client).await?;
+                let _: Value = client
+                    .custom(
+                        custom("SCRIPT", slot),
+                        vec![Value::from("LOAD"), Value::from(script.source())],
+                    )
+                    .await?;
                 reloaded = true;
                 continue;
             }
@@ -236,6 +242,6 @@ pub(crate) async fn synced_eval<R: FromValue>(
         if settings.check_synced_replicas && synced == 0 {
             return Err(Error::NoSyncedReplicas);
         }
-        return Ok(value.convert()?);
+        return Ok(R::from_redis_value(from_fred(value))?);
     }
 }

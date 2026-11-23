@@ -1,7 +1,7 @@
 use crate::client::core::{Core, Evictor};
 use crate::error::Result;
+use crate::lua::Lua;
 use bytes::Bytes;
-use fred::types::scripts::Script;
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -25,7 +25,7 @@ pub(crate) fn arguments(latch: Option<Duration>) -> Vec<Bytes> {
     ]
 }
 
-pub(crate) fn schedule(core: &Arc<Core>, task: String, script: &'static Script, keys: Vec<String>) {
+pub(crate) fn schedule(core: &Arc<Core>, task: String, script: &'static Lua, keys: Vec<String>) {
     let Ok(runtime) = Handle::try_current() else {
         return;
     };
@@ -89,7 +89,7 @@ impl Pacing {
     }
 }
 
-async fn run(core: Weak<Core>, script: &'static Script, keys: Vec<String>, min: Duration) {
+async fn run(core: Weak<Core>, script: &'static Lua, keys: Vec<String>, min: Duration) {
     let mut pacing = Pacing::new(min);
     loop {
         tokio::time::sleep(pacing.delay).await;
@@ -98,7 +98,7 @@ async fn run(core: Weak<Core>, script: &'static Script, keys: Vec<String>, min: 
         };
         let latch = pacing.delay.min(MAX_LATCH);
         let outcome: Result<i64> = core
-            .eval_no_retry(script, keys.clone(), arguments(Some(latch)))
+            .eval_once(script, keys.clone(), arguments(Some(latch)))
             .await;
         drop(core);
         if let Ok(size) = outcome {

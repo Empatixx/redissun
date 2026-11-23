@@ -17,10 +17,10 @@ pub(crate) use scripts::{READ_FORCE_UNLOCK, READ_IS_LOCKED, WRITE_FORCE_UNLOCK};
 pub(crate) use sync::LockSettings;
 
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{millis as to_millis, tagged, Key};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::scripts::Script;
 use scripts::{
     READ_RELEASE, READ_RENEW, READ_UNLOCK_MESSAGE, RELEASE, RENEW, UNLOCK_MESSAGE, WRITE_RELEASE,
 };
@@ -92,7 +92,7 @@ async fn release_inner(
 ) -> Result<()> {
     let latch = unlock_latch(key, request);
     let latch_ttl = Bytes::from(key.core.retry.unlock_latch_ttl().as_millis().to_string());
-    let (script, keys, args): (&Script, Vec<String>, Vec<Bytes>) = match mode {
+    let (script, keys, args): (&Lua, Vec<String>, Vec<Bytes>) = match mode {
         Mode::Read => (
             &READ_RELEASE,
             vec![
@@ -152,7 +152,7 @@ async fn release_inner(
 }
 
 pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration, mode: Mode) -> Result<bool> {
-    let (script, keys, args): (&Script, Vec<String>, Vec<Bytes>) = match mode {
+    let (script, keys, args): (&Lua, Vec<String>, Vec<Bytes>) = match mode {
         Mode::Read => (
             &READ_RENEW,
             vec![key.redis_key(), key.redis_key()],
@@ -170,7 +170,7 @@ pub(crate) async fn renew(key: &Key, owner: &str, lease: Duration, mode: Mode) -
 
 pub(crate) async fn force_unlock(
     key: &Key,
-    script: &Script,
+    script: &Lua,
     keys: Vec<String>,
     args: Vec<Bytes>,
 ) -> Result<bool> {

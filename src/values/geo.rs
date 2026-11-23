@@ -1,9 +1,9 @@
 use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::reply::{array, bytes, malformed, number, text};
-use fred::types::scripts::Script;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -11,8 +11,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
-static ADD_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static ADD_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GEOPOS', KEYS[1], ARGV[3])
         if value[1] ~= false then
             redis.call('GEOADD', KEYS[1], ARGV[1], ARGV[2], ARGV[3])

@@ -1,10 +1,10 @@
 use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::scripts::Script;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -13,24 +13,24 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
-pub(crate) static INSERT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static INSERT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
         return previous",
     )
 });
 
-pub(crate) static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HDEL', KEYS[1], ARGV[1])
         return previous",
     )
 });
 
-static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PUT_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 1 then
             return nil
         end
@@ -38,8 +38,8 @@ static PUT_IF_ABSENT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PUT_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('HGET', KEYS[1], ARGV[1])
         if value ~= false then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -49,8 +49,8 @@ static PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FAST_PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static FAST_PUT_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('HGET', KEYS[1], ARGV[1])
         if value ~= false then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -60,8 +60,8 @@ static FAST_PUT_IF_EXISTS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REPLACE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REPLACE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
             local value = redis.call('HGET', KEYS[1], ARGV[1])
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -71,8 +71,8 @@ static REPLACE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static FAST_REPLACE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static FAST_REPLACE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
             return 1
@@ -81,8 +81,8 @@ static FAST_REPLACE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REPLACE_IF: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REPLACE_IF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
             return 1
@@ -91,8 +91,8 @@ static REPLACE_IF: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE_IF: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE_IF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
             return redis.call('HDEL', KEYS[1], ARGV[1])
         end
@@ -100,8 +100,8 @@ static REMOVE_IF: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS_VALUE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS_VALUE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local values = redis.call('HVALS', KEYS[1])
         for i = 1, #values, 1 do
             if ARGV[1] == values[i] then
@@ -351,7 +351,7 @@ where
         Ok(value)
     }
 
-    async fn eval_value(&self, script: &Script, args: Vec<Bytes>) -> Result<Option<V>> {
+    async fn eval_value(&self, script: &Lua, args: Vec<Bytes>) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
             .core
@@ -360,7 +360,7 @@ where
         self.decode_value(raw)
     }
 
-    async fn eval_flag(&self, script: &Script, args: Vec<Bytes>) -> Result<bool> {
+    async fn eval_flag(&self, script: &Lua, args: Vec<Bytes>) -> Result<bool> {
         let flag: i64 = self
             .key
             .core
@@ -400,7 +400,7 @@ where
         let raw: Option<Bytes> = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &PUT_IF_ABSENT,
                 vec![self.key.redis_key()],
                 vec![self.codec.encode(k)?, self.codec.encode(v)?],

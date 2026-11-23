@@ -1,16 +1,16 @@
 use crate::client::core::Core;
 use crate::client::request::{command, Arg, Request};
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-static EXPIRE_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static EXPIRE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         for j = 1, #KEYS, 1 do
             if redis.call('PEXPIRE', KEYS[j], ARGV[1]) == 1 then
@@ -21,8 +21,8 @@ static EXPIRE_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PERSIST_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PERSIST_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         for j = 1, #KEYS, 1 do
             if redis.call('PERSIST', KEYS[j]) == 1 then
@@ -33,8 +33,8 @@ static PERSIST_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RENAME_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RENAME_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local half = #KEYS / 2
         for j = 1, half, 1 do
             if redis.call('EXISTS', KEYS[j]) == 1 then
@@ -143,7 +143,7 @@ impl Key {
 
     pub(crate) async fn del_with(
         &self,
-        script: &Script,
+        script: &Lua,
         keys: Vec<String>,
         args: Vec<Bytes>,
     ) -> Result<bool> {
@@ -179,7 +179,7 @@ impl Key {
 
     pub(crate) async fn expire_with(
         &self,
-        script: &Script,
+        script: &Lua,
         ttl: Duration,
         companions: Vec<String>,
     ) -> Result<bool> {
@@ -194,11 +194,7 @@ impl Key {
         Ok(applied == 1)
     }
 
-    pub(crate) async fn persist_with(
-        &self,
-        script: &Script,
-        companions: Vec<String>,
-    ) -> Result<bool> {
+    pub(crate) async fn persist_with(&self, script: &Lua, companions: Vec<String>) -> Result<bool> {
         let cleared: i64 = self
             .core
             .eval(script, self.with(companions), Vec::new())
@@ -293,8 +289,8 @@ impl Key {
 
 mod sealed {
     use super::Key;
+    use crate::lua::Lua;
     use bytes::Bytes;
-    use fred::types::scripts::Script;
 
     pub trait HasKey {
         fn key(&self) -> &Key;
@@ -311,15 +307,15 @@ mod sealed {
             new_name.to_string()
         }
 
-        fn del_script(&self) -> Option<(&'static Script, Vec<String>, Vec<Bytes>)> {
+        fn del_script(&self) -> Option<(&'static Lua, Vec<String>, Vec<Bytes>)> {
             None
         }
 
-        fn expire_script(&self) -> Option<&'static Script> {
+        fn expire_script(&self) -> Option<&'static Lua> {
             None
         }
 
-        fn persist_script(&self) -> Option<&'static Script> {
+        fn persist_script(&self) -> Option<&'static Lua> {
             None
         }
     }

@@ -1,5 +1,4 @@
 use super::*;
-use crate::client::fred_adapter::from_fred;
 use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
@@ -237,13 +236,13 @@ where
             .into_iter()
             .map(Arg::into_bytes)
             .collect::<Vec<Bytes>>();
-        let reply: fred::types::Value = self
+        let reply: redis::Value = self
             .stream
             .key
             .core
             .eval(&PENDING_RANGE, vec![self.stream.key.redis_key()], args)
             .await?;
-        self.stream.entries(&from_fred(reply))
+        self.stream.entries(&reply)
     }
 }
 

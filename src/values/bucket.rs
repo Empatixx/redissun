@@ -1,10 +1,10 @@
 use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{millis, HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use fred::types::{Expiration, SetOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -14,8 +14,8 @@ use std::marker::PhantomData;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static COMPARE_AND_SET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('GET', KEYS[1]) == ARGV[1] then
             redis.call('SET', KEYS[1], ARGV[2])
             return 1
@@ -24,8 +24,8 @@ static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static COMPARE_AND_DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('GET', KEYS[1]) == ARGV[1] then
             redis.call('DEL', KEYS[1])
             return 1
@@ -34,16 +34,16 @@ static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static GET_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static GET_AND_DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         redis.call('DEL', KEYS[1])
         return value",
     )
 });
 
-static GET_AND_SET_EX: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static GET_AND_SET_EX: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('GET', KEYS[1])
         redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
         return value",

@@ -2,11 +2,11 @@ use crate::client::core::Core;
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{tagged, HasKey, Key};
 use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface, PubsubInterface, SortedSetsInterface};
-use fred::types::scripts::Script;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -31,8 +31,8 @@ const UPDATES_LOG_TIME: Duration = Duration::from_secs(10 * 60);
 const UPDATES_LOG_KEEP: Duration = Duration::from_secs(11 * 60);
 const EXPIRED_EVENTS: &str = "__keyevent@*:expired";
 
-static PUT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PUT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
         if ARGV[4] == '1' then
@@ -47,8 +47,8 @@ static PUT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local previous = redis.call('HGET', KEYS[1], ARGV[1])
         if redis.call('HDEL', KEYS[1], ARGV[1]) == 1 then
             if ARGV[4] == '1' then
@@ -64,8 +64,8 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CLEAR_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CLEAR_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('DEL', KEYS[1], KEYS[2]) > 0 and ARGV[2] ~= '0' then
             redis.call('PUBLISH', ARGV[1], ARGV[3])
             return 1
@@ -624,7 +624,7 @@ impl<K, V, C: Codec> HasKey for LocalCachedMap<K, V, C> {
         &self.key
     }
 
-    fn del_script(&self) -> Option<(&'static Script, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
+    fn del_script(&self) -> Option<(&'static Lua, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
         self.local.forget_all();
         Some((&CLEAR_ALL, self.clear_keys(), self.clear_arguments()))
     }

@@ -1,10 +1,10 @@
 use crate::codec::Codec;
 use crate::coordination::rate_limiter::{suffix_name, EXPIRE_ANY, PERSIST_ANY};
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{Key, Object};
 use bytes::Bytes;
 use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::scripts::Script;
 use highway::{HighwayHash, HighwayHasher};
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -23,8 +23,8 @@ const HASH_KEY: highway::Key = highway::Key([
     0xf86c_6a11_d0c1_8e95,
 ]);
 
-static INIT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static INIT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('EXISTS', KEYS[1]) == 1 then
             return 0
         end
@@ -33,8 +33,8 @@ static INIT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static INSERT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static INSERT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], 'size') ~= ARGV[1] or redis.call('HGET', KEYS[1], 'hashIterations') ~= ARGV[2] then
             return redis.error_reply('Bloom filter config has been changed')
         end
@@ -55,8 +55,8 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('HGET', KEYS[1], 'size') ~= ARGV[1] or redis.call('HGET', KEYS[1], 'hashIterations') ~= ARGV[2] then
             return false
         end
@@ -80,8 +80,8 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RENAME: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RENAME: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local half = #KEYS / 2
         for j = 1, half do
             if redis.call('EXISTS', KEYS[j]) == 1 then

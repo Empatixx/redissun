@@ -1,11 +1,11 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
+use crate::lua::Lua;
 use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
 use fred::interfaces::SortedSetsInterface;
-use fred::types::scripts::Script;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -25,11 +25,11 @@ local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local NEVER = 92233720368547758
 ";
 
-fn script(body: &str) -> Script {
-    Script::from_lua(format!("{NOW}{body}"))
+fn script(body: &str) -> Lua {
+    Lua::from_lua(format!("{NOW}{body}"))
 }
 
-static INSERT: LazyLock<Script> = LazyLock::new(|| {
+static INSERT: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local score = NEVER - now
         if tonumber(ARGV[1]) > 0 then
@@ -48,7 +48,7 @@ static INSERT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
+static CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
         if score ~= false and tonumber(score) > now then
@@ -58,10 +58,10 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static LEN: LazyLock<Script> =
+static LEN: LazyLock<Lua> =
     LazyLock::new(|| script("return redis.call('ZCOUNT', KEYS[1], now, NEVER)"));
 
-static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
+static ENTRY_TTL: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
         if score == false or tonumber(score) <= now then
@@ -74,7 +74,7 @@ static ENTRY_TTL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static EVICT: LazyLock<Script> = LazyLock::new(|| {
+static EVICT: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "if ARGV[3] == '1' and not redis.call('SET', KEYS[3], 1, 'NX', 'PX', ARGV[2]) then
             return -1
@@ -92,7 +92,7 @@ static EVICT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SCAN: LazyLock<Script> = LazyLock::new(|| {
+static SCAN: LazyLock<Lua> = LazyLock::new(|| {
     script(
         "local res = redis.call('ZSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
         local result = {}

@@ -1,9 +1,9 @@
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::Key;
 use bytes::Bytes;
 use fred::interfaces::{KeysInterface, ListInterface};
-use fred::types::scripts::Script;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -11,20 +11,20 @@ use std::sync::LazyLock;
 
 const PAGE: i64 = 100;
 
-static POP_FRONT_MANY: LazyLock<Script> = LazyLock::new(|| pop_many_script("lpop"));
+static POP_FRONT_MANY: LazyLock<Lua> = LazyLock::new(|| pop_many_script("lpop"));
 
-static POP_BACK_MANY: LazyLock<Script> = LazyLock::new(|| pop_many_script("rpop"));
+static POP_BACK_MANY: LazyLock<Lua> = LazyLock::new(|| pop_many_script("rpop"));
 
-static DRAIN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static DRAIN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local vals = redis.call('lrange', KEYS[1], 0, -1)
         redis.call('del', KEYS[1])
         return vals",
     )
 });
 
-static DRAIN_UP_TO: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static DRAIN_UP_TO: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local elemNum = math.min(ARGV[1], redis.call('llen', KEYS[1])) - 1
         local vals = redis.call('lrange', KEYS[1], 0, elemNum)
         redis.call('ltrim', KEYS[1], elemNum + 1, -1)
@@ -32,8 +32,8 @@ static DRAIN_UP_TO: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-fn pop_many_script(command: &str) -> Script {
-    Script::from_lua(format!(
+fn pop_many_script(command: &str) -> Lua {
+    Lua::from_lua(format!(
         "local result = {{}}
         for i = 1, ARGV[1], 1 do
             local value = redis.call('{command}', KEYS[1])
@@ -86,7 +86,7 @@ where
     };
     let raw: Vec<Bytes> = key
         .core
-        .eval_no_retry(
+        .eval_once(
             script,
             vec![key.redis_key()],
             vec![Bytes::from(limit.to_string())],

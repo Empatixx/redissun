@@ -1,9 +1,9 @@
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{Key, Object};
 use crate::pending::Pending;
 use crate::wait::wait_on;
 use bytes::Bytes;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::future::Future;
 use std::sync::LazyLock;
@@ -13,8 +13,8 @@ use tokio::time::Instant;
 const ZERO_COUNT_MESSAGE: &str = "0";
 const NEW_COUNT_MESSAGE: &str = "1";
 
-static COUNT_DOWN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static COUNT_DOWN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = redis.call('DECR', KEYS[1])
         if value <= 0 then
             redis.call('DEL', KEYS[1])
@@ -26,8 +26,8 @@ static COUNT_DOWN: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static TRY_SET_COUNT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_SET_COUNT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('EXISTS', KEYS[1]) == 0 then
             redis.call('SET', KEYS[1], ARGV[2])
             redis.call('PUBLISH', KEYS[2], ARGV[1])
@@ -37,8 +37,8 @@ static TRY_SET_COUNT: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "if redis.call('DEL', KEYS[1]) == 1 then
             redis.call('PUBLISH', KEYS[2], ARGV[1])
             return 1
@@ -96,7 +96,7 @@ impl CountDownLatch {
         let _: i64 = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &COUNT_DOWN,
                 self.keys(),
                 vec![Bytes::from(ZERO_COUNT_MESSAGE)],

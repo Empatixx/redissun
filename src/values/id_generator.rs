@@ -1,22 +1,22 @@
 use crate::coordination::rate_limiter::suffix_name;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
 
-static TRY_INIT: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRY_INIT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('SETNX', KEYS[1], ARGV[1])
         return redis.call('SETNX', KEYS[2], ARGV[2])",
     )
 });
 
-static ALLOCATE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static ALLOCATE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local allocationSize = redis.call('GET', KEYS[2])
         if allocationSize == false then
             allocationSize = 5000
@@ -83,7 +83,7 @@ impl IdGenerator {
         let set: i64 = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &TRY_INIT,
                 self.keys(),
                 [first, allocation_size]

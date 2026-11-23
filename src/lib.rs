@@ -34,6 +34,7 @@ mod coordination;
 mod error;
 mod eviction;
 mod locks;
+mod lua;
 mod messaging;
 mod object;
 mod pending;

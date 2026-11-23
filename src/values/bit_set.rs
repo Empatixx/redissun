@@ -1,21 +1,21 @@
 use crate::client::request::Arg;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::reply::{array, int, malformed, number};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::ops::Range;
 use std::sync::LazyLock;
 
 const MAX_INDEX: u64 = (1 << 32) - 1;
 
-pub(crate) static COUNT: LazyLock<Script> =
-    LazyLock::new(|| Script::from_lua("return redis.call('BITCOUNT', KEYS[1])"));
+pub(crate) static COUNT: LazyLock<Lua> =
+    LazyLock::new(|| Lua::from_lua("return redis.call('BITCOUNT', KEYS[1])"));
 
-static LENGTH: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static LENGTH: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local i = redis.call('bitpos', KEYS[1], 1, -1)
         local pos = i < 0 and redis.call('bitpos', KEYS[1], 0, -1) or math.floor(i / 8) * 8
         while (pos >= 0) do
@@ -34,8 +34,8 @@ static LENGTH: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static SET_RANGE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static SET_RANGE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "for i = tonumber(ARGV[1]), tonumber(ARGV[2]) - 1, 1 do
             redis.call('SETBIT', KEYS[1], i, ARGV[3])
         end

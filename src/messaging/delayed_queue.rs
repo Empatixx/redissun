@@ -2,11 +2,11 @@ use crate::client::core::{Core, Evictor};
 use crate::codec::Codec;
 use crate::collections::vec_deque::VecDeque;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{millis as to_millis, tagged, HasKey, Key};
 use crate::pubsub::Subscription;
 use bytes::Bytes;
 use fred::interfaces::ListInterface;
-use fred::types::scripts::Script;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -25,8 +25,8 @@ const RETRY_PAUSE: Duration = Duration::from_secs(5);
 const UNSUBSCRIBED_PAUSE: Duration = Duration::from_secs(1);
 const IMMEDIATE: Duration = Duration::from_millis(10);
 
-static OFFER: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static OFFER: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local value = struct.pack('Bc0Lc0', string.len(ARGV[2]), ARGV[2], string.len(ARGV[3]), ARGV[3])
         redis.call('ZADD', KEYS[2], ARGV[1], value)
         redis.call('RPUSH', KEYS[3], value)
@@ -38,8 +38,8 @@ static OFFER: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static TRANSFER: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static TRANSFER: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local due = redis.call('ZRANGEBYSCORE', KEYS[2], 0, ARGV[1], 'LIMIT', 0, ARGV[2])
         if #due > 0 then
             for i, v in ipairs(due) do
@@ -57,8 +57,8 @@ static TRANSFER: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local size = redis.call('LLEN', KEYS[1])
         for i = 0, size - 1 do
             local v = redis.call('LINDEX', KEYS[1], i)
@@ -73,8 +73,8 @@ static REMOVE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REMOVE_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = 0
         local s = redis.call('LLEN', KEYS[1])
         local i = 0
@@ -97,8 +97,8 @@ static REMOVE_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RETAIN_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RETAIN_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local changed = 0
         for _, v in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
             local randomId, value = struct.unpack('Bc0Lc0', v)
@@ -119,8 +119,8 @@ static RETAIN_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local size = redis.call('LLEN', KEYS[1])
         for i = 0, size - 1 do
             local v = redis.call('LINDEX', KEYS[1], i)
@@ -133,8 +133,8 @@ static CONTAINS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static CONTAINS_ALL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static CONTAINS_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local size = redis.call('LLEN', KEYS[1])
         for i = 0, size - 1 do
             local v = redis.call('LINDEX', KEYS[1], i)
@@ -149,8 +149,8 @@ static CONTAINS_ALL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static VALUES: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = {}
         for i, v in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
             local randomId, value = struct.unpack('Bc0Lc0', v)
@@ -160,8 +160,8 @@ static VALUES: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static PEEK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PEEK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('LINDEX', KEYS[1], 0)
         if v ~= false then
             local randomId, value = struct.unpack('Bc0Lc0', v)
@@ -171,8 +171,8 @@ static PEEK: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static POLL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static POLL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local result = {}
         for i = 1, tonumber(ARGV[1]), 1 do
             local v = redis.call('LPOP', KEYS[1])
@@ -187,8 +187,8 @@ static POLL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static POLL_LAST_AND_OFFER_FIRST_TO: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static POLL_LAST_AND_OFFER_FIRST_TO: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('RPOP', KEYS[1])
         if v ~= false then
             redis.call('ZREM', KEYS[2], v)
@@ -341,7 +341,7 @@ where
         let _: i64 = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &OFFER,
                 vec![
                     self.destination.redis_key(),
@@ -466,7 +466,7 @@ where
         let raw: std::vec::Vec<Bytes> = self
             .key
             .core
-            .eval_no_retry(&POLL, self.keys(), vec![Bytes::from(limit.to_string())])
+            .eval_once(&POLL, self.keys(), vec![Bytes::from(limit.to_string())])
             .await?;
         self.decode_all(raw)
     }
@@ -479,7 +479,7 @@ where
         let raw: Option<Bytes> = self
             .key
             .core
-            .eval_no_retry(
+            .eval_once(
                 &POLL_LAST_AND_OFFER_FIRST_TO,
                 vec![
                     self.key.redis_key(),

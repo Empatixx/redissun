@@ -5,11 +5,11 @@ use super::{
     LockGuard, Mode, Wait,
 };
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::Key;
 use crate::shield::shielded;
 use bytes::Bytes;
-use fred::types::scripts::Script;
-use fred::types::Value;
+use redis::Value;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -23,7 +23,7 @@ enum Outcome {
 
 fn outcome(mode: Mode, value: Value) -> Result<Outcome> {
     if mode == Mode::Fenced {
-        let reply: Vec<i64> = value.convert()?;
+        let reply: Vec<i64> = redis::FromRedisValue::from_redis_value(value)?;
         return match reply.as_slice() {
             [-1, token] => Ok(Outcome::Acquired(Some(*token as u64))),
             [ttl, ..] => Ok(Outcome::Busy(*ttl)),
@@ -32,7 +32,7 @@ fn outcome(mode: Mode, value: Value) -> Result<Outcome> {
             )),
         };
     }
-    let ttl: Option<i64> = value.convert()?;
+    let ttl: Option<i64> = redis::FromRedisValue::from_redis_value(value)?;
     Ok(ttl.map_or(Outcome::Acquired(None), Outcome::Busy))
 }
 
@@ -43,7 +43,7 @@ fn acquire_call(
     mode: Mode,
     wait: Wait,
     fair_wait: Duration,
-) -> Result<(&'static Script, Vec<String>, Vec<Bytes>)> {
+) -> Result<(&'static Lua, Vec<String>, Vec<Bytes>)> {
     let argument = lease_arg(lease)?;
     Ok(match mode {
         Mode::Exclusive => (

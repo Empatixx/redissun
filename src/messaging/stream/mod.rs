@@ -12,11 +12,11 @@ use crate::client::fred_adapter::{from_fred, to_fred};
 use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;
 use crate::reply::{array, bytes, int, malformed, number, text};
 use fred::interfaces::ClientLike;
-use fred::types::scripts::Script;
 use fred::types::{ClusterHash, CustomCommand};
 use redis::Value;
 use serde::de::DeserializeOwned;
@@ -27,8 +27,8 @@ use std::marker::PhantomData;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-static PENDING_RANGE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static PENDING_RANGE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local pending = redis.call('XPENDING', KEYS[1], unpack(ARGV))
         local result = {}
         for i = 1, #pending, 1 do

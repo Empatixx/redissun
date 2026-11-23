@@ -1,13 +1,13 @@
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
-use fred::types::scripts::Script;
 use std::fmt;
 use std::sync::LazyLock;
 
-static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static COMPARE_AND_SET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         if current == ARGV[1] or (tonumber(ARGV[1]) == 0 and current == false) then
             redis.call('SET', KEYS[1], ARGV[2])
@@ -17,8 +17,8 @@ static COMPARE_AND_SET: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static COMPARE_AND_DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         if current == false then
             return 0
@@ -42,16 +42,16 @@ pub(crate) static COMPARE_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static GET_AND_DELETE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static GET_AND_DELETE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         redis.call('DEL', KEYS[1])
         return current",
     )
 });
 
-pub(crate) static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static SET_IF_LESS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         current = current == false and 0 or tonumber(current)
         if current < tonumber(ARGV[1]) then
@@ -62,8 +62,8 @@ pub(crate) static SET_IF_LESS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static SET_IF_GREATER: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+pub(crate) static SET_IF_GREATER: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local current = redis.call('GET', KEYS[1])
         current = current == false and 0 or tonumber(current)
         if current > tonumber(ARGV[1]) then
@@ -128,7 +128,7 @@ impl AtomicI64 {
         Self { key }
     }
 
-    async fn flag(&self, script: &Script, args: Vec<Bytes>) -> Result<bool> {
+    async fn flag(&self, script: &Lua, args: Vec<Bytes>) -> Result<bool> {
         let done: i64 = self
             .key
             .core

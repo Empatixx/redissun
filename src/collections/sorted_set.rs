@@ -3,13 +3,13 @@ use crate::client::fred_adapter::from_fred;
 use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{block_seconds, HasKey, Key};
 use crate::pending::Pending;
 use crate::reply::{self, malformed};
 use bytes::Bytes;
 use fred::interfaces::SortedSetsInterface;
 use fred::types::scan::Scanner;
-use fred::types::scripts::Script;
 use fred::types::sorted_sets::{Ordering, ZCmp};
 use fred::types::SetOptions;
 use futures::{stream, Stream, StreamExt};
@@ -25,8 +25,8 @@ use std::time::Duration;
 
 const SCAN_PAGE: u32 = 100;
 
-static POLL: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static POLL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local v = redis.call('ZRANGE', KEYS[1], ARGV[1], ARGV[2], 'WITHSCORES')
         if #v > 0 then
             redis.call('ZREMRANGEBYRANK', KEYS[1], ARGV[1], ARGV[2])
@@ -35,22 +35,22 @@ static POLL: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static ADD_AND_RANK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static ADD_AND_RANK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
         return redis.call(ARGV[3], KEYS[1], ARGV[2])",
     )
 });
 
-static ADD_SCORE_AND_RANK: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static ADD_SCORE_AND_RANK: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "redis.call('ZINCRBY', KEYS[1], ARGV[1], ARGV[2])
         return redis.call(ARGV[3], KEYS[1], ARGV[2])",
     )
 });
 
-static REPLACE: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REPLACE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
         if score ~= false then
             redis.call('ZREM', KEYS[1], ARGV[1])
@@ -61,8 +61,8 @@ static REPLACE: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static REV_RANKS: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static REV_RANKS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local r = {}
         for i = 1, #ARGV, 1 do
             local rank = redis.call('ZREVRANK', KEYS[1], ARGV[i])
@@ -76,8 +76,8 @@ static REV_RANKS: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-static RETAIN: LazyLock<Script> = LazyLock::new(|| {
-    Script::from_lua(
+static RETAIN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
         "local keep = {}
         for i = 1, #ARGV, 1 do
             keep[ARGV[i]] = true
@@ -426,13 +426,7 @@ where
         .await
     }
 
-    async fn ranked_script<Q>(
-        &self,
-        script: &Script,
-        v: &Q,
-        score: f64,
-        rank: &str,
-    ) -> Result<usize>
+    async fn ranked_script<Q>(&self, script: &Lua, v: &Q, score: f64, rank: &str) -> Result<usize>
     where
         Q: Serialize + ?Sized + Sync,
     {
