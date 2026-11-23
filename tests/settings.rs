@@ -94,3 +94,32 @@ async fn batch_and_blocking_connections_get_the_client_name_too() {
     queue.push_back("done").await.unwrap();
     waiting.await.unwrap().unwrap();
 }
+
+/// Redisson sends `CLIENT SETNAME` on every connection it opens, so a connection opened again after it was killed has the name too.
+#[tokio::test]
+async fn the_client_name_is_set_again_after_a_reconnect() {
+    let name = unique("renamed").replace(':', "-");
+    let client = connect_with(|builder| {
+        builder
+            .pool_size(2)
+            .client_name(name.clone())
+            .reconnection_delay(DelayStrategy::Constant(Duration::from_millis(50)))
+    })
+    .await;
+    let bucket = client.bucket::<String>(unique("renamed"));
+    bucket.set("before").await.unwrap();
+    let before = named(&name).await;
+    assert_eq!(before.len(), 2);
+
+    for id in &before {
+        let killed = raw_command(&["CLIENT", "KILL", "ID", id.trim_start_matches("id=")]).await;
+        assert_eq!(killed, ":1\r\n");
+    }
+    for _ in 0..4 {
+        bucket.set("after").await.unwrap();
+    }
+
+    let after = named(&name).await;
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert!(after.iter().all(|id| !before.contains(id)));
+}

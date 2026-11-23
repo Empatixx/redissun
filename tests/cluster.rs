@@ -323,3 +323,46 @@ async fn scripts_and_functions_work_on_a_cluster() {
     }
     functions.delete("clusterlib").await.unwrap();
 }
+
+async fn masters(topology: &Topology) -> std::vec::Vec<u16> {
+    let mut masters = std::vec::Vec::new();
+    for port in topology.ports() {
+        if topology.cli(port, &["ROLE"]).await.starts_with("master") {
+            masters.push(port);
+        }
+    }
+    masters
+}
+
+/// Redisson: `clientName` names every connection, on every master of a cluster too.
+#[tokio::test]
+async fn every_cluster_node_connection_gets_the_client_name() {
+    let topology = Topology::cluster().await;
+    let name = unique("cluster-name").replace(':', "-");
+    let client = Client::builder()
+        .url(topology.cluster_url())
+        .pool_size(2)
+        .client_name(name.clone())
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    client
+        .bucket::<String>(unique("named"))
+        .set("v")
+        .await
+        .unwrap();
+
+    let masters = masters(&topology).await;
+    assert_eq!(masters.len(), 3);
+    for port in masters {
+        let list = topology.cli(port, &["CLIENT", "LIST"]).await;
+        let named = list
+            .lines()
+            .filter(|line| line.contains(&format!(" name={name} ")))
+            .count();
+        assert!(
+            named >= 2,
+            "master {port} has {named} connections named {name}"
+        );
+    }
+}

@@ -175,6 +175,38 @@ async fn open_connections_log_in_again_after_the_refresh_interval() {
     second.delete().await;
 }
 
+/// Redisson: `CredentialsResolver.resolve(InetSocketAddress)`, asked with the address of each node it connects to.
+#[tokio::test]
+async fn the_resolver_is_asked_for_every_cluster_node() {
+    let topology = common::topology::Topology::cluster().await;
+    let asked = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let client = {
+        let asked = asked.clone();
+        Client::builder()
+            .url(topology.cluster_url())
+            .credentials_resolver(move |address| {
+                asked.lock().unwrap().insert(address);
+                async { Ok(Credentials::default()) }
+            })
+            .build()
+            .await
+            .expect("could not connect to the cluster")
+    };
+    works(&client).await;
+
+    let asked = asked.lock().unwrap().clone();
+    for port in topology.ports() {
+        if topology.cli(port, &["ROLE"]).await.starts_with("master") {
+            assert!(
+                asked
+                    .iter()
+                    .any(|address| address.ends_with(&format!(":{port}"))),
+                "master {port} was not asked for, only {asked:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_resolver_error_fails_the_connection() {
     let attempt = Client::builder()

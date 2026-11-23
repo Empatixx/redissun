@@ -209,9 +209,13 @@ impl Node {
     ) -> std::result::Result<(MultiplexedConnection, i64, tokio::task::JoinHandle<()>), Failure>
     {
         let settings = &self.settings;
-        let stream = connect(&self.address, &settings.stream)
-            .await
-            .map_err(|error| Failure::Unsent(error.to_string()))?;
+        let stream =
+            connect(&self.address, &settings.stream)
+                .await
+                .map_err(|error| match error {
+                    Error::Redis(message) => Failure::Unsent(message),
+                    other => Failure::Unsent(other.to_string()),
+                })?;
         let credentials = match &settings.credentials {
             NodeCredentials::None => Credentials::default(),
             NodeCredentials::Fixed(credentials) => credentials.clone(),

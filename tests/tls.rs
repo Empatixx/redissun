@@ -149,7 +149,31 @@ async fn strict_verification_checks_the_host_name() {
         .tls_client_auth_pem(servers.client.cert.clone(), servers.client.key.clone())
         .build()
         .await;
-    rejected(attempt, "NotValidForName");
+    rejected(attempt, "not valid for name");
+}
+
+/// Redisson: `SslVerificationMode.CA_ONLY` checks the issuer but not the host name. The server's certificate names `redis.test`, not `127.0.0.1`.
+#[tokio::test]
+async fn ca_only_verification_skips_the_host_name() {
+    let servers = servers().await;
+    let client = connect(
+        builder(servers.mutual.url())
+            .tls_ca_pem(servers.authority.pem.clone())
+            .tls_verification(TlsVerification::CaOnly)
+            .tls_client_auth_pem(servers.client.cert.clone(), servers.client.key.clone()),
+    )
+    .await
+    .unwrap();
+    works(&client).await;
+
+    let other = Authority::new("another CA");
+    let attempt = builder(servers.mutual.url())
+        .tls_ca_pem(other.pem.clone())
+        .tls_verification(TlsVerification::CaOnly)
+        .tls_client_auth_pem(servers.client.cert.clone(), servers.client.key.clone())
+        .build()
+        .await;
+    rejected(attempt, "UnknownIssuer");
 }
 
 #[tokio::test]
