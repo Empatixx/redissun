@@ -159,14 +159,7 @@ impl Core {
 
     pub(crate) async fn pubsub(&self) -> Result<&Arc<PubSub>> {
         self.pubsub
-            .get_or_try_init(|| async {
-                let pubsub = PubSub::start(self.own_connection()?).await?;
-                if let Err(error) = self.keep_named(pubsub.client()).await {
-                    pubsub.quit().await;
-                    return Err(error);
-                }
-                Ok(pubsub)
-            })
+            .get_or_try_init(|| async { PubSub::start(self.topology.clone()).await })
             .await
     }
 
@@ -355,11 +348,19 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
         } else {
             strong.retry.timeout
         };
-        let mut clients: Vec<RedisClient> = strong.pool.clients().to_vec();
+        let clients: Vec<RedisClient> = strong.pool.clients().to_vec();
+        let mut nodes = strong.topology.nodes();
         if let Some(pubsub) = strong.pubsub_started() {
-            clients.push(pubsub.client().clone());
+            nodes.push(pubsub.node().await);
         }
         drop(strong);
+        // A node whose PING gets no reply in time is closed; the next command opens a new connection.
+        for node in nodes {
+            let answered = tokio::time::timeout(wait, node.send(&redis::cmd("PING"))).await;
+            if !matches!(answered, Ok(Ok(_))) {
+                node.reset().await;
+            }
+        }
         for client in clients {
             if !client.is_connected() {
                 continue;

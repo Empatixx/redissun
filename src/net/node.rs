@@ -33,6 +33,15 @@ pub(crate) struct NodeSettings {
     pub(crate) reconnection_delay: DelayStrategy,
 }
 
+/// A subscribe-like command of a pub/sub connection.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Subscription {
+    Subscribe,
+    Psubscribe,
+    Unsubscribe,
+    Punsubscribe,
+}
+
 /// Why a command did not get its reply.
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -103,6 +112,8 @@ struct Live {
     connection: MultiplexedConnection,
     id: i64,
     generation: u64,
+    /// The task that reads the connection; it ends when the connection ends, so the next command opens a new one instead of failing on it.
+    driver: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -142,7 +153,10 @@ impl Node {
     async fn live(&self) -> std::result::Result<(MultiplexedConnection, u64), Failure> {
         let mut state = self.state.lock().await;
         if let Some(live) = &state.live {
-            return Ok((live.connection.clone(), live.generation));
+            if !live.driver.is_finished() {
+                return Ok((live.connection.clone(), live.generation));
+            }
+            state.live = None;
         }
         if let Some(failed_at) = state.failed_at {
             let pause = self
@@ -156,7 +170,7 @@ impl Node {
             }
         }
         match self.open().await {
-            Ok((connection, id)) => {
+            Ok((connection, id, driver)) => {
                 state.generation += 1;
                 state.failures = 0;
                 state.failed_at = None;
@@ -165,6 +179,7 @@ impl Node {
                     connection: connection.clone(),
                     id,
                     generation,
+                    driver,
                 });
                 Ok((connection, generation))
             }
@@ -176,7 +191,10 @@ impl Node {
         }
     }
 
-    async fn open(&self) -> std::result::Result<(MultiplexedConnection, i64), Failure> {
+    async fn open(
+        &self,
+    ) -> std::result::Result<(MultiplexedConnection, i64, tokio::task::JoinHandle<()>), Failure>
+    {
         let settings = &self.settings;
         let stream = connect(&self.address, &settings.stream)
             .await
@@ -210,7 +228,7 @@ impl Node {
             MultiplexedConnection::new_with_config(&info, stream, config)
                 .await
                 .map_err(failure)?;
-        tokio::spawn(driver);
+        let driver = tokio::spawn(driver);
         if let Some(name) = &settings.client_name {
             let mut cmd = redis::cmd("CLIENT");
             cmd.arg("SETNAME").arg(name);
@@ -229,7 +247,7 @@ impl Node {
             redis::Value::Int(id) => id,
             _ => 0,
         };
-        Ok((connection, id))
+        Ok((connection, id, driver))
     }
 
     /// Forgets the connection of `generation` after it failed, so the next command opens a new one.
@@ -284,6 +302,29 @@ impl Node {
                 Err(failure)
             }
         }
+    }
+
+    /// Sends `SUBSCRIBE`, `PSUBSCRIBE`, `UNSUBSCRIBE` or `PUNSUBSCRIBE` for `names` on a RESP3 connection, whose confirmations arrive as push messages.
+    pub(crate) async fn subscription(
+        &self,
+        command: Subscription,
+        names: &[String],
+    ) -> std::result::Result<(), Failure> {
+        let (mut connection, generation) = self.live().await?;
+        let sent = match command {
+            Subscription::Subscribe => connection.subscribe(names).await,
+            Subscription::Psubscribe => connection.psubscribe(names).await,
+            Subscription::Unsubscribe => connection.unsubscribe(names).await,
+            Subscription::Punsubscribe => connection.punsubscribe(names).await,
+        };
+        if let Err(error) = sent {
+            let failure = failure(error);
+            if is_connection_failure(&failure) {
+                self.broken(generation).await;
+            }
+            return Err(failure);
+        }
+        Ok(())
     }
 
     /// The `CLIENT ID` of the live connection, `None` while there is none.
@@ -439,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_command_on_a_killed_connection_is_a_connection_failure() {
+    async fn a_connection_the_server_closed_is_replaced_before_the_next_command() {
         let (_container, address) = redis().await;
         let node = Node::new(
             address.clone(),
@@ -457,9 +498,9 @@ mod tests {
             ))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let failure = node.send(&command("PING", &[])).await.unwrap_err();
-        assert!(super::is_connection_failure(&failure), "{failure:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // A command that may be sent only once must not land on the closed connection.
+        node.send(&command("PING", &[])).await.unwrap();
     }
 
     #[tokio::test]
