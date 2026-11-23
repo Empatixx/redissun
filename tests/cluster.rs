@@ -235,7 +235,14 @@ async fn queues_and_topics_work_on_a_cluster() {
 async fn lock_and_data_survive_a_cluster_master_failover() {
     let topology = Topology::cluster().await;
     let holder_client = connect(&topology).await;
-    let waiter_client = connect(&topology).await;
+    // Taking a lock is sent once, as in Redisson, so a client that must ride out a failover needs a timeout longer than the failover: here at least the 2 s node timeout plus the election.
+    let waiter_client = Client::builder()
+        .url(topology.cluster_url())
+        .lock_lease(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .await
+        .expect("could not connect to the cluster");
     let name = unique("lock");
     let bucket_name = format!("{{{name}}}:bucket");
     let bucket = holder_client.bucket::<String>(bucket_name.clone());
@@ -243,8 +250,7 @@ async fn lock_and_data_survive_a_cluster_master_failover() {
 
     let holder = holder_client.lock(name.clone()).lock().await.unwrap();
     let master = topology.cluster_master_of(&name).await;
-    topology.cli(master, &["WAIT", "1", "2000"]).await;
-    sleep(Duration::from_millis(500)).await;
+    topology.wait_until_replicated(master).await;
 
     let waiter_lock = waiter_client.lock(name.clone());
     let waiter = tokio::spawn(async move { waiter_lock.lock().await });
