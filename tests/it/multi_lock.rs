@@ -150,8 +150,9 @@ async fn guards_keep_the_order_the_locks_were_given_in() {
     guard.unlock().await.unwrap();
 }
 
+// Redisson: testLockUnlock
 #[tokio::test]
-async fn test_lock_unlock() {
+async fn is_held_by_current_is_true_until_the_leased_guard_unlocks() {
     let client = client().await;
     let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
     let multi = client.multi_lock(locks(&client, &[&a, &b, &c])).unwrap();
@@ -162,8 +163,9 @@ async fn test_lock_unlock() {
     assert!(!multi.is_held_by_current().await.unwrap());
 }
 
+// Redisson: testWaitAndLeaseTimeouts
 #[tokio::test]
-async fn test_wait_and_lease_timeouts() {
+async fn only_one_of_ten_zero_timeout_attempts_takes_the_locks() {
     let client = client().await;
     let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
     let counter = Arc::new(AtomicU32::new(0));
@@ -190,8 +192,9 @@ async fn test_wait_and_lease_timeouts() {
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
+// Redisson: testMultiThreads
 #[tokio::test]
-async fn test_multi_threads() {
+async fn a_second_multi_lock_waits_until_the_holder_unlocks() {
     let client = client().await;
     let (a, b, c) = (unique("lock1"), unique("lock2"), unique("lock3"));
     let holder = client.multi_lock(locks(&client, &[&a, &b, &c])).unwrap();
@@ -211,7 +214,7 @@ async fn test_multi_threads() {
 }
 
 #[tokio::test]
-async fn test() {
+async fn try_lock_fails_while_locks_from_three_clients_are_held() {
     let first = client().await;
     let second = client().await;
     let third = client().await;

@@ -839,8 +839,9 @@ async fn clear_keeps_the_size_limit_and_del_removes_it() {
     assert_eq!(raw_command(&["EXISTS", &options]).await.trim(), ":0");
 }
 
+// Redisson: testFastPutExpiration
 #[tokio::test]
-async fn test_fast_put_expiration() {
+async fn an_insert_after_expiry_stores_the_new_value() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("testFastPutExpiration"));
@@ -854,8 +855,9 @@ async fn test_fast_put_expiration() {
     assert_eq!(cache.get("k1").await.unwrap(), Some("v2".to_string()));
 }
 
+// Redisson: testRemoveListener
 #[tokio::test]
-async fn test_remove_listener() {
+async fn a_size_eviction_sends_a_removed_event() {
     let cache = client().await.hash_map_cache::<i64, String>(unique("test"));
     cache.try_set_max_size(5, EvictionMode::Lru).await.unwrap();
     let mut removed = cache.events_of(&[EventKind::Removed]).await.unwrap();
@@ -866,8 +868,9 @@ async fn test_remove_listener() {
     assert!(matches!(next(&mut removed).await, Event::Removed { .. }));
 }
 
+// Redisson: testRemainTimeToLive
 #[tokio::test]
-async fn test_remain_time_to_live() {
+async fn entry_ttl_reports_the_remaining_ttl_capped_by_max_idle() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("test"));
@@ -890,8 +893,9 @@ async fn test_remain_time_to_live() {
     assert!(cache.entry_ttl("5").await.unwrap().unwrap() <= Duration::from_secs(10));
 }
 
+// Redisson: testFastPutTtl
 #[tokio::test]
-async fn test_fast_put_ttl() {
+async fn an_entry_with_a_ttl_expires_in_a_size_limited_cache() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("getAll"));
@@ -912,8 +916,9 @@ async fn test_fast_put_ttl() {
     assert_eq!(cache.get("1").await.unwrap(), None);
 }
 
+// Redisson: testExpirationWithMaxSize
 #[tokio::test]
-async fn test_expiration_with_max_size() {
+async fn the_eviction_task_removes_expired_entries_and_their_access_set() {
     let client =
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(200))).await;
     let name = unique("test");
@@ -949,8 +954,9 @@ async fn test_expiration_with_max_size() {
     assert_eq!(raw_command(&["EXISTS", &options]).await.trim(), ":1");
 }
 
+// Redisson: testMaxSizeLfu
 #[tokio::test]
-async fn test_max_size_lfu() {
+async fn lfu_evicts_the_least_read_entry_when_full() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("test"));
@@ -973,8 +979,9 @@ async fn test_max_size_lfu() {
     assert_eq!(cache.get("2").await.unwrap(), None);
 }
 
+// Redisson: testMaxSize
 #[tokio::test]
-async fn test_max_size() {
+async fn the_size_limit_keeps_the_most_recent_entries_for_every_insert_kind() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("test"));
@@ -1055,8 +1062,9 @@ async fn test_max_size() {
     assert_eq!(keys(&cache).await, names(30..=35));
 }
 
+// Redisson: testCacheValues
 #[tokio::test]
-async fn test_cache_values() {
+async fn values_returns_an_entry_stored_with_max_idle() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("testRMapCacheValues"));
@@ -1069,8 +1077,9 @@ async fn test_cache_values() {
     assert_eq!(values, ["5678"]);
 }
 
+// Redisson: testExpiredIterator
 #[tokio::test]
-async fn test_expired_iterator() {
+async fn keys_skip_entries_whose_ttl_has_passed() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1103,8 +1112,9 @@ async fn test_expired_iterator() {
     );
 }
 
+// Redisson: testExpire
 #[tokio::test]
-async fn test_expire() {
+async fn expire_on_the_cache_removes_all_entries() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1118,8 +1128,9 @@ async fn test_expire() {
     assert_eq!(cache.len().await.unwrap(), 0);
 }
 
+// Redisson: testClearExpire
 #[tokio::test]
-async fn test_clear_expire() {
+async fn persist_cancels_an_earlier_expire_of_the_cache() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1134,8 +1145,9 @@ async fn test_clear_expire() {
     assert_eq!(cache.len().await.unwrap(), 1);
 }
 
+// Redisson: testEntrySet
 #[tokio::test]
-async fn test_entry_set() {
+async fn iter_returns_entries_with_and_without_ttl() {
     let cache = client()
         .await
         .hash_map_cache::<i32, String>(unique("simple12"));
@@ -1152,8 +1164,9 @@ async fn test_entry_set() {
     assert_eq!(cache.len().await.unwrap(), 3);
 }
 
+// Redisson: testKeySet
 #[tokio::test]
-async fn test_key_set() {
+async fn keys_drop_an_entry_once_its_ttl_passes() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple03"));
@@ -1173,8 +1186,9 @@ async fn test_key_set() {
     assert!(found.contains("1"));
 }
 
+// Redisson: testValues
 #[tokio::test]
-async fn test_values() {
+async fn values_drop_an_entry_once_its_ttl_passes() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple05"));
@@ -1194,8 +1208,9 @@ async fn test_values() {
     assert!(found.contains("2"));
 }
 
+// Redisson: testContainsKeyTtl
 #[tokio::test]
-async fn test_contains_key_ttl() {
+async fn contains_key_is_false_once_the_ttl_passes() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple30"));
@@ -1210,8 +1225,9 @@ async fn test_contains_key_ttl() {
     assert!(!cache.contains_key("33").await.unwrap());
 }
 
+// Redisson: testScheduler
 #[tokio::test]
-async fn test_scheduler() {
+async fn the_eviction_task_removes_entries_expired_by_ttl_or_idle_time() {
     let client =
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(500))).await;
     let cache = client.hash_map_cache::<String, String>(unique("simple3"));
@@ -1241,8 +1257,9 @@ async fn test_scheduler() {
     .await;
 }
 
+// Redisson: testPutGetTtl
 #[tokio::test]
-async fn test_put_get_ttl() {
+async fn get_returns_an_entry_until_its_ttl_passes() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple04"));
@@ -1261,8 +1278,9 @@ async fn test_put_get_ttl() {
     assert_eq!(cache.get("33").await.unwrap(), None);
 }
 
+// Redisson: testPutIfAbsentTtl
 #[tokio::test]
-async fn test_put_if_absent_ttl() {
+async fn insert_nx_with_a_ttl_inserts_only_over_missing_or_expired_keys() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1295,8 +1313,9 @@ async fn test_put_if_absent_ttl() {
     assert_eq!(cache.get("2").await.unwrap().as_deref(), Some("4"));
 }
 
+// Redisson: testPutIfAbsentTtlKeepsFirstValue
 #[tokio::test]
-async fn test_put_if_absent_ttl_keeps_first_value() {
+async fn insert_nx_with_a_ttl_keeps_the_first_value_and_its_ttl() {
     let client =
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(200))).await;
     let cache =
@@ -1311,8 +1330,9 @@ async fn test_put_if_absent_ttl_keeps_first_value() {
     assert!(left >= Duration::from_secs(290) && left <= ttl);
 }
 
+// Redisson: testFastPutIfAbsentTtl
 #[tokio::test]
-async fn test_fast_put_if_absent_ttl() {
+async fn insert_nx_succeeds_once_the_existing_entry_expired() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1332,8 +1352,9 @@ async fn test_fast_put_if_absent_ttl() {
     assert_eq!(cache.get("3").await.unwrap().as_deref(), Some("32"));
 }
 
+// Redisson: testCreatedListener
 #[tokio::test]
-async fn test_created_listener() {
+async fn created_events_arrive_for_every_kind_of_new_insert() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
     let mut created = cache.events_of(&[EventKind::Created]).await.unwrap();
     let ttl = Duration::from_secs(2);
@@ -1360,8 +1381,9 @@ async fn test_created_listener() {
     nothing_arrives(&mut created).await;
 }
 
+// Redisson: testUpdatedListener
 #[tokio::test]
-async fn test_updated_listener() {
+async fn updated_events_carry_the_new_and_previous_value() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
     let mut updated = cache.events_of(&[EventKind::Updated]).await.unwrap();
     cache.insert(&1, &1).await.unwrap();
@@ -1391,8 +1413,9 @@ async fn test_updated_listener() {
     nothing_arrives(&mut updated).await;
 }
 
+// Redisson: testExpiredListener
 #[tokio::test]
-async fn test_expired_listener() {
+async fn expired_events_arrive_for_entries_whose_ttl_passed() {
     let client =
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(200))).await;
     let cache = client.hash_map_cache::<i32, i32>(unique("simple"));
@@ -1410,8 +1433,9 @@ async fn test_expired_listener() {
     );
 }
 
+// Redisson: testEntryUpdate
 #[tokio::test]
-async fn test_entry_update() {
+async fn reinserting_an_expired_entry_returns_none_and_stores_it_again() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
     cache
         .insert(&1, &1)
@@ -1427,8 +1451,9 @@ async fn test_entry_update() {
     assert_eq!(cache.get(&1).await.unwrap(), Some(1));
 }
 
+// Redisson: testRemovedListener
 #[tokio::test]
-async fn test_removed_listener() {
+async fn remove_sends_a_removed_event_with_the_old_value() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
     let mut removed = cache.events_of(&[EventKind::Removed]).await.unwrap();
     cache.insert(&10, &1).await.unwrap();
@@ -1453,8 +1478,9 @@ async fn check_idle_expiration(cache: &Cache<String, i32>) {
     assert_eq!(cache.get("15").await.unwrap(), None);
 }
 
+// Redisson: testIdle
 #[tokio::test]
-async fn test_idle() {
+async fn entries_expire_after_their_own_max_idle_time() {
     let client = client().await;
     let cache = client.hash_map_cache::<String, i32>(unique("simple"));
     cache
@@ -1506,8 +1532,9 @@ async fn check_ttl_expiration(cache: &Cache<String, i32>, started: Instant) {
     assert_eq!(cache.get("15").await.unwrap(), None);
 }
 
+// Redisson: testTtl
 #[tokio::test]
-async fn test_ttl() {
+async fn entries_expire_after_their_own_ttl() {
     let client = client().await;
     let ttl = |i: u64| Duration::from_millis(600 * i);
     let cache = client.hash_map_cache::<String, i32>(unique("simple"));
@@ -1525,8 +1552,9 @@ async fn test_ttl() {
     check_ttl_expiration(&cache, started).await;
 }
 
+// Redisson: testExpireOverwrite
 #[tokio::test]
-async fn test_expire_overwrite() {
+async fn reinserting_with_a_ttl_restarts_the_time_limit() {
     let cache = client()
         .await
         .hash_map_cache::<String, i32>(unique("simple"));
@@ -1540,8 +1568,9 @@ async fn test_expire_overwrite() {
     assert!(!cache.contains_key("123").await.unwrap());
 }
 
+// Redisson: testRMapCacheValues
 #[tokio::test]
-async fn test_r_map_cache_values() {
+async fn values_returns_an_entry_stored_with_ttl_and_max_idle() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("testRMapCacheValues"));
@@ -1555,8 +1584,9 @@ async fn test_r_map_cache_values() {
     assert_eq!(values, ["5678"]);
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn len_counts_distinct_keys_across_overwrites_and_removes() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1576,8 +1606,9 @@ async fn test_size() {
     assert_eq!(cache.len().await.unwrap(), 3);
 }
 
+// Redisson: testContainsKey
 #[tokio::test]
-async fn test_contains_key() {
+async fn contains_key_is_true_only_for_stored_keys() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1588,8 +1619,9 @@ async fn test_contains_key() {
     assert!(!cache.contains_key("34").await.unwrap());
 }
 
+// Redisson: testPutGet
 #[tokio::test]
-async fn test_put_get() {
+async fn get_returns_the_value_stored_for_a_key() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1600,8 +1632,9 @@ async fn test_put_get() {
     assert_eq!(cache.get("5").await.unwrap().as_deref(), Some("6"));
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn remove_returns_the_old_value_or_none_for_a_missing_key() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
     cache.insert(&1, &3).await.unwrap();
     cache.insert(&3, &5).await.unwrap();
@@ -1612,8 +1645,9 @@ async fn test_remove() {
     assert_eq!(cache.remove(&7).await.unwrap(), Some(8));
 }
 
+// Redisson: testFastPutIfAbsent
 #[tokio::test]
-async fn test_fast_put_if_absent() {
+async fn insert_nx_keeps_an_existing_value_and_adds_a_new_key() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
@@ -1624,8 +1658,9 @@ async fn test_fast_put_if_absent() {
     assert_eq!(cache.get("2").await.unwrap().as_deref(), Some("4"));
 }
 
+// Redisson: testIterator
 #[tokio::test]
-async fn test_iterator() {
+async fn keys_values_and_iter_return_all_thousand_entries() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("123"));
     for i in 0..1000 {
         cache.insert(&i, &i).await.unwrap();

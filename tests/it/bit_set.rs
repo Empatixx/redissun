@@ -62,16 +62,18 @@ async fn object_methods_apply_to_the_key() {
     assert!(!bits.get(1).await.unwrap());
 }
 
+// Redisson: testUnsigned
 #[tokio::test]
-async fn test_unsigned() {
+async fn an_unsigned_field_can_be_set_incremented_and_read() {
     let bs = client().await.bit_set(unique("testUnsigned"));
     assert_eq!(bs.set_unsigned(8, 1, 120).await.unwrap(), 0);
     assert_eq!(bs.increment_and_get_unsigned(8, 1, 1).await.unwrap(), 121);
     assert_eq!(bs.get_unsigned(8, 1).await.unwrap(), 121);
 }
 
+// Redisson: testSigned
 #[tokio::test]
-async fn test_signed() {
+async fn a_negative_signed_field_can_be_set_incremented_and_read() {
     let bs = client().await.bit_set(unique("testSigned"));
     assert_eq!(bs.set_signed(8, 1, -120).await.unwrap(), 0);
     assert_eq!(bs.increment_and_get_signed(8, 1, 1).await.unwrap(), -119);
@@ -89,8 +91,9 @@ async fn bitfield_sizes_are_checked() {
     assert!(matches!(bs.get_signed(0, 0).await, Err(Error::Config(_))));
 }
 
+// Redisson: testIncrement
 #[tokio::test]
-async fn test_increment() {
+async fn increment_and_get_signed_adds_to_the_stored_field() {
     let bs2 = client().await.bit_set(unique("testbitset1"));
     assert_eq!(bs2.set_signed(8, 2, 12).await.unwrap(), 0);
     assert_eq!(bs2.get_signed(8, 2).await.unwrap(), 12);
@@ -98,8 +101,9 @@ async fn test_increment() {
     assert_eq!(bs2.get_signed(8, 2).await.unwrap(), 24);
 }
 
+// Redisson: testSetGetNumber
 #[tokio::test]
-async fn test_set_get_number() {
+async fn signed_fields_of_8_to_64_bits_round_trip() {
     let client = client().await;
     let bs = client.bit_set(unique("testbitset"));
     assert_eq!(bs.set_signed(64, 2, 12).await.unwrap(), 0);
@@ -118,8 +122,9 @@ async fn test_set_get_number() {
     assert_eq!(bs4.get_signed(32, 2).await.unwrap(), 323241);
 }
 
+// Redisson: testIndexRange
 #[tokio::test]
-async fn test_index_range() {
+async fn a_bit_at_twice_i32_max_can_be_set_and_read() {
     let bs = client().await.bit_set(unique("testbitset"));
     let top_index = i32::MAX as u64 * 2;
     assert!(!bs.get(top_index).await.unwrap());
@@ -128,8 +133,9 @@ async fn test_index_range() {
     bs.del().await.unwrap();
 }
 
+// Redisson: testLength
 #[tokio::test]
-async fn test_length() {
+async fn length_is_the_highest_set_bit_plus_one_after_clearing_bits() {
     let bs = client().await.bit_set(unique("testbitset"));
     bs.set_range(0..5, true).await.unwrap();
     bs.set_range(0..1, false).await.unwrap();
@@ -168,16 +174,18 @@ async fn test_length() {
     assert_eq!(bs.length().await.unwrap(), 8);
 }
 
+// Redisson: testClear
 #[tokio::test]
-async fn test_clear() {
+async fn set_range_to_false_clears_the_leading_bits() {
     let bs = client().await.bit_set(unique("testbitset"));
     bs.set_range(0..8, true).await.unwrap();
     bs.set_range(0..3, false).await.unwrap();
     assert_eq!(bs.ones().await.unwrap(), [3, 4, 5, 6, 7]);
 }
 
+// Redisson: testNot
 #[tokio::test]
-async fn test_not() {
+async fn not_inverts_every_bit_of_the_stored_bytes() {
     let bs = client().await.bit_set(unique("testbitset"));
     bs.set(3, true).await.unwrap();
     bs.set(5, true).await.unwrap();
@@ -185,8 +193,9 @@ async fn test_not() {
     assert_eq!(bs.ones().await.unwrap(), [0, 1, 2, 4, 6, 7]);
 }
 
+// Redisson: testSet
 #[tokio::test]
-async fn test_set() {
+async fn set_replace_and_set_many_change_the_set_bits() {
     let client = client().await;
     let name = unique("testbitset");
     let bs = client.bit_set(name.clone());
@@ -206,8 +215,9 @@ async fn test_set() {
     assert_eq!(bs2.ones().await.unwrap(), [1, 7]);
 }
 
+// Redisson: testSetGet
 #[tokio::test]
-async fn test_set_get() {
+async fn set_bits_are_read_back_and_counted() {
     let bitset = client().await.bit_set(unique("testbitset"));
     assert_eq!(bitset.count().await.unwrap(), 0);
     assert_eq!(bitset.size().await.unwrap(), 0);
@@ -221,16 +231,18 @@ async fn test_set_get() {
     assert_eq!(bitset.size().await.unwrap(), 32);
 }
 
+// Redisson: testSetRange
 #[tokio::test]
-async fn test_set_range() {
+async fn set_range_sets_every_bit_in_the_half_open_range() {
     let bs = client().await.bit_set(unique("testbitset"));
     bs.set_range(3..10, true).await.unwrap();
     assert_eq!(bs.count().await.unwrap(), 7);
     assert_eq!(bs.size().await.unwrap(), 16);
 }
 
+// Redisson: testAsBitSet
 #[tokio::test]
-async fn test_as_bit_set() {
+async fn ones_and_to_bytes_reflect_the_set_bits() {
     let client = client().await;
     let bs = client.bit_set(unique("testbitset"));
     bs.set(3, true).await.unwrap();
@@ -246,8 +258,9 @@ async fn test_as_bit_set() {
     assert!(empty.to_bytes().await.unwrap().is_empty());
 }
 
+// Redisson: testAnd
 #[tokio::test]
-async fn test_and() {
+async fn and_keeps_only_the_bits_set_in_both_sets() {
     let client = client().await;
     let tag = unique("bits");
     let bs1 = client.bit_set(format!("{{{tag}}}:testbitset1"));
@@ -284,8 +297,9 @@ async fn or_and_xor_combine_into_this_set() {
     assert_eq!(bs1.ones().await.unwrap(), [1]);
 }
 
+// Redisson: testGetWithIndexes
 #[tokio::test]
-async fn test_get_with_indexes() {
+async fn get_many_reads_the_bit_at_each_index() {
     let bitset = client().await.bit_set(unique("testbitset"));
     bitset.set_range(4..10, true).await.unwrap();
     assert_eq!(

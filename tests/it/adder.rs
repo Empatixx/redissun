@@ -37,31 +37,31 @@ async fn reset_once() {
 }
 
 #[tokio::test]
-async fn sum() {
+async fn sum_adds_up_the_counts_of_every_adder() {
     sum_once().await;
 }
 
 #[tokio::test]
-async fn reset() {
+async fn reset_on_one_adder_zeroes_the_sum_of_every_adder() {
     reset_once().await;
 }
 
 #[tokio::test]
-async fn sum_stability() {
+async fn sum_stays_correct_over_a_hundred_rounds() {
     for _ in 0..100 {
         sum_once().await;
     }
 }
 
 #[tokio::test]
-async fn reset_stability() {
+async fn reset_stays_correct_over_a_hundred_rounds() {
     for _ in 0..100 {
         reset_once().await;
     }
 }
 
 #[tokio::test]
-async fn f64_sum() {
+async fn an_f64_sum_adds_up_fractional_counts_of_every_adder() {
     let adders = three::<f64>().await;
     adders[0].add(2.38);
     adders[1].add(4.14);
@@ -73,7 +73,7 @@ async fn f64_sum() {
 }
 
 #[tokio::test]
-async fn f64_reset() {
+async fn reset_zeroes_the_f64_sum_of_every_adder() {
     let adders = three::<f64>().await;
     adders[0].add(2.0);
     adders[1].add(4.0);
