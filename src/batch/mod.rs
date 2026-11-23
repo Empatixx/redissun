@@ -182,7 +182,6 @@ impl<C: Codec> Batch<C> {
             let _ = stored.send(Command::Op(op.clone()));
         }
         let complete: Complete = Box::new(move |reply| {
-            // The engine still runs on fred; its replies are read as redis-rs values.
             let _ = sender.send(reply.and_then(|value| decode(&value)));
         });
         let mut ops = self.ops.lock().unwrap_or_else(|e| e.into_inner());

@@ -2,146 +2,146 @@
   {
     "library": "redissun",
     "operation": "Bucket set",
-    "p50_us": 75.917,
-    "p99_us": 136.834,
-    "ops_per_second": 443959.2297118505,
-    "runs": 3
+    "p50_us": 71.95899999999999,
+    "p99_us": 101.666,
+    "ops_per_second": 431499.5682079452,
+    "runs": 5
   },
   {
     "library": "redissun",
     "operation": "Bucket get",
-    "p50_us": 74.458,
-    "p99_us": 118.083,
-    "ops_per_second": 477503.1012302745,
-    "runs": 3
+    "p50_us": 71.417,
+    "p99_us": 100.541,
+    "ops_per_second": 475998.095750295,
+    "runs": 5
   },
   {
     "library": "redissun",
     "operation": "HashMap insert",
-    "p50_us": 76.542,
-    "p99_us": 117.167,
-    "ops_per_second": 268090.3597207356,
-    "runs": 3
+    "p50_us": 78.209,
+    "p99_us": 184.625,
+    "ops_per_second": 260452.1867649993,
+    "runs": 5
   },
   {
     "library": "redissun",
     "operation": "HashMap get",
-    "p50_us": 73.291,
-    "p99_us": 102.791,
-    "ops_per_second": 441265.68646289856,
-    "runs": 3
+    "p50_us": 71.29199999999999,
+    "p99_us": 108.708,
+    "ops_per_second": 451177.6400449724,
+    "runs": 5
   },
   {
     "library": "redissun",
     "operation": "Lock and unlock",
-    "p50_us": 176.58300000000003,
-    "p99_us": 274.91700000000003,
-    "ops_per_second": 88160.58516026738,
-    "runs": 3
+    "p50_us": 170.208,
+    "p99_us": 244.83399999999997,
+    "ops_per_second": 90211.7150619931,
+    "runs": 5
   },
   {
     "library": "redissun",
     "operation": "Batch of 100 sets",
-    "p50_us": 302.541,
-    "p99_us": 547.083,
+    "p50_us": 158.959,
+    "p99_us": 200.583,
     "ops_per_second": null,
-    "runs": 3
+    "runs": 5
   },
   {
     "library": "redis-rs",
     "operation": "Bucket set",
-    "p50_us": 76.0,
-    "p99_us": 150.75,
-    "ops_per_second": 496280.66306721757,
-    "runs": 3
+    "p50_us": 71.875,
+    "p99_us": 109.417,
+    "ops_per_second": 507230.176550554,
+    "runs": 5
   },
   {
     "library": "redis-rs",
     "operation": "Bucket get",
-    "p50_us": 73.292,
-    "p99_us": 136.417,
-    "ops_per_second": 496453.61053084326,
-    "runs": 3
+    "p50_us": 73.75,
+    "p99_us": 104.875,
+    "ops_per_second": 506589.5253400175,
+    "runs": 5
   },
   {
     "library": "redis-rs",
     "operation": "HashMap insert",
-    "p50_us": 78.208,
-    "p99_us": 117.5,
-    "ops_per_second": 308789.2350929754,
-    "runs": 3
-  },
-  {
-    "library": "redis-rs",
-    "operation": "HashMap get",
-    "p50_us": 74.04100000000001,
+    "p50_us": 76.084,
     "p99_us": 108.208,
-    "ops_per_second": 489389.35324359813,
-    "runs": 3
+    "ops_per_second": 303690.9600302515,
+    "runs": 5
+  },
+  {
+    "library": "redis-rs",
+    "operation": "HashMap get",
+    "p50_us": 72.291,
+    "p99_us": 110.375,
+    "ops_per_second": 497361.792153879,
+    "runs": 5
   },
   {
     "library": "redis-rs",
     "operation": "Lock and unlock",
-    "p50_us": 151.583,
-    "p99_us": 209.916,
-    "ops_per_second": 188689.72229258603,
-    "runs": 3
+    "p50_us": 158.125,
+    "p99_us": 235.166,
+    "ops_per_second": 187434.63154314543,
+    "runs": 5
   },
   {
     "library": "redis-rs",
     "operation": "Batch of 100 sets",
-    "p50_us": 136.625,
-    "p99_us": 175.458,
+    "p50_us": 135.459,
+    "p99_us": 166.25,
     "ops_per_second": null,
-    "runs": 3
+    "runs": 5
   },
   {
     "library": "fred",
     "operation": "Bucket set",
-    "p50_us": 78.042,
-    "p99_us": 164.958,
-    "ops_per_second": 424337.2410535505,
-    "runs": 3
+    "p50_us": 73.583,
+    "p99_us": 118.0,
+    "ops_per_second": 423690.68367301195,
+    "runs": 5
   },
   {
     "library": "fred",
     "operation": "Bucket get",
-    "p50_us": 76.708,
-    "p99_us": 124.08300000000001,
-    "ops_per_second": 471503.968937106,
-    "runs": 3
+    "p50_us": 73.5,
+    "p99_us": 116.75,
+    "ops_per_second": 456222.4897775499,
+    "runs": 5
   },
   {
     "library": "fred",
     "operation": "HashMap insert",
-    "p50_us": 74.5,
-    "p99_us": 105.916,
-    "ops_per_second": 275585.9200546426,
-    "runs": 3
+    "p50_us": 75.16699999999999,
+    "p99_us": 105.917,
+    "ops_per_second": 276323.96002246527,
+    "runs": 5
   },
   {
     "library": "fred",
     "operation": "HashMap get",
-    "p50_us": 76.5,
-    "p99_us": 121.875,
-    "ops_per_second": 423924.1388961724,
-    "runs": 3
+    "p50_us": 73.54100000000001,
+    "p99_us": 104.375,
+    "ops_per_second": 417263.19383976737,
+    "runs": 5
   },
   {
     "library": "fred",
     "operation": "Lock and unlock",
-    "p50_us": 155.333,
-    "p99_us": 228.208,
-    "ops_per_second": 168796.33374163136,
-    "runs": 3
+    "p50_us": 152.58399999999997,
+    "p99_us": 240.458,
+    "ops_per_second": 167080.98807197643,
+    "runs": 5
   },
   {
     "library": "fred",
     "operation": "Batch of 100 sets",
-    "p50_us": 234.5,
-    "p99_us": 361.291,
+    "p50_us": 228.791,
+    "p99_us": 299.875,
     "ops_per_second": null,
-    "runs": 3
+    "runs": 5
   },
   {
     "library": "Redisson (Java)",
