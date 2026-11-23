@@ -2,15 +2,13 @@ use crate::client::request::Request;
 use crate::client::retry::Retry;
 use crate::error::{Error, Result};
 use crate::lua::Lua;
-use crate::net::node::Failure;
+use crate::net::node::{Failure, Node};
 use crate::net::topology::Topology;
 use crate::pubsub::PubSub;
 use bytes::Bytes;
 use fred::clients::{Client as RedisClient, Pool, WithOptions};
 use fred::interfaces::{ClientInterface, ClientLike, ClusterInterface, EventInterface};
 use fred::prelude::{Builder, Options};
-use fred::types::client::ClientKillFilter;
-use fred::types::config::PerformanceConfig;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -218,29 +216,29 @@ impl Core {
         self.pool.next()
     }
 
-    pub(crate) async fn blocking_client(&self) -> Result<BlockingClient> {
-        let client = self.own_connection()?;
-        client.update_perf_config(PerformanceConfig {
-            default_command_timeout: Duration::ZERO,
-            ..client.perf_config()
-        });
-        client.init().await?;
-        if let Err(error) = self.name(&client).await {
-            let _ = client.quit().await;
-            return Err(error);
-        }
-        let id: i64 = match client.client_id().await {
-            Ok(id) => id,
-            Err(error) => {
-                let _ = client.quit().await;
-                return Err(error.into());
-            }
+    /// Sends a blocking command (`BLPOP`, `BZMPOP`, `XREAD BLOCK`…) once, without the command timeout, on a connection of its own to the master that serves `key`, as Redisson does. When the caller stops waiting, the connection is killed with `CLIENT KILL ID`, so the command takes nothing after that.
+    pub(crate) async fn blocking<T: redis::FromRedisValue>(
+        &self,
+        key: &[u8],
+        cmd: redis::Cmd,
+    ) -> Result<T> {
+        let pool = self
+            .topology
+            .pool_for(Some(key))
+            .await
+            .map_err(Error::from)?;
+        let node = Arc::new(Node::new(
+            pool.address().clone(),
+            self.topology.settings().clone(),
+        ));
+        let mut guard = Unblock {
+            node: node.clone(),
+            admin: pool.next(),
+            waiting: true,
         };
-        Ok(BlockingClient {
-            client,
-            admin: self.redis().clone(),
-            id,
-        })
+        let value = node.send(&cmd).await.map_err(Error::from);
+        guard.waiting = false;
+        Ok(T::from_redis_value(value?)?)
     }
 
     pub(crate) fn client_id(&self) -> &str {
@@ -410,33 +408,29 @@ pub(crate) fn no_retry<C: ClientLike>(client: &C) -> WithOptions<C> {
     })
 }
 
-pub(crate) struct BlockingClient {
-    client: RedisClient,
-    admin: RedisClient,
-    id: i64,
+/// Closes the connection of a blocking command; one the caller stopped waiting on is killed first, so the server drops the command.
+struct Unblock {
+    node: Arc<Node>,
+    admin: Arc<Node>,
+    waiting: bool,
 }
 
-impl std::ops::Deref for BlockingClient {
-    type Target = RedisClient;
-
-    fn deref(&self) -> &RedisClient {
-        &self.client
-    }
-}
-
-impl Drop for BlockingClient {
+impl Drop for Unblock {
     fn drop(&mut self) {
-        if let Ok(runtime) = Handle::try_current() {
-            let client = self.client.clone();
-            let admin = self.admin.clone();
-            let id = self.id;
-            runtime.spawn(async move {
-                let _ = admin
-                    .client_kill::<i64>(vec![ClientKillFilter::ID(id.to_string())])
-                    .await;
-                let _ = client.quit().await;
-            });
-        }
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        let (node, admin, waiting) = (self.node.clone(), self.admin.clone(), self.waiting);
+        runtime.spawn(async move {
+            if waiting {
+                if let Some(id) = node.client_id().await {
+                    let mut kill = redis::cmd("CLIENT");
+                    kill.arg("KILL").arg("ID").arg(id);
+                    let _ = admin.send(&kill).await;
+                }
+            }
+            node.reset().await;
+        });
     }
 }
 

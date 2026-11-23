@@ -1,4 +1,3 @@
-use crate::client::core::no_retry;
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::list;
@@ -7,8 +6,6 @@ use crate::object::block_seconds;
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;
 use bytes::Bytes;
-use fred::interfaces::ListInterface;
-use fred::types::lists::LMoveDirection;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -299,20 +296,13 @@ where
             return Ok(None);
         }
         let seconds = timeout.map_or(0.0, block_seconds);
-        let connection = self.key.core.blocking_client().await?;
-        let once = no_retry(&*connection);
-        let reply: std::result::Result<Option<(String, Bytes)>, fred::error::Error> = if front {
-            once.blpop(names, seconds).await
-        } else {
-            once.brpop(names, seconds).await
-        };
-        match reply {
-            Ok(reply) => reply
-                .map(|(name, bytes)| Ok((name, self.codec.decode(&bytes)?)))
-                .transpose(),
-            Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        let key = self.key.redis_key();
+        let mut cmd = redis::cmd(if front { "BLPOP" } else { "BRPOP" });
+        cmd.arg(&names).arg(seconds);
+        let reply: Option<(String, Bytes)> = self.key.core.blocking(key.as_bytes(), cmd).await?;
+        reply
+            .map(|(name, bytes)| Ok((name, self.codec.decode(&bytes)?)))
+            .transpose()
     }
 
     async fn move_blocking(
@@ -322,11 +312,6 @@ where
         timeout: Option<Duration>,
     ) -> Result<Option<V>> {
         let from = self.key.redis_key();
-        let (source, destination) = if front {
-            (LMoveDirection::Left, LMoveDirection::Right)
-        } else {
-            (LMoveDirection::Right, LMoveDirection::Left)
-        };
         if timeout.is_some_and(|timeout| timeout.is_zero()) {
             let raw: Option<Bytes> = if front {
                 self.key
@@ -349,18 +334,18 @@ where
             return self.decode(raw);
         }
         let seconds = timeout.map_or(0.0, block_seconds);
-        let connection = self.key.core.blocking_client().await?;
-        let once = no_retry(&*connection);
-        let reply: std::result::Result<Option<Bytes>, fred::error::Error> = if front {
-            once.blmove(from, to, source, destination, seconds).await
+        let mut cmd = if front {
+            let mut cmd = redis::cmd("BLMOVE");
+            cmd.arg(&from).arg(&to).arg("LEFT").arg("RIGHT");
+            cmd
         } else {
-            once.brpoplpush(from, to, seconds).await
+            let mut cmd = redis::cmd("BRPOPLPUSH");
+            cmd.arg(&from).arg(&to);
+            cmd
         };
-        match reply {
-            Ok(reply) => self.decode(reply),
-            Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        cmd.arg(seconds);
+        let reply: Option<Bytes> = self.key.core.blocking(from.as_bytes(), cmd).await?;
+        self.decode(reply)
     }
 
     /// Returns the value at the front without removing it.

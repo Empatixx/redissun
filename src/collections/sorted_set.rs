@@ -1,5 +1,3 @@
-use crate::client::core::no_retry;
-use crate::client::fred_adapter::from_fred;
 use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::error::Result;
@@ -8,8 +6,6 @@ use crate::object::{block_seconds, HasKey, Key};
 use crate::pending::Pending;
 use crate::reply::{self, malformed};
 use bytes::Bytes;
-use fred::interfaces::SortedSetsInterface;
-use fred::types::sorted_sets::ZCmp;
 use futures::{stream, Stream, TryStreamExt};
 use redis::Value;
 use serde::de::DeserializeOwned;
@@ -184,6 +180,13 @@ impl Aggregate {
             Aggregate::Max => "MAX",
         }
     }
+}
+
+/// Which end a pop takes from.
+#[derive(Clone, Copy)]
+enum Side {
+    Min,
+    Max,
 }
 
 /// A distributed set whose values are ordered by a score, stored in a Redis sorted set. Values with the same score are ordered by their encoded bytes. Values are equal when their encoded bytes are equal.
@@ -817,36 +820,29 @@ where
             };
         }
         let seconds = timeout.map_or(0.0, block_seconds);
-        let connection = self.key.core.blocking_client().await?;
-        let once = no_retry(&*connection);
-        let reply: std::result::Result<Option<(String, Bytes, f64)>, fred::error::Error> = if first
-        {
-            once.bzpopmin(self.key.redis_key(), seconds).await
-        } else {
-            once.bzpopmax(self.key.redis_key(), seconds).await
-        };
-        match reply {
-            Ok(reply) => reply
-                .map(|(_, bytes, score)| Ok((self.codec.decode(&bytes)?, score)))
-                .transpose(),
-            Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        let key = self.key.redis_key();
+        let mut cmd = redis::cmd(if first { "BZPOPMIN" } else { "BZPOPMAX" });
+        cmd.arg(&key).arg(seconds);
+        let reply: Option<(String, Bytes, f64)> =
+            self.key.core.blocking(key.as_bytes(), cmd).await?;
+        reply
+            .map(|(_, bytes, score)| Ok((self.codec.decode(&bytes)?, score)))
+            .transpose()
     }
 
     /// Removes and returns up to `count` values with the lowest scores, waiting until there is at least one (`BZMPOP`, Redis 7.0 or newer). Add `.timeout(duration)` to wait at most that long.
     pub fn pop_first_many_wait(&self, count: usize) -> Pending<'_, Vec<(V, f64)>> {
-        Pending::new(move |wait| self.pop_many_blocking(ZCmp::Min, count, wait))
+        Pending::new(move |wait| self.pop_many_blocking(Side::Min, count, wait))
     }
 
     /// Removes and returns up to `count` values with the highest scores, highest first, waiting until there is at least one (`BZMPOP`). Add `.timeout(duration)` to wait at most that long.
     pub fn pop_last_many_wait(&self, count: usize) -> Pending<'_, Vec<(V, f64)>> {
-        Pending::new(move |wait| self.pop_many_blocking(ZCmp::Max, count, wait))
+        Pending::new(move |wait| self.pop_many_blocking(Side::Max, count, wait))
     }
 
     async fn pop_many_blocking(
         &self,
-        side: ZCmp,
+        side: Side,
         count: usize,
         timeout: Option<Duration>,
     ) -> Result<Option<Vec<(V, f64)>>> {
@@ -856,25 +852,23 @@ where
             let mut cmd = redis::cmd("ZMPOP");
             cmd.arg(1).arg(self.key.redis_key());
             cmd.arg(match side {
-                ZCmp::Min => "MIN",
-                ZCmp::Max => "MAX",
+                Side::Min => "MIN",
+                Side::Max => "MAX",
             });
             cmd.arg("COUNT").arg(count);
             // Retried after a lost connection, as fred's zmpop was; only the blocking BZMPOP is sent once.
             Some(self.key.query::<Value>(cmd).await?)
         } else {
-            // Blocking pops stay on fred's blocking connection until the transport moves to redis-rs.
             let seconds = timeout.map_or(0.0, block_seconds);
-            let connection = self.key.core.blocking_client().await?;
-            let reply: std::result::Result<fred::types::Value, fred::error::Error> =
-                no_retry(&*connection)
-                    .bzmpop(seconds, self.key.redis_key(), side, Some(count))
-                    .await;
-            match reply {
-                Ok(value) => Some(from_fred(value)),
-                Err(error) if *error.kind() == fred::error::ErrorKind::Timeout => None,
-                Err(error) => return Err(error.into()),
-            }
+            let key = self.key.redis_key();
+            let mut cmd = redis::cmd("BZMPOP");
+            cmd.arg(seconds).arg(1).arg(&key);
+            cmd.arg(match side {
+                Side::Min => "MIN",
+                Side::Max => "MAX",
+            });
+            cmd.arg("COUNT").arg(count);
+            Some(self.key.core.blocking::<Value>(key.as_bytes(), cmd).await?)
         };
         match reply {
             None | Some(Value::Nil) => Ok(None),

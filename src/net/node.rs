@@ -220,7 +220,8 @@ impl Node {
         if settings.resp3 {
             info = info.set_protocol(redis::ProtocolVersion::RESP3);
         }
-        let mut config = redis::AsyncConnectionConfig::new();
+        // redissun limits commands itself (`timeout`, none for blocking calls); redis-rs must not cut them short.
+        let mut config = redis::AsyncConnectionConfig::new().set_response_timeout(None);
         if let Some(push) = &settings.push {
             config = config.set_push_sender(push.clone());
         }

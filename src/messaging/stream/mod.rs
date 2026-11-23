@@ -7,8 +7,6 @@ pub use types::{
     StreamInfo,
 };
 
-use crate::client::core::no_retry;
-use crate::client::fred_adapter::{from_fred, to_fred};
 use crate::client::request::{command, Arg};
 use crate::codec::Codec;
 use crate::error::{Error, Result};
@@ -16,8 +14,6 @@ use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use crate::pending::Pending;
 use crate::reply::{array, bytes, int, malformed, number, text};
-use fred::interfaces::ClientLike;
-use fred::types::{ClusterHash, CustomCommand};
 use redis::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -159,16 +155,8 @@ impl<K, V, C: Codec> Stream<K, V, C> {
             Mode::Retry => self.key.query(cmd).await,
             Mode::Once => self.key.query_once(cmd).await,
             Mode::Block => {
-                // Blocking reads stay on fred's blocking connection until the transport moves to redis-rs.
-                let (name, args) = to_fred(&cmd)?;
-                let hash = ClusterHash::Custom(crate::client::slot::keyslot(
-                    self.key.redis_key().as_bytes(),
-                ));
-                let connection = self.key.core.blocking_client().await?;
-                let reply: fred::types::Value = no_retry(&*connection)
-                    .custom(CustomCommand::new(name, hash, false), args)
-                    .await?;
-                Ok(from_fred(reply))
+                let key = self.key.redis_key();
+                self.key.core.blocking(key.as_bytes(), cmd).await
             }
         }
     }
