@@ -72,6 +72,10 @@ impl Topology {
                     let info = topology.cli(port, &["CLUSTER", "INFO"]).await;
                     ok &= info.contains("cluster_state:ok");
                     ok &= info.contains("cluster_known_nodes:6");
+                    // A replica's first sync waits for repl-diskless-sync-delay (5 s) after the cluster is ok. A test that kills a master before it finished loses the data.
+                    let replication = topology.cli(port, &["INFO", "replication"]).await;
+                    ok &= !replication.contains("role:slave")
+                        || replication.contains("master_link_status:up");
                 }
                 ok
             })
@@ -187,6 +191,34 @@ impl Topology {
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|address| address.split(['@', ':']).nth(1))
             .and_then(|port| port.parse().ok())
+    }
+
+    /// Waits until every replica of the master on `port` has every write the master has, so a failover loses nothing. `WAIT` would only cover the writes of its own connection.
+    pub async fn wait_until_replicated(&self, port: u16) {
+        self.wait_for("replicas to catch up", || async {
+            let info = self.cli(port, &["INFO", "replication"]).await;
+            let master = info
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("master_repl_offset:"))
+                .and_then(|offset| offset.parse::<u64>().ok());
+            // A replica still loading its first copy reports an offset too, so only an online one counts.
+            let replicas: Vec<u64> = info
+                .lines()
+                .filter(|line| line.starts_with("slave") && line.contains("state=online"))
+                .filter_map(|line| {
+                    line.split(',')
+                        .find_map(|field| field.strip_prefix("offset="))
+                        .and_then(|offset| offset.parse().ok())
+                })
+                .collect();
+            match master {
+                Some(master) => {
+                    !replicas.is_empty() && replicas.iter().all(|offset| *offset >= master)
+                }
+                None => false,
+            }
+        })
+        .await;
     }
 
     pub async fn cluster_failover_of(&self, key: &str) -> (u16, u16) {
