@@ -3,7 +3,6 @@ use futures::future::BoxFuture;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// A username and password for `AUTH`, like Redisson's `Credentials`. `Debug` never prints the password.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -38,7 +37,6 @@ type Resolve = dyn Fn(String) -> BoxFuture<'static, Result<Credentials>> + Send 
 #[derive(Clone)]
 pub(crate) struct Resolver {
     resolve: Arc<Resolve>,
-    pub(crate) refresh: Option<Duration>,
 }
 
 impl Resolver {
@@ -49,7 +47,6 @@ impl Resolver {
     {
         Self {
             resolve: Arc::new(move |address| Box::pin(resolve(address))),
-            refresh: None,
         }
     }
 }
@@ -63,8 +60,6 @@ impl Resolver {
 
 impl fmt::Debug for Resolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Resolver")
-            .field("refresh", &self.refresh)
-            .finish_non_exhaustive()
+        f.debug_struct("Resolver").finish_non_exhaustive()
     }
 }

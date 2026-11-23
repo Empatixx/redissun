@@ -24,6 +24,8 @@ pub(crate) struct Startup {
     pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) retry: Retry,
     pub(crate) ping_interval: Duration,
+    /// How often open connections log in again with what the credentials resolver gives now, Redisson's `nextRenewal`.
+    pub(crate) credentials_refresh: Option<Duration>,
 }
 
 pub(crate) struct Core {
@@ -81,6 +83,10 @@ impl Core {
         if !startup.ping_interval.is_zero() {
             let ping = tokio::spawn(ping_loop(Arc::downgrade(&core), startup.ping_interval));
             core.spawned(ping);
+        }
+        if let Some(interval) = startup.credentials_refresh.filter(|i| !i.is_zero()) {
+            let renewal = tokio::spawn(renewal_loop(Arc::downgrade(&core), interval));
+            core.spawned(renewal);
         }
         Ok(core)
     }
@@ -232,6 +238,33 @@ impl Core {
             }
             result => result,
         }
+    }
+}
+
+/// Every `interval`, each open connection sends `AUTH` with what the credentials resolver gives for its node now; connections that a batch holds get theirs when they are opened again.
+async fn renewal_loop(core: std::sync::Weak<Core>, interval: Duration) {
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    loop {
+        ticks.tick().await;
+        let Some(strong) = core.upgrade() else {
+            return;
+        };
+        let mut nodes = strong.topology.nodes();
+        if let Some(pubsub) = strong.pubsub_started() {
+            nodes.push(pubsub.node().await);
+        }
+        nodes.extend(
+            strong
+                .exclusive
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .flatten()
+                .cloned(),
+        );
+        drop(strong);
+        // A failed renewal keeps the login the connection has; the next one tries again.
+        futures::future::join_all(nodes.iter().map(|node| node.renew_credentials())).await;
     }
 }
 

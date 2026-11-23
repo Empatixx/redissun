@@ -340,6 +340,47 @@ impl Node {
         Ok(())
     }
 
+    /// Logs the live connection in again (`AUTH`) with what the resolver gives for this node now. A node without a live connection or without a resolver is left alone.
+    pub(crate) async fn renew_credentials(&self) -> std::result::Result<(), Failure> {
+        let NodeCredentials::Resolver(resolver) = &self.settings.credentials else {
+            return Ok(());
+        };
+        let live = {
+            let state = self.state.lock().await;
+            state
+                .live
+                .as_ref()
+                .filter(|live| !live.driver.is_finished())
+                .map(|live| (live.connection.clone(), live.generation))
+        };
+        let Some((mut connection, generation)) = live else {
+            return Ok(());
+        };
+        let credentials = resolver
+            .resolve(&self.address.to_string())
+            .await
+            .map_err(Failure::Other)?;
+        let Some(password) = credentials.password else {
+            return Ok(());
+        };
+        let mut cmd = redis::cmd("AUTH");
+        if let Some(username) = credentials.username {
+            cmd.arg(username);
+        }
+        cmd.arg(password);
+        match connection.send_packed_command(&cmd).await {
+            Ok(redis::Value::ServerError(error)) => Err(server_failure(error)),
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let failure = failure(error);
+                if is_connection_failure(&failure) {
+                    self.broken(generation).await;
+                }
+                Err(failure)
+            }
+        }
+    }
+
     /// The `CLIENT ID` of the live connection, `None` while there is none.
     pub(crate) async fn client_id(&self) -> Option<i64> {
         self.state.lock().await.live.as_ref().map(|live| live.id)

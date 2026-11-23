@@ -501,6 +501,7 @@ impl<C: Codec> ClientBuilder<C> {
                     timeout: settings.timeout,
                 },
                 ping_interval: settings.ping_connection_interval,
+                credentials_refresh: settings.resolver.as_ref().and(settings.credentials_refresh),
             },
         )
         .await?;

@@ -128,6 +128,53 @@ async fn the_resolver_is_asked_for_every_connection() {
     user.delete().await;
 }
 
+/// Redisson: `CredentialsResolver.nextRenewal`, open connections send `AUTH` again with what the resolver gives now.
+#[tokio::test]
+async fn open_connections_log_in_again_after_the_refresh_interval() {
+    let (first, second) = (AclUser::create().await, AclUser::create().await);
+    let name = unique("renewed").replace(':', "-");
+    let current = Arc::new(std::sync::Mutex::new(Credentials::new(
+        first.name.clone(),
+        first.password.clone(),
+    )));
+    let client = {
+        let current = current.clone();
+        Client::builder()
+            .url(redis_url().await)
+            .pool_size(1)
+            .client_name(name.clone())
+            .credentials_refresh_interval(Duration::from_millis(300))
+            .credentials_resolver(move |_| {
+                let credentials = current.lock().unwrap().clone();
+                async move { Ok(credentials) }
+            })
+            .build()
+            .await
+            .unwrap()
+    };
+    works(&client).await;
+    *current.lock().unwrap() = Credentials::new(second.name.clone(), second.password.clone());
+
+    let wanted = format!(" user={} ", second.name);
+    let mut renewed = false;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let list = raw_command(&["CLIENT", "LIST"]).await;
+        let named: Vec<&str> = list
+            .lines()
+            .filter(|line| line.contains(&format!(" name={name} ")))
+            .collect();
+        if !named.is_empty() && named.iter().all(|line| line.contains(&wanted)) {
+            renewed = true;
+            break;
+        }
+    }
+    assert!(renewed, "the connections still use the first user");
+    works(&client).await;
+    first.delete().await;
+    second.delete().await;
+}
+
 #[tokio::test]
 async fn a_resolver_error_fails_the_connection() {
     let attempt = Client::builder()
