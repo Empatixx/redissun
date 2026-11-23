@@ -1,4 +1,7 @@
+use crate::client::fred_adapter;
+use crate::client::request::Request;
 use crate::client::retry::Retry;
+use crate::client::slot::keyslot;
 use crate::error::{Error, Result};
 use crate::pubsub::PubSub;
 use bytes::Bytes;
@@ -158,6 +161,29 @@ impl Core {
         self.own_connections
             .build()
             .map_err(|e| Error::Config(e.to_string()))
+    }
+
+    /// Sends `request` and reads the reply as `T`. Every command outside the connection layer, pub/sub and the batch engine goes through here.
+    pub(crate) async fn query<T: redis::FromRedisValue>(&self, request: Request) -> Result<T> {
+        let value = self.query_value(request).await?;
+        Ok(T::from_redis_value(value)?)
+    }
+
+    /// Like [`query`](Core::query), returning the reply as it came.
+    pub(crate) async fn query_value(&self, request: Request) -> Result<redis::Value> {
+        let (name, args) = fred_adapter::to_fred(request.cmd())?;
+        let hash = request
+            .routing_key()
+            .map_or(fred::types::ClusterHash::Random, |key| {
+                fred::types::ClusterHash::Custom(keyslot(key))
+            });
+        let command = fred::types::CustomCommand::new(name, hash, false);
+        let client = self.redis();
+        let reply: fred::types::Value = match request.is_once() {
+            true => no_retry(client).custom(command, args).await?,
+            false => client.custom(command, args).await?,
+        };
+        Ok(fred_adapter::from_fred(reply))
     }
 
     pub(crate) fn redis(&self) -> &RedisClient {

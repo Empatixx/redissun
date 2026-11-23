@@ -190,12 +190,9 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let bytes = self.codec.encode(value)?;
-        let stored: bool = self
-            .key
-            .core
-            .redis_no_retry()
-            .setnx(self.key.redis_key(), bytes)
-            .await?;
+        let mut cmd = redis::cmd("SETNX");
+        cmd.arg(self.key.redis_key()).arg(&bytes[..]);
+        let stored: bool = self.key.query_once(cmd).await?;
         Ok(stored)
     }
 

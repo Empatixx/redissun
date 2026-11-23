@@ -1,4 +1,5 @@
 use crate::client::core::Core;
+use crate::client::request::Request;
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use fred::interfaces::KeysInterface;
@@ -244,8 +245,24 @@ impl Key {
         Ok(fred::interfaces::ClientLike::custom(self.core.redis(), command, args).await?)
     }
 
+    /// Sends `cmd`, routed by this object's key, and reads the reply as `T`.
+    pub(crate) async fn query<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        self.core
+            .query(Request::new(cmd).key(self.redis_key().as_bytes()))
+            .await
+    }
+
+    /// Like [`query`](Key::query) for a command that is never sent again after its connection failed.
+    pub(crate) async fn query_once<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        self.core
+            .query(Request::new(cmd).key(self.redis_key().as_bytes()).once())
+            .await
+    }
+
     pub(crate) async fn exists(&self) -> Result<bool> {
-        let found: i64 = self.core.redis().exists(self.redis_key()).await?;
+        let mut cmd = redis::cmd("EXISTS");
+        cmd.arg(self.redis_key());
+        let found: i64 = self.query(cmd).await?;
         Ok(found > 0)
     }
 
@@ -267,7 +284,9 @@ impl Key {
     }
 
     pub(crate) async fn ttl(&self) -> Result<Option<Duration>> {
-        let millis: i64 = self.core.redis().pttl(self.redis_key()).await?;
+        let mut cmd = redis::cmd("PTTL");
+        cmd.arg(self.redis_key());
+        let millis: i64 = self.query(cmd).await?;
         Ok((millis >= 0).then(|| Duration::from_millis(millis as u64)))
     }
 

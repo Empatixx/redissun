@@ -36,6 +36,18 @@ pub enum Error {
 /// Result alias used by every fallible redissun call.
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl From<redis::RedisError> for Error {
+    fn from(error: redis::RedisError) -> Self {
+        Error::Redis(error.to_string())
+    }
+}
+
+impl From<redis::ParsingError> for Error {
+    fn from(error: redis::ParsingError) -> Self {
+        Error::Redis(error.to_string())
+    }
+}
+
 impl From<fred::error::Error> for Error {
     fn from(error: fred::error::Error) -> Self {
         Error::Redis(error.to_string())
