@@ -36,4 +36,4 @@ cargo bench --bench compare
 python3 benches/plot.py
 ```
 
-Set `REDISSUN_BENCH_OUT` to write the Rust results to another file, and `REDISSUN_BENCH_ONLY=bucket_get` to run only the operations whose name contains that text. Use a Redis you can throw away: the benchmark writes keys named `bench:*`.
+Set `REDISSUN_BENCH_OUT` to write the Rust results to another file, `REDISSUN_BENCH_ONLY=bucket_get` to run only the operations whose name contains that text, and `REDISSUN_BENCH_POOL=8` to give redissun and fred another number of connections (4 by default; redis-rs keeps its one multiplexed connection). Use a Redis you can throw away: the benchmark writes keys named `bench:*`.

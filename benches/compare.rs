@@ -26,7 +26,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CONCURRENCY: usize = 64;
-const POOL: usize = 4;
+/// Connections of redissun and fred. redis-rs keeps its one multiplexed connection.
+/// A value that is not a positive number is ignored with a warning, so a typo does not stop a long run.
+fn pool() -> usize {
+    match std::env::var("REDISSUN_BENCH_POOL").map(|pool| pool.parse::<usize>()) {
+        Ok(Ok(pool)) if pool > 0 => pool,
+        Err(_) => 4,
+        _ => {
+            eprintln!("REDISSUN_BENCH_POOL is not a positive number, using 4");
+            4
+        }
+    }
+}
 const WARMUP: Duration = Duration::from_secs(3);
 const MEASURE: Duration = Duration::from_secs(3);
 const BATCH: usize = 100;
@@ -72,6 +83,7 @@ fn key(run: &str, lib: &str, kind: &str, slot: usize) -> String {
 async fn redissun_ops(url: &str, run: &str) -> Ops {
     let client = Client::builder()
         .url(url)
+        .pool_size(pool())
         .build()
         .await
         .expect("redissun connects");
@@ -161,7 +173,7 @@ async fn redissun_ops(url: &str, run: &str) -> Ops {
 async fn fred_ops(url: &str, run: &str) -> Ops {
     let config = Config::from_url(url).expect("fred url");
     let pool = Builder::from_config(config)
-        .build_pool(POOL)
+        .build_pool(pool())
         .expect("fred pool");
     pool.init().await.expect("fred connects");
     let pool = Arc::new(pool);
@@ -479,11 +491,10 @@ async fn main() {
         }
         for turn in 0..libraries.len() {
             let (library, ops) = &libraries[(index + shift + turn) % libraries.len()];
-            let operation = &ops
-                .iter()
-                .find(|(own, _)| own == name)
-                .expect("every library runs every operation")
-                .1;
+            let Some((_, operation)) = ops.iter().find(|(own, _)| own == name) else {
+                eprintln!("{library} has no {name}, skipped");
+                continue;
+            };
             let latency = latency(operation).await;
             let per_second = if *name == "batch_100" {
                 None
@@ -512,6 +523,7 @@ async fn main() {
             "concurrency": CONCURRENCY,
             "batch_commands": BATCH,
             "measure_seconds": MEASURE.as_secs(),
+            "pool": pool(),
         },
         "results": results,
     });
