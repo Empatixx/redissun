@@ -140,7 +140,7 @@ impl Live {
 
 #[derive(Default)]
 struct State {
-    live: Option<Live>,
+    live: Option<Arc<Live>>,
     generation: u64,
     failures: u32,
     pause: Duration,
@@ -152,6 +152,8 @@ pub(crate) struct Node {
     address: Address,
     settings: Arc<NodeSettings>,
     state: Mutex<State>,
+    /// The live connection again, read without waiting on `state`: every command takes it from here, and only opening a connection locks `state`.
+    current: std::sync::RwLock<Option<Arc<Live>>>,
 }
 
 impl Node {
@@ -160,6 +162,7 @@ impl Node {
             address,
             settings,
             state: Mutex::new(State::default()),
+            current: std::sync::RwLock::new(None),
         }
     }
 
@@ -173,12 +176,20 @@ impl Node {
 
     /// The live connection, opened first when there is none.
     async fn live(&self) -> std::result::Result<(MultiplexedConnection, u64), Failure> {
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(live) = current.filter(|live| !live.ended()) {
+            return Ok((live.connection.clone(), live.generation));
+        }
         let mut state = self.state.lock().await;
         if let Some(live) = &state.live {
             if !live.ended() {
                 return Ok((live.connection.clone(), live.generation));
             }
-            state.live = None;
+            self.set_live(&mut state, None);
         }
         if let Some(failed_at) = state.failed_at {
             let pause = self
@@ -197,7 +208,7 @@ impl Node {
                 state.failures = 0;
                 state.failed_at = None;
                 let generation = state.generation;
-                state.live = Some(Live {
+                let live = Arc::new(Live {
                     connection: connection.clone(),
                     id,
                     generation,
@@ -205,6 +216,7 @@ impl Node {
                     probe,
                     written,
                 });
+                self.set_live(&mut state, Some(live));
                 Ok((connection, generation))
             }
             Err(error) => {
@@ -300,7 +312,7 @@ impl Node {
             .as_ref()
             .is_some_and(|live| live.generation == generation)
         {
-            state.live = None;
+            self.set_live(&mut state, None);
             state.failures = state.failures.saturating_add(1);
             state.failed_at = Some(Instant::now());
         }
@@ -432,7 +444,12 @@ impl Node {
     /// Closes the live connection; the next command opens a new one without waiting.
     pub(crate) async fn reset(&self) {
         let mut state = self.state.lock().await;
-        state.live = None;
+        self.set_live(&mut state, None);
+    }
+
+    fn set_live(&self, state: &mut State, live: Option<Arc<Live>>) {
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = live.clone();
+        state.live = live;
     }
 }
 
