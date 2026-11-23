@@ -107,11 +107,13 @@ impl Stream {
 
     /// A second handle to the socket under this stream, to look at it while redis-rs owns the stream.
     pub(crate) fn probe(&self) -> Option<socket2::Socket> {
+        #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
         let tcp = match &self.transport {
             Transport::Tcp(tcp) => tcp,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
             Transport::Tls(tls) => tls.get_ref().0,
         };
+        #[cfg(not(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc")))]
+        let Transport::Tcp(tcp) = &self.transport;
         SockRef::from(tcp).try_clone().ok()
     }
 }
