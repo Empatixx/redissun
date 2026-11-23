@@ -164,7 +164,7 @@ async fn receives_again(
 }
 
 #[tokio::test]
-async fn reattach() {
+async fn channel_and_pattern_subscriptions_resume_after_a_pubsub_kill() {
     let _turn = ONE_AT_A_TIME.lock().await;
     let client = client().await;
     let name = unique("topic");

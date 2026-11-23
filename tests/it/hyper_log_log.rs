@@ -62,15 +62,17 @@ async fn extend_accepts_a_very_large_batch() {
     );
 }
 
+// Redisson: testAddAll
 #[tokio::test]
-async fn test_add_all() {
+async fn extend_counts_every_distinct_value() {
     let log = client().await.hyper_log_log::<i32>(unique("log"));
     log.extend([1, 2, 3].iter()).await.unwrap();
     assert_eq!(log.count().await.unwrap(), 3);
 }
 
+// Redisson: testAdd
 #[tokio::test]
-async fn test_add() {
+async fn insert_counts_every_distinct_value() {
     let log = client().await.hyper_log_log::<i32>(unique("log"));
     log.insert(&1).await.unwrap();
     log.insert(&2).await.unwrap();
@@ -78,8 +80,9 @@ async fn test_add() {
     assert_eq!(log.count().await.unwrap(), 3);
 }
 
+// Redisson: testMerge
 #[tokio::test]
-async fn test_merge() {
+async fn merge_from_counts_the_union_of_two_logs() {
     let client = client().await;
     let tag = unique("hll");
     let (n1, n2) = (format!("{{{tag}}}:hll1"), format!("{{{tag}}}:hll2"));

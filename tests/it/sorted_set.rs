@@ -284,8 +284,9 @@ async fn pair(
     sets
 }
 
+// Redisson: testEntries
 #[tokio::test]
-async fn test_entries() {
+async fn first_and_last_return_the_entry_with_its_score() {
     let set = strings(&[(1.1, "v1"), (1.2, "v2"), (1.3, "v3")]).await;
     let empty = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(empty.first().await.unwrap(), None);
@@ -293,16 +294,18 @@ async fn test_entries() {
     assert_eq!(set.last().await.unwrap(), Some(entry("v3", 1.3)));
 }
 
+// Redisson: testPollEntry
 #[tokio::test]
-async fn test_poll_entry() {
+async fn pop_first_and_pop_last_return_entries_with_scores() {
     let set = strings(&[(1.1, "v1"), (1.2, "v2"), (1.3, "v3")]).await;
     assert_eq!(set.pop_first().await.unwrap(), Some(entry("v1", 1.1)));
     assert_eq!(set.pop_last().await.unwrap(), Some(entry("v3", 1.3)));
     assert_eq!(set.len().await.unwrap(), 1);
 }
 
+// Redisson: testEntryScanIterator
 #[tokio::test]
-async fn test_entry_scan_iterator() {
+async fn iter_yields_every_entry_with_its_score() {
     let set = strings(&[(1.1, "v1"), (1.2, "v2"), (1.3, "v3")]).await;
     let entries: Vec<(String, f64)> = set
         .iter()
@@ -315,16 +318,18 @@ async fn test_entry_scan_iterator() {
     );
 }
 
+// Redisson: testRankEntry
 #[tokio::test]
-async fn test_rank_entry() {
+async fn rank_with_score_returns_rank_and_score_of_a_value() {
     let set = strings(&[(1.1, "v1"), (1.2, "v2"), (1.3, "v3")]).await;
     assert_eq!(set.rank_with_score("v1").await.unwrap(), Some((0, 1.1)));
     assert_eq!(set.rank_with_score("v3").await.unwrap(), Some((2, 1.3)));
     assert_eq!(set.rank_with_score("v4").await.unwrap(), None);
 }
 
+// Redisson: testReplace
 #[tokio::test]
-async fn test_replace() {
+async fn replace_swaps_a_value_and_keeps_its_score() {
     let set = numbers(&[(1.0, 10), (2.0, 20), (3.0, 30)]).await;
     assert!(set.replace(&10, &60).await.unwrap());
     assert_eq!(set.score(&60).await.unwrap(), Some(1.0));
@@ -335,8 +340,9 @@ async fn test_replace() {
     assert_eq!(set.len().await.unwrap(), 3);
 }
 
+// Redisson: testRandom
 #[tokio::test]
-async fn test_random() {
+async fn random_picks_return_values_from_the_set() {
     let set = numbers(&[(1.0, 10), (2.0, 20), (3.0, 30)]).await;
     assert!([10, 20, 30].contains(&set.random().await.unwrap().unwrap()));
     let many = set.random_many(2).await.unwrap();
@@ -349,14 +355,16 @@ async fn test_random() {
         .all(|(v, s)| [(10, 1.0), (20, 2.0), (30, 3.0)].contains(&(*v, *s))));
 }
 
+// Redisson: testCount
 #[tokio::test]
-async fn test_count() {
+async fn count_by_score_counts_values_in_a_half_open_range() {
     let set = strings(&[(0.0, "1"), (1.0, "4"), (2.0, "2"), (3.0, "5"), (4.0, "3")]).await;
     assert_eq!(set.count_by_score(0.0..3.0).await.unwrap(), 3);
 }
 
+// Redisson: testReadAll
 #[tokio::test]
-async fn test_read_all() {
+async fn full_range_reads_every_value() {
     let set = strings(&[(0.0, "1"), (1.0, "4"), (2.0, "2"), (3.0, "5"), (4.0, "3")]).await;
     assert_eq!(
         sorted_names(set.range(0..usize::MAX).await.unwrap()),
@@ -364,8 +372,9 @@ async fn test_read_all() {
     );
 }
 
+// Redisson: testAddAll
 #[tokio::test]
-async fn test_add_all() {
+async fn extend_inserts_all_values_with_their_scores() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(
         set.extend([("1", 0.1), ("2", 0.2), ("3", 0.3)])
@@ -388,8 +397,9 @@ fn years() -> [(&'static str, f64); 4] {
     ]
 }
 
+// Redisson: testAddAllIfAbsent
 #[tokio::test]
-async fn test_add_all_if_absent() {
+async fn extend_if_absent_keeps_scores_of_existing_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984")]).await;
     assert_eq!(set.extend_if_absent(years()).await.unwrap(), 2);
     assert_eq!(set.score("1981").await.unwrap(), Some(10.0));
@@ -400,8 +410,9 @@ async fn test_add_all_if_absent() {
         .unwrap());
 }
 
+// Redisson: testAddAllIfExist
 #[tokio::test]
-async fn test_add_all_if_exist() {
+async fn extend_if_exists_updates_only_existing_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984")]).await;
     assert_eq!(set.extend_if_exists(years()).await.unwrap(), 2);
     assert_eq!(set.score("1981").await.unwrap(), Some(111.0));
@@ -418,8 +429,9 @@ fn mixed() -> [(&'static str, f64); 5] {
     ]
 }
 
+// Redisson: testAddAllIfGreater
 #[tokio::test]
-async fn test_add_all_if_greater() {
+async fn extend_if_greater_raises_scores_and_adds_new_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984"), (13.0, "1985")]).await;
     assert_eq!(set.extend_if_greater(mixed()).await.unwrap(), 3);
     assert_eq!(set.len().await.unwrap(), 5);
@@ -437,8 +449,9 @@ async fn test_add_all_if_greater() {
     );
 }
 
+// Redisson: testAddAllIfLess
 #[tokio::test]
-async fn test_add_all_if_less() {
+async fn extend_if_less_lowers_scores_and_adds_new_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984"), (13.0, "1985")]).await;
     assert_eq!(set.extend_if_less(mixed()).await.unwrap(), 4);
     assert_eq!(set.len().await.unwrap(), 5);
@@ -450,8 +463,9 @@ async fn test_add_all_if_less() {
     );
 }
 
+// Redisson: testAddIfGreater
 #[tokio::test]
-async fn test_add_if_greater() {
+async fn insert_if_greater_updates_only_with_a_higher_score() {
     let set = strings(&[(123.0, "1980")]).await;
     assert!(!set.insert_if_greater("1980", 120.0).await.unwrap());
     assert_eq!(set.score("1980").await.unwrap(), Some(123.0));
@@ -459,8 +473,9 @@ async fn test_add_if_greater() {
     assert_eq!(set.score("1980").await.unwrap(), Some(125.0));
 }
 
+// Redisson: testAddIfLess
 #[tokio::test]
-async fn test_add_if_less() {
+async fn insert_if_less_updates_only_with_a_lower_score() {
     let set = strings(&[(123.0, "1980")]).await;
     assert!(set.insert_if_less("1980", 120.0).await.unwrap());
     assert_eq!(set.score("1980").await.unwrap(), Some(120.0));
@@ -468,8 +483,9 @@ async fn test_add_if_less() {
     assert_eq!(set.score("1980").await.unwrap(), Some(120.0));
 }
 
+// Redisson: testAddIfExists
 #[tokio::test]
-async fn test_add_if_exists() {
+async fn insert_if_exists_updates_only_an_existing_value() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert!(!set.insert_if_exists("1980", 123.81).await.unwrap());
     assert_eq!(set.score("1980").await.unwrap(), None);
@@ -478,16 +494,18 @@ async fn test_add_if_exists() {
     assert_eq!(set.score("1980").await.unwrap(), Some(32.0));
 }
 
+// Redisson: testTryAdd
 #[tokio::test]
-async fn test_try_add() {
+async fn try_insert_does_not_overwrite_an_existing_value() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert!(set.try_insert("1980", 123.81).await.unwrap());
     assert!(!set.try_insert("1980", 99.0).await.unwrap());
     assert_eq!(set.score("1980").await.unwrap(), Some(123.81));
 }
 
+// Redisson: testPollLast
 #[tokio::test]
-async fn test_poll_last() {
+async fn pop_last_removes_the_highest_scored_value() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(set.pop_last().await.unwrap(), None);
     for (value, score) in [("a", 0.1), ("b", 0.2), ("c", 0.3)] {
@@ -497,8 +515,9 @@ async fn test_poll_last() {
     assert_eq!(ordered(&set).await, ["a", "b"]);
 }
 
+// Redisson: testPollLastAmount
 #[tokio::test]
-async fn test_poll_last_amount() {
+async fn pop_last_many_removes_the_highest_scored_values() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert!(set.pop_last_many(2).await.unwrap().is_empty());
     for (value, score) in [("a", 0.1), ("b", 0.2), ("c", 0.3)] {
@@ -508,8 +527,9 @@ async fn test_poll_last_amount() {
     assert_eq!(ordered(&set).await, ["a"]);
 }
 
+// Redisson: testPollFistAmount
 #[tokio::test]
-async fn test_poll_fist_amount() {
+async fn pop_first_many_removes_the_lowest_scored_values() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert!(set.pop_first_many(2).await.unwrap().is_empty());
     for (value, score) in [("a", 0.1), ("b", 0.2), ("c", 0.3)] {
@@ -519,8 +539,9 @@ async fn test_poll_fist_amount() {
     assert_eq!(ordered(&set).await, ["c"]);
 }
 
+// Redisson: testPollFirst
 #[tokio::test]
-async fn test_poll_first() {
+async fn pop_first_removes_the_lowest_scored_value() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(set.pop_first().await.unwrap(), None);
     for (value, score) in [("a", 0.1), ("b", 0.2), ("c", 0.3)] {
@@ -530,8 +551,9 @@ async fn test_poll_first() {
     assert_eq!(ordered(&set).await, ["b", "c"]);
 }
 
+// Redisson: testPollFirstEntries
 #[tokio::test]
-async fn test_poll_first_entries() {
+async fn pop_first_many_returns_entries_with_their_scores() {
     let set = strings(&[(0.1, "a"), (0.2, "b"), (0.3, "c")]).await;
     assert_eq!(
         set.pop_first_many(2).await.unwrap(),
@@ -539,8 +561,9 @@ async fn test_poll_first_entries() {
     );
 }
 
+// Redisson: testFirstLast
 #[tokio::test]
-async fn test_first_last() {
+async fn first_and_last_return_the_values_at_both_ends() {
     let set = strings(&[(0.1, "a"), (0.2, "b"), (0.3, "c"), (0.4, "d")]).await;
     let empty = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(empty.first().await.unwrap(), None);
@@ -549,8 +572,9 @@ async fn test_first_last() {
     assert_eq!(set.last().await.unwrap().unwrap().0, "d");
 }
 
+// Redisson: testFirstLastScore
 #[tokio::test]
-async fn test_first_last_score() {
+async fn first_score_and_last_score_return_the_extreme_scores() {
     let set = strings(&[(0.1, "a"), (0.2, "b"), (0.3, "c"), (0.4, "d")]).await;
     let empty = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(empty.first_score().await.unwrap(), None);
@@ -559,8 +583,9 @@ async fn test_first_last_score() {
     assert_eq!(set.last_score().await.unwrap(), Some(0.4));
 }
 
+// Redisson: testRemoveRangeByScore
 #[tokio::test]
-async fn test_remove_range_by_score() {
+async fn remove_by_score_honors_excluded_and_included_bounds() {
     use std::ops::Bound::{Excluded, Included};
     let set = seven().await;
     assert_eq!(
@@ -572,8 +597,9 @@ async fn test_remove_range_by_score() {
     assert_eq!(ordered(&set).await, ["a", "d", "e", "f", "g"]);
 }
 
+// Redisson: testRemoveRangeByScoreNegativeInf
 #[tokio::test]
-async fn test_remove_range_by_score_negative_inf() {
+async fn remove_by_score_accepts_a_negative_infinite_start() {
     use std::ops::Bound::{Excluded, Included};
     let set = seven().await;
     assert_eq!(
@@ -585,8 +611,9 @@ async fn test_remove_range_by_score_negative_inf() {
     assert_eq!(ordered(&set).await, ["d", "e", "f", "g"]);
 }
 
+// Redisson: testRemoveRangeByScorePositiveInf
 #[tokio::test]
-async fn test_remove_range_by_score_positive_inf() {
+async fn remove_by_score_accepts_a_positive_infinite_end() {
     use std::ops::Bound::{Excluded, Included};
     let set = seven().await;
     assert_eq!(
@@ -598,15 +625,17 @@ async fn test_remove_range_by_score_positive_inf() {
     assert_eq!(ordered(&set).await, ["a", "b", "c", "d"]);
 }
 
+// Redisson: testRemoveRangeByRank
 #[tokio::test]
-async fn test_remove_range_by_rank() {
+async fn remove_range_drops_values_by_rank() {
     let set = seven().await;
     assert_eq!(set.remove_range(0..2).await.unwrap(), 2);
     assert_eq!(ordered(&set).await, ["c", "d", "e", "f", "g"]);
 }
 
+// Redisson: testRank
 #[tokio::test]
-async fn test_rank() {
+async fn rev_rank_many_ranks_values_and_reports_missing_as_none() {
     let set = seven().await;
     assert_eq!(set.rev_rank("d").await.unwrap(), Some(3));
     assert_eq!(
@@ -618,23 +647,26 @@ async fn test_rank() {
     assert_eq!(set.rank("abc").await.unwrap(), None);
 }
 
+// Redisson: testRevRank
 #[tokio::test]
-async fn test_rev_rank() {
+async fn rev_rank_counts_from_the_highest_score() {
     let set = seven().await;
     assert_eq!(set.rev_rank("f").await.unwrap(), Some(1));
     assert_eq!(set.rev_rank("abc").await.unwrap(), None);
 }
 
+// Redisson: testAddAsync
 #[tokio::test]
-async fn test_add_async() {
+async fn insert_reports_whether_the_value_was_new() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     assert!(set.insert(&2, 0.323).await.unwrap());
     assert!(!set.insert(&2, 0.323).await.unwrap());
     assert!(set.contains(&2).await.unwrap());
 }
 
+// Redisson: testAddAndGetRank
 #[tokio::test]
-async fn test_add_and_get_rank() {
+async fn insert_and_rank_returns_the_rank_of_the_new_value() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     assert_eq!(set.insert_and_rank(&1, 0.3).await.unwrap(), 0);
     assert_eq!(set.insert_and_rank(&2, 0.4).await.unwrap(), 1);
@@ -642,8 +674,9 @@ async fn test_add_and_get_rank() {
     assert!(set.contains(&3).await.unwrap());
 }
 
+// Redisson: testAddAndGetRevRank
 #[tokio::test]
-async fn test_add_and_get_rev_rank() {
+async fn insert_and_rev_rank_returns_the_reverse_rank_of_the_new_value() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     assert_eq!(set.insert_and_rev_rank(&1, 0.3).await.unwrap(), 0);
     assert_eq!(set.insert_and_rev_rank(&2, 0.4).await.unwrap(), 0);
@@ -651,8 +684,9 @@ async fn test_add_and_get_rev_rank() {
     assert!(set.contains(&3).await.unwrap());
 }
 
+// Redisson: testRemoveAsync
 #[tokio::test]
-async fn test_remove_async() {
+async fn remove_deletes_a_value_once_and_keeps_the_rest() {
     let set = numbers(&[(0.11, 1), (0.22, 3), (0.33, 7)]).await;
     assert!(set.remove(&1).await.unwrap());
     assert!(!set.contains(&1).await.unwrap());
@@ -664,8 +698,9 @@ async fn test_remove_async() {
     assert_eq!(ordered(&set).await, [7]);
 }
 
+// Redisson: testIteratorNextNext
 #[tokio::test]
-async fn test_iterator_next_next() {
+async fn iter_ends_after_the_last_value() {
     let set = strings(&[(1.0, "1"), (2.0, "4")]).await;
     let mut iter = Box::pin(set.iter());
     let mut seen = vec![
@@ -677,8 +712,9 @@ async fn test_iterator_next_next() {
     assert!(iter.next().await.is_none());
 }
 
+// Redisson: testIteratorRemove
 #[tokio::test]
-async fn test_iterator_remove() {
+async fn removing_values_while_iterating_empties_the_set() {
     let set = strings(&[(1.0, "1"), (2.0, "4"), (3.0, "2"), (4.0, "5"), (5.0, "3")]).await;
     let all: Vec<(String, f64)> = set
         .iter()
@@ -706,8 +742,9 @@ async fn test_iterator_remove() {
     assert!(set.is_empty().await.unwrap());
 }
 
+// Redisson: testIteratorSequence
 #[tokio::test]
-async fn test_iterator_sequence() {
+async fn iter_yields_a_thousand_values_exactly_once() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     let entries: Vec<(i32, f64)> = (0..1000).map(|i| (i, f64::from(i))).collect();
     set.extend(entries.iter().map(|(v, s)| (v, *s)))
@@ -723,8 +760,9 @@ async fn test_iterator_sequence() {
     assert_eq!(read, (0..1000).collect());
 }
 
+// Redisson: testRetainAll
 #[tokio::test]
-async fn test_retain_all() {
+async fn retain_keeps_only_the_given_values_and_their_scores() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     let entries: Vec<(i32, f64)> = (0..20_000).map(|i| (i, f64::from(i * 10))).collect();
     set.extend(entries.iter().map(|(v, s)| (v, *s)))
@@ -737,16 +775,18 @@ async fn test_retain_all() {
     assert_eq!(set.score(&2).await.unwrap(), Some(20.0));
 }
 
+// Redisson: testRemoveAll
 #[tokio::test]
-async fn test_remove_all() {
+async fn remove_many_deletes_the_given_values() {
     let set = numbers(&[(0.1, 1), (0.2, 2), (0.3, 3)]).await;
     assert_eq!(set.remove_many(&[&1, &2]).await.unwrap(), 2);
     assert_eq!(ordered(&set).await, [3]);
     assert_eq!(set.len().await.unwrap(), 1);
 }
 
+// Redisson: testSort
 #[tokio::test]
-async fn test_sort() {
+async fn values_are_ordered_by_score() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     for (score, value) in [
         (4.0, 2),
@@ -762,16 +802,18 @@ async fn test_sort() {
     assert_eq!(ordered(&set).await, [-1, 0, 1, 2, 3, 4, 10]);
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn remove_reports_whether_the_value_was_present() {
     let set = numbers(&[(4.0, 5), (2.0, 3), (0.0, 1), (1.0, 2), (3.0, 4)]).await;
     assert!(!set.remove(&0).await.unwrap());
     assert!(set.remove(&3).await.unwrap());
     assert_eq!(ordered(&set).await, [1, 2, 4, 5]);
 }
 
+// Redisson: testContainsAll
 #[tokio::test]
-async fn test_contains_all() {
+async fn contains_all_is_true_only_when_every_value_is_present() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     let entries: Vec<(i32, f64)> = (0..200).map(|i| (i, f64::from(i))).collect();
     set.extend(entries.iter().map(|(v, s)| (v, *s)))
@@ -782,8 +824,9 @@ async fn test_contains_all() {
     assert!(set.contains_all::<i32>(&[]).await.unwrap());
 }
 
+// Redisson: testToArray
 #[tokio::test]
-async fn test_to_array() {
+async fn full_range_lists_values_in_score_order() {
     let set = strings(&[(0.0, "1"), (1.0, "4"), (2.0, "2"), (3.0, "5"), (4.0, "3")]).await;
     assert_eq!(ordered(&set).await, ["1", "4", "2", "5", "3"]);
 }
@@ -801,8 +844,9 @@ fn object(name: &str, value: &str) -> TestObject {
     }
 }
 
+// Redisson: testContains
 #[tokio::test]
-async fn test_contains() {
+async fn contains_finds_structured_values_by_equality() {
     let set = client().await.sorted_set::<TestObject>(unique("zset"));
     for (score, (name, value)) in [("1", "2"), ("1", "2"), ("2", "3"), ("3", "4"), ("5", "6")]
         .into_iter()
@@ -817,8 +861,9 @@ async fn test_contains() {
     assert!(!set.contains(&object("1", "9")).await.unwrap());
 }
 
+// Redisson: testDuplicates
 #[tokio::test]
-async fn test_duplicates() {
+async fn inserting_a_duplicate_structured_value_is_ignored() {
     let set = client().await.sorted_set::<TestObject>(unique("zset"));
     assert!(set.insert(&object("1", "2"), 0.0).await.unwrap());
     assert!(!set.insert(&object("1", "2"), 0.0).await.unwrap());
@@ -828,8 +873,9 @@ async fn test_duplicates() {
     assert_eq!(set.len().await.unwrap(), 4);
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn len_counts_each_value_once_despite_duplicates() {
     let set = numbers(&[
         (0.0, 1),
         (1.0, 2),
@@ -843,8 +889,9 @@ async fn test_size() {
     assert_eq!(set.len().await.unwrap(), 5);
 }
 
+// Redisson: testValueRange
 #[tokio::test]
-async fn test_value_range() {
+async fn range_returns_values_in_ascending_score_order() {
     let set = numbers(&[(0.0, 1), (1.0, 2), (2.0, 3), (3.0, 4), (4.0, 5), (4.0, 5)]).await;
     assert_eq!(
         values(set.range(0..usize::MAX).await.unwrap()),
@@ -852,8 +899,9 @@ async fn test_value_range() {
     );
 }
 
+// Redisson: testValueRangeReversedInfinity
 #[tokio::test]
-async fn test_value_range_reversed_infinity() {
+async fn rev_range_by_score_limit_accepts_an_unbounded_range() {
     let set = numbers(&[(1.0, 1), (2.0, 2)]).await;
     assert_eq!(
         values(set.rev_range_by_score_limit(.., 0, 1).await.unwrap()),
@@ -861,8 +909,9 @@ async fn test_value_range_reversed_infinity() {
     );
 }
 
+// Redisson: testValueRangeReversed
 #[tokio::test]
-async fn test_value_range_reversed() {
+async fn rev_range_returns_values_in_descending_score_order() {
     let set = numbers(&[(0.0, 1), (1.0, 2), (2.0, 3), (3.0, 4), (4.0, 5), (4.0, 5)]).await;
     assert_eq!(
         values(set.rev_range(0..usize::MAX).await.unwrap()),
@@ -870,8 +919,9 @@ async fn test_value_range_reversed() {
     );
 }
 
+// Redisson: testEntryRange
 #[tokio::test]
-async fn test_entry_range() {
+async fn range_returns_entries_with_their_scores() {
     let set = numbers(&[(10.0, 1), (20.0, 2), (30.0, 3), (40.0, 4), (50.0, 5)]).await;
     assert_eq!(
         set.range(0..usize::MAX).await.unwrap(),
@@ -879,8 +929,9 @@ async fn test_entry_range() {
     );
 }
 
+// Redisson: testEntryRangeReversed
 #[tokio::test]
-async fn test_entry_range_reversed() {
+async fn rev_range_returns_entries_with_their_scores() {
     let set = numbers(&[(10.0, 1), (20.0, 2), (30.0, 3), (40.0, 4), (50.0, 5)]).await;
     assert_eq!(
         set.rev_range(0..usize::MAX).await.unwrap(),
@@ -888,8 +939,9 @@ async fn test_entry_range_reversed() {
     );
 }
 
+// Redisson: testValueRangeLimit
 #[tokio::test]
-async fn test_value_range_limit() {
+async fn range_by_score_limit_skips_offset_and_takes_count() {
     let set = letters().await;
     assert_eq!(
         values(set.range_by_score_limit(1.0..4.0, 1, 2).await.unwrap()),
@@ -897,8 +949,9 @@ async fn test_value_range_limit() {
     );
 }
 
+// Redisson: testValueRangeAlpha
 #[tokio::test]
-async fn test_value_range_alpha() {
+async fn range_by_score_excludes_the_end_of_a_half_open_range() {
     let set = letters().await;
     assert_eq!(
         values(set.range_by_score(1.0..4.0).await.unwrap()),
@@ -906,8 +959,9 @@ async fn test_value_range_alpha() {
     );
 }
 
+// Redisson: testValueRangeReversedLimit
 #[tokio::test]
-async fn test_value_range_reversed_limit() {
+async fn rev_range_by_score_limit_skips_offset_from_the_top() {
     let set = letters().await;
     assert_eq!(
         values(set.rev_range_by_score_limit(1.0..4.0, 1, 2).await.unwrap()),
@@ -915,8 +969,9 @@ async fn test_value_range_reversed_limit() {
     );
 }
 
+// Redisson: testValueRangeReversedAlpha
 #[tokio::test]
-async fn test_value_range_reversed_alpha() {
+async fn rev_range_by_score_lists_the_range_from_the_top() {
     let set = letters().await;
     assert_eq!(
         values(set.rev_range_by_score(1.0..4.0).await.unwrap()),
@@ -924,8 +979,9 @@ async fn test_value_range_reversed_alpha() {
     );
 }
 
+// Redisson: testValueRangeNegativeInf
 #[tokio::test]
-async fn test_value_range_negative_inf() {
+async fn range_by_score_limit_accepts_a_negative_infinite_start() {
     let set = letters().await;
     assert_eq!(
         values(
@@ -937,8 +993,9 @@ async fn test_value_range_negative_inf() {
     );
 }
 
+// Redisson: testValueRangePositiveInf
 #[tokio::test]
-async fn test_value_range_positive_inf() {
+async fn range_by_score_limit_accepts_a_positive_infinite_end() {
     use std::ops::Bound::{Excluded, Included};
     let set = letters().await;
     assert_eq!(
@@ -951,8 +1008,9 @@ async fn test_value_range_positive_inf() {
     );
 }
 
+// Redisson: testEntryRangeAlpha
 #[tokio::test]
-async fn test_entry_range_alpha() {
+async fn range_by_score_limit_returns_entries_with_scores() {
     let set = letters().await;
     assert_eq!(
         set.range_by_score_limit(1.0..4.0, 1, 2).await.unwrap(),
@@ -960,8 +1018,9 @@ async fn test_entry_range_alpha() {
     );
 }
 
+// Redisson: testEntryRangeReversedAlpha
 #[tokio::test]
-async fn test_entry_range_reversed_alpha() {
+async fn rev_range_by_score_limit_returns_entries_with_scores() {
     let set = letters().await;
     assert_eq!(
         set.rev_range_by_score_limit(1.0..4.0, 1, 2).await.unwrap(),
@@ -969,8 +1028,9 @@ async fn test_entry_range_reversed_alpha() {
     );
 }
 
+// Redisson: testEntryRangeNegativeInf
 #[tokio::test]
-async fn test_entry_range_negative_inf() {
+async fn range_by_score_limit_accepts_a_range_without_a_start() {
     let set = letters().await;
     assert_eq!(
         set.range_by_score_limit(..4.0, 1, 2).await.unwrap(),
@@ -978,8 +1038,9 @@ async fn test_entry_range_negative_inf() {
     );
 }
 
+// Redisson: testEntryRangePositiveInf
 #[tokio::test]
-async fn test_entry_range_positive_inf() {
+async fn range_by_score_limit_accepts_a_range_without_an_end() {
     let set = letters().await;
     assert_eq!(
         set.range_by_score_limit(1.0.., 1, 2).await.unwrap(),
@@ -987,8 +1048,9 @@ async fn test_entry_range_positive_inf() {
     );
 }
 
+// Redisson: testAddAndGet
 #[tokio::test]
-async fn test_add_and_get() {
+async fn add_score_returns_and_stores_the_new_score() {
     let set = strings(&[(1.0, "100")]).await;
     assert_eq!(set.add_score("100", 11.0).await.unwrap(), 12.0);
     assert_eq!(set.score("100").await.unwrap(), Some(12.0));
@@ -997,8 +1059,9 @@ async fn test_add_and_get() {
     assert_eq!(set.score("1").await.unwrap(), Some(112.3));
 }
 
+// Redisson: testAddAndGetAll
 #[tokio::test]
-async fn test_add_and_get_all() {
+async fn scores_returns_none_for_missing_values() {
     let set = strings(&[(100.2, "1")]).await;
     assert_eq!(set.add_score("1", 12.1).await.unwrap(), 112.3);
     assert_eq!(set.score("1").await.unwrap(), Some(112.3));
@@ -1008,8 +1071,9 @@ async fn test_add_and_get_all() {
     );
 }
 
+// Redisson: testAddScoreAndGetRank
 #[tokio::test]
-async fn test_add_score_and_get_rank() {
+async fn add_score_and_rank_returns_the_rank_after_the_update() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(set.add_score_and_rank("12", 12.0).await.unwrap(), 0);
     assert_eq!(set.add_score_and_rank("15", 10.0).await.unwrap(), 0);
@@ -1019,8 +1083,9 @@ async fn test_add_score_and_get_rank() {
     assert_eq!(set.score("12").await.unwrap(), Some(14.0));
 }
 
+// Redisson: testAddScoreAndGetRevRank
 #[tokio::test]
-async fn test_add_score_and_get_rev_rank() {
+async fn add_score_and_rev_rank_returns_the_reverse_rank_after_the_update() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     assert_eq!(set.add_score_and_rev_rank("12", 12.0).await.unwrap(), 0);
     assert_eq!(set.add_score_and_rev_rank("15", 10.0).await.unwrap(), 1);
@@ -1031,8 +1096,9 @@ async fn test_add_score_and_get_rev_rank() {
     assert_eq!(set.score("12").await.unwrap(), Some(14.0));
 }
 
+// Redisson: testAddAndGetRevRankCollection
 #[tokio::test]
-async fn test_add_and_get_rev_rank_collection() {
+async fn rev_rank_many_ranks_several_values_from_the_top() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     set.extend([("one", 1.0), ("three", 3.0), ("two", 2.0)])
         .await
@@ -1043,8 +1109,9 @@ async fn test_add_and_get_rev_rank_collection() {
     );
 }
 
+// Redisson: testReadIntersection
 #[tokio::test]
-async fn test_read_intersection() {
+async fn intersection_returns_values_present_in_every_set() {
     let [set1, set2, _] = pair(
         &[(1.0, "one"), (2.0, "two"), (2.0, "four")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],
@@ -1056,8 +1123,9 @@ async fn test_read_intersection() {
     );
 }
 
+// Redisson: testReadIntersectionEntries
 #[tokio::test]
-async fn test_read_intersection_entries() {
+async fn intersection_sums_scores_and_applies_weights() {
     let [set1, set2, _] = pair(
         &[(1.0, "one"), (2.0, "two"), (2.0, "four")],
         &[(1.0, "one"), (3.0, "two"), (3.0, "three")],
@@ -1077,8 +1145,9 @@ async fn test_read_intersection_entries() {
     );
 }
 
+// Redisson: testIntersection
 #[tokio::test]
-async fn test_intersection() {
+async fn store_intersection_writes_common_values_with_summed_scores() {
     let [set1, set2, out] = pair(
         &[(1.0, "one"), (2.0, "two")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],
@@ -1090,8 +1159,9 @@ async fn test_intersection() {
     assert_eq!(out.score("two").await.unwrap(), Some(4.0));
 }
 
+// Redisson: testIntersectionEmpty
 #[tokio::test]
-async fn test_intersection_empty() {
+async fn store_intersection_of_disjoint_sets_is_empty() {
     let [set1, set2, out] = pair(
         &[(1.0, "one"), (2.0, "two")],
         &[(3.0, "three"), (4.0, "four")],
@@ -1101,8 +1171,9 @@ async fn test_intersection_empty() {
     assert!(out.is_empty().await.unwrap());
 }
 
+// Redisson: testIntersectionWithWeight
 #[tokio::test]
-async fn test_intersection_with_weight() {
+async fn store_intersection_with_weights_scales_the_scores() {
     let [set1, set2, out] = pair(
         &[(1.0, "one"), (2.0, "two")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],
@@ -1119,8 +1190,9 @@ async fn test_intersection_with_weight() {
     assert_eq!(out.score("two").await.unwrap(), Some(10.0));
 }
 
+// Redisson: testReadUnion
 #[tokio::test]
-async fn test_read_union() {
+async fn union_returns_values_present_in_any_set() {
     let [set1, set2, _] = pair(
         &[(1.0, "one"), (2.0, "two"), (4.0, "four")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],
@@ -1132,8 +1204,9 @@ async fn test_read_union() {
     );
 }
 
+// Redisson: testReadUnionEntries
 #[tokio::test]
-async fn test_read_union_entries() {
+async fn union_sums_scores_and_applies_weights() {
     let [set1, set2, _] = pair(
         &[(1.0, "one"), (2.0, "two"), (2.0, "four")],
         &[(1.0, "one"), (3.0, "two"), (3.0, "three")],
@@ -1163,8 +1236,9 @@ async fn test_read_union_entries() {
     );
 }
 
+// Redisson: testUnion
 #[tokio::test]
-async fn test_union() {
+async fn store_union_writes_all_values_with_summed_scores() {
     let [set1, set2, out] = pair(
         &[(1.0, "one"), (2.0, "two")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],
@@ -1178,8 +1252,9 @@ async fn test_union() {
     );
 }
 
+// Redisson: testUnionWithWeight
 #[tokio::test]
-async fn test_union_with_weight() {
+async fn store_union_with_weights_scales_the_scores() {
     let [set1, set2, out] = pair(
         &[(1.0, "one"), (2.0, "two")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],
@@ -1197,8 +1272,9 @@ async fn test_union_with_weight() {
     );
 }
 
+// Redisson: testReadDiffEntries
 #[tokio::test]
-async fn test_read_diff_entries() {
+async fn difference_returns_entries_missing_from_the_other_sets() {
     let [set1, set2, _] = pair(
         &[(1.0, "one"), (2.0, "two")],
         &[(1.0, "one"), (2.0, "two"), (3.0, "three")],

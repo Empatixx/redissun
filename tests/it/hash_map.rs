@@ -175,8 +175,9 @@ async fn null_values_are_distinct_from_missing_keys() {
     assert_eq!(map.get("missing").await.unwrap(), None);
 }
 
+// Redisson: testPutIfAbsent
 #[tokio::test]
-async fn test_put_if_absent() {
+async fn insert_if_absent_returns_the_existing_value_and_keeps_it() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert_eq!(
@@ -191,8 +192,9 @@ async fn test_put_if_absent() {
     assert_eq!(map.get(&key("2")).await.unwrap(), Some(value("4")));
 }
 
+// Redisson: testFastPutIfAbsent
 #[tokio::test]
-async fn test_fast_put_if_absent() {
+async fn insert_nx_does_not_overwrite_an_existing_key() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(!map.insert_nx(&key("1"), &value("3")).await.unwrap());
@@ -201,8 +203,9 @@ async fn test_fast_put_if_absent() {
     assert_eq!(map.get(&key("2")).await.unwrap(), Some(value("4")));
 }
 
+// Redisson: testFastPutIfExists
 #[tokio::test]
-async fn test_fast_put_if_exists() {
+async fn fast_insert_if_exists_updates_only_an_existing_key() {
     let map = simple().await;
     assert!(!map
         .fast_insert_if_exists(&key("1"), &value("3"))
@@ -217,8 +220,9 @@ async fn test_fast_put_if_exists() {
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
 }
 
+// Redisson: testPutIfExists
 #[tokio::test]
-async fn test_put_if_exists() {
+async fn insert_if_exists_returns_the_previous_value_of_an_existing_key() {
     let map = simple().await;
     assert_eq!(
         map.insert_if_exists(&key("1"), &value("3")).await.unwrap(),
@@ -233,8 +237,9 @@ async fn test_put_if_exists() {
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
 }
 
+// Redisson: testDeserializationErrorReturnsErrorImmediately
 #[tokio::test]
-async fn test_deserialization_error_returns_error_immediately() {
+async fn a_value_of_another_type_fails_with_a_codec_error() {
     let client = client().await;
     let name = unique("map");
     client
@@ -249,8 +254,9 @@ async fn test_deserialization_error_returns_error_immediately() {
     ));
 }
 
+// Redisson: testReplaceOldValueFail
 #[tokio::test]
-async fn test_replace_old_value_fail() {
+async fn replace_if_keeps_the_value_when_the_old_value_differs() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(!map
@@ -260,8 +266,9 @@ async fn test_replace_old_value_fail() {
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
 }
 
+// Redisson: testReplaceOldValueSuccess
 #[tokio::test]
-async fn test_replace_old_value_success() {
+async fn replace_if_swaps_the_value_when_the_old_value_matches() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(map
@@ -275,8 +282,9 @@ async fn test_replace_old_value_success() {
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
 }
 
+// Redisson: testReplaceValue
 #[tokio::test]
-async fn test_replace_value() {
+async fn replace_returns_the_previous_value_and_skips_missing_keys() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert_eq!(
@@ -288,31 +296,35 @@ async fn test_replace_value() {
     assert!(!map.contains_key(&key("9")).await.unwrap());
 }
 
+// Redisson: testReplace
 #[tokio::test]
-async fn test_replace() {
+async fn insert_overwrites_the_value_of_an_existing_key() {
     let map = simple_three().await;
     assert_eq!(map.get(&key("33")).await.unwrap(), Some(value("44")));
     map.insert(&key("33"), &value("abc")).await.unwrap();
     assert_eq!(map.get(&key("33")).await.unwrap(), Some(value("abc")));
 }
 
+// Redisson: testContainsValue
 #[tokio::test]
-async fn test_contains_value() {
+async fn contains_value_finds_only_stored_values() {
     let map = simple_three().await;
     assert!(map.contains_value(&value("2")).await.unwrap());
     assert!(!map.contains_value(&value("441")).await.unwrap());
     assert!(!map.contains_value(&value("5")).await.unwrap());
 }
 
+// Redisson: testContainsKey
 #[tokio::test]
-async fn test_contains_key() {
+async fn contains_key_finds_only_stored_keys() {
     let map = simple_three().await;
     assert!(map.contains_key(&key("33")).await.unwrap());
     assert!(!map.contains_key(&key("34")).await.unwrap());
 }
 
+// Redisson: testRemoveValueFail
 #[tokio::test]
-async fn test_remove_value_fail() {
+async fn remove_if_keeps_the_entry_when_key_or_value_differs() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(!map.remove_if(&key("2"), &value("1")).await.unwrap());
@@ -320,8 +332,9 @@ async fn test_remove_value_fail() {
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
 }
 
+// Redisson: testRemoveValue
 #[tokio::test]
-async fn test_remove_value() {
+async fn remove_if_deletes_the_entry_when_the_value_matches() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(map.remove_if(&key("1"), &value("2")).await.unwrap());
@@ -329,8 +342,9 @@ async fn test_remove_value() {
     assert_eq!(map.len().await.unwrap(), 0);
 }
 
+// Redisson: testRemoveObject
 #[tokio::test]
-async fn test_remove_object() {
+async fn remove_returns_the_value_of_a_structured_key() {
     let map = simple_three().await;
     assert_eq!(map.remove(&key("33")).await.unwrap(), Some(value("44")));
     assert_eq!(map.remove(&key("5")).await.unwrap(), Some(value("6")));
@@ -338,8 +352,9 @@ async fn test_remove_object() {
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
+// Redisson: testRemove
 #[tokio::test]
-async fn test_remove() {
+async fn remove_returns_the_value_or_none_for_a_missing_key() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.insert(&1, &3).await.unwrap();
     map.insert(&3, &5).await.unwrap();
@@ -350,8 +365,9 @@ async fn test_remove() {
     assert_eq!(map.remove(&7).await.unwrap(), Some(8));
 }
 
+// Redisson: testFastRemove
 #[tokio::test]
-async fn test_fast_remove() {
+async fn fast_remove_returns_the_number_of_removed_keys() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.extend([(&1, &3), (&3, &5), (&4, &6), (&7, &8)])
         .await
@@ -360,16 +376,18 @@ async fn test_fast_remove() {
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
+// Redisson: testFastRemoveEmpty
 #[tokio::test]
-async fn test_fast_remove_empty() {
+async fn fast_remove_without_keys_removes_nothing() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.insert(&1, &3).await.unwrap();
     assert_eq!(map.fast_remove::<i32>(&[]).await.unwrap(), 0);
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
+// Redisson: testFastPut
 #[tokio::test]
-async fn test_fast_put() {
+async fn fast_insert_reports_whether_the_key_was_new() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     assert!(map.fast_insert(&1, &2).await.unwrap());
     assert_eq!(map.get(&1).await.unwrap(), Some(2));
@@ -378,8 +396,9 @@ async fn test_fast_put() {
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
+// Redisson: testFastReplace
 #[tokio::test]
-async fn test_fast_replace() {
+async fn fast_replace_updates_only_an_existing_key() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.insert(&1, &2).await.unwrap();
     assert!(map.fast_replace(&1, &3).await.unwrap());
@@ -388,24 +407,27 @@ async fn test_fast_replace() {
     assert_eq!(map.get(&1).await.unwrap(), Some(3));
 }
 
+// Redisson: testEmptyRemove
 #[tokio::test]
-async fn test_empty_remove() {
+async fn remove_if_on_a_missing_key_returns_false() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     assert!(!map.remove_if(&1, &3).await.unwrap());
     map.insert(&4, &5).await.unwrap();
     assert!(map.remove_if(&4, &5).await.unwrap());
 }
 
+// Redisson: testValueSize
 #[tokio::test]
-async fn test_value_size() {
+async fn value_size_returns_the_encoded_length_or_zero() {
     let map = client().await.hash_map::<String, String>(unique("getAll"));
     map.insert("1", "1234").await.unwrap();
     assert_eq!(map.value_size("4").await.unwrap(), 0);
     assert_eq!(map.value_size("1").await.unwrap(), 6);
 }
 
+// Redisson: testAddAndGet
 #[tokio::test]
-async fn test_add_and_get() {
+async fn incr_by_and_incr_by_float_add_to_the_stored_number() {
     let client = client().await;
     let ints = client.hash_map::<i32, i64>(unique("getAll"));
     ints.insert(&1, &100).await.unwrap();
@@ -423,8 +445,9 @@ async fn test_add_and_get() {
     assert_eq!(strings.get("1").await.unwrap(), Some(112));
 }
 
+// Redisson: testGetAll
 #[tokio::test]
-async fn test_get_all() {
+async fn get_many_returns_none_for_missing_keys() {
     let map = client().await.hash_map::<i32, i32>(unique("getAll"));
     map.extend([(&1, &100), (&2, &200), (&3, &300), (&4, &400)])
         .await
@@ -435,8 +458,9 @@ async fn test_get_all() {
     );
 }
 
+// Redisson: testGetAllWithStringKeys
 #[tokio::test]
-async fn test_get_all_with_string_keys() {
+async fn get_many_with_string_keys_returns_none_for_missing_keys() {
     let map = client()
         .await
         .hash_map::<String, i32>(unique("getAllStrings"));
@@ -449,8 +473,9 @@ async fn test_get_all_with_string_keys() {
     );
 }
 
+// Redisson: testGetAllBig
 #[tokio::test]
-async fn test_get_all_big() {
+async fn get_many_reads_ten_thousand_keys_in_order() {
     let map = client().await.hash_map::<i32, String>(unique("simple"));
     let entries: Vec<(i32, String)> = (0..10_000).map(|i| (i, i.to_string())).collect();
     map.extend(entries.iter().map(|(k, v)| (k, v)))
@@ -466,8 +491,9 @@ async fn test_get_all_big() {
         .all(|(i, v)| v.as_deref() == Some(i.to_string().as_str())));
 }
 
+// Redisson: testSize
 #[tokio::test]
-async fn test_size() {
+async fn len_counts_each_key_once_after_overwrites() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     map.insert(&key("3"), &value("4")).await.unwrap();
@@ -485,15 +511,17 @@ async fn test_size() {
     assert_eq!(map.len().await.unwrap(), 3);
 }
 
+// Redisson: testPutGet
 #[tokio::test]
-async fn test_put_get() {
+async fn get_returns_the_inserted_value() {
     let map = simple_three().await;
     assert_eq!(map.get(&key("33")).await.unwrap(), Some(value("44")));
     assert_eq!(map.get(&key("5")).await.unwrap(), Some(value("6")));
 }
 
+// Redisson: testSimpleTypes
 #[tokio::test]
-async fn test_simple_types() {
+async fn integer_keys_map_to_string_values() {
     let map = client().await.hash_map::<i32, String>(unique("simple12"));
     map.insert(&1, "12").await.unwrap();
     map.insert(&2, "33").await.unwrap();
@@ -501,8 +529,9 @@ async fn test_simple_types() {
     assert_eq!(map.get(&2).await.unwrap().as_deref(), Some("33"));
 }
 
+// Redisson: testInteger
 #[tokio::test]
-async fn test_integer() {
+async fn i32_keys_and_values_round_trip() {
     let map = client().await.hash_map::<i32, i32>(unique("test_int"));
     map.insert(&1, &2).await.unwrap();
     map.insert(&3, &4).await.unwrap();
@@ -511,8 +540,9 @@ async fn test_integer() {
     assert_eq!(map.get(&3).await.unwrap(), Some(4));
 }
 
+// Redisson: testLong
 #[tokio::test]
-async fn test_long() {
+async fn i64_keys_and_values_round_trip() {
     let map = client().await.hash_map::<i64, i64>(unique("test_long"));
     map.insert(&1, &2).await.unwrap();
     map.insert(&3, &4).await.unwrap();
@@ -521,8 +551,9 @@ async fn test_long() {
     assert_eq!(map.get(&3).await.unwrap(), Some(4));
 }
 
+// Redisson: testPutAll
 #[tokio::test]
-async fn test_put_all() {
+async fn extend_adds_entries_to_existing_ones() {
     let map = client().await.hash_map::<i32, String>(unique("simple"));
     map.insert(&1, "1").await.unwrap();
     map.insert(&2, "2").await.unwrap();
@@ -533,8 +564,9 @@ async fn test_put_all() {
     assert_eq!(keys, vec![1, 2, 3, 4, 5, 6]);
 }
 
+// Redisson: testPutAllBig
 #[tokio::test]
-async fn test_put_all_big() {
+async fn extend_inserts_a_hundred_thousand_entries() {
     let map = client().await.hash_map::<i32, String>(unique("simple"));
     let entries: Vec<(i32, String)> = (0..100_000).map(|i| (i, i.to_string())).collect();
     map.extend(entries.iter().map(|(k, v)| (k, v)))
@@ -543,8 +575,9 @@ async fn test_put_all_big() {
     assert_eq!(map.len().await.unwrap(), 100_000);
 }
 
+// Redisson: testRandomKeys
 #[tokio::test]
-async fn test_random_keys() {
+async fn random_keys_returns_distinct_stored_keys() {
     let map = client().await.hash_map::<i32, i32>(unique("map"));
     assert!(map.random_keys(1).await.unwrap().is_empty());
     map.extend([(&1, &11), (&2, &21), (&3, &31), (&4, &41)])
@@ -556,24 +589,27 @@ async fn test_random_keys() {
     assert_ne!(keys[0], keys[1]);
 }
 
+// Redisson: testReadAllValues
 #[tokio::test]
-async fn test_read_all_values() {
+async fn read_all_values_returns_every_value() {
     let map = simple_three().await;
     let mut values = map.read_all_values().await.unwrap();
     values.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(values, vec![value("2"), value("44"), value("6")]);
 }
 
+// Redisson: testReadAllKeySet
 #[tokio::test]
-async fn test_read_all_key_set() {
+async fn read_all_keys_returns_every_key() {
     let map = simple_three().await;
     let mut keys = map.read_all_keys().await.unwrap();
     keys.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(keys, vec![key("1"), key("33"), key("5")]);
 }
 
+// Redisson: testReadAllKeySetHighAmount
 #[tokio::test]
-async fn test_read_all_key_set_high_amount() {
+async fn read_all_keys_returns_a_thousand_keys() {
     let map = simple().await;
     let entries: Vec<(SimpleKey, SimpleValue)> = (0..1000)
         .map(|i| (key(&i.to_string()), value(&i.to_string())))
@@ -584,8 +620,9 @@ async fn test_read_all_key_set_high_amount() {
     assert_eq!(map.read_all_keys().await.unwrap().len(), 1000);
 }
 
+// Redisson: testReadAllEntrySet
 #[tokio::test]
-async fn test_read_all_entry_set() {
+async fn read_all_entries_returns_every_entry() {
     let map = client().await.hash_map::<i32, String>(unique("simple12"));
     map.insert(&1, "12").await.unwrap();
     map.insert(&2, "33").await.unwrap();
@@ -598,8 +635,9 @@ async fn test_read_all_entry_set() {
     assert_eq!(entries, expected);
 }
 
+// Redisson: testEntrySet
 #[tokio::test]
-async fn test_entry_set() {
+async fn iter_yields_every_entry() {
     let map = client().await.hash_map::<i32, String>(unique("simple12"));
     map.insert(&1, "12").await.unwrap();
     map.insert(&2, "33").await.unwrap();
@@ -609,16 +647,18 @@ async fn test_entry_set() {
     assert_eq!(entries.get(&2).map(String::as_str), Some("33"));
 }
 
+// Redisson: testKeySet
 #[tokio::test]
-async fn test_key_set() {
+async fn keys_yields_every_structured_key() {
     let map = simple_three().await;
     let mut keys: Vec<SimpleKey> = map.keys().try_collect().await.unwrap();
     keys.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(keys, vec![key("1"), key("33"), key("5")]);
 }
 
+// Redisson: testKeyIterator
 #[tokio::test]
-async fn test_key_iterator() {
+async fn keys_yields_every_integer_key() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.extend([(&1, &0), (&3, &5), (&4, &6), (&7, &8)])
         .await
@@ -628,8 +668,9 @@ async fn test_key_iterator() {
     assert_eq!(keys, vec![1, 3, 4, 7]);
 }
 
+// Redisson: testValueIterator
 #[tokio::test]
-async fn test_value_iterator() {
+async fn values_yields_every_value() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.extend([(&1, &0), (&3, &5), (&4, &6), (&7, &8)])
         .await
@@ -639,8 +680,9 @@ async fn test_value_iterator() {
     assert_eq!(values, vec![0, 5, 6, 8]);
 }
 
+// Redisson: testIterator
 #[tokio::test]
-async fn test_iterator() {
+async fn keys_values_and_iter_each_yield_a_thousand_items() {
     let map = client().await.hash_map::<i32, i32>(unique("123"));
     let entries: Vec<(i32, i32)> = (0..1000).map(|i| (i, i)).collect();
     map.extend(entries.iter().map(|(k, v)| (k, v)))
@@ -655,8 +697,9 @@ async fn test_iterator() {
     assert_eq!(all.len(), 1000);
 }
 
+// Redisson: testOrdering
 #[tokio::test]
-async fn test_ordering() {
+async fn small_map_reads_keep_the_insertion_order() {
     let map = client().await.hash_map::<String, String>(unique("123"));
     let entries = [
         ("name", "123"),

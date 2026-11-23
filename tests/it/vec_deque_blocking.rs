@@ -174,8 +174,9 @@ fn later(delay: Duration, work: impl std::future::Future<Output = ()> + Send + '
     });
 }
 
+// Redisson: testMove
 #[tokio::test]
-async fn test_move() {
+async fn pop_front_push_back_wait_moves_an_element_once_one_arrives() {
     let deque1 = deque().await;
     let deque2 = deque().await;
     deque2.extend_back(&[4, 5, 6]).await.unwrap();
@@ -211,8 +212,9 @@ async fn test_move() {
     assert_eq!(all(&deque2).await, [4, 5, 6]);
 }
 
+// Redisson: testPollLastAndOfferFirstToTimesOut
 #[tokio::test]
-async fn test_poll_last_and_offer_first_to_times_out() {
+async fn pop_back_push_front_wait_on_an_empty_source_times_out() {
     let source = deque().await;
     let target = deque().await;
     let started = Instant::now();
@@ -227,8 +229,9 @@ async fn test_poll_last_and_offer_first_to_times_out() {
     assert!(elapsed < Duration::from_millis(3000), "{elapsed:?}");
 }
 
+// Redisson: testShortPoll
 #[tokio::test]
-async fn test_short_poll() {
+async fn sub_second_pop_timeouts_round_up_to_one_second() {
     let deque = deque().await;
     let started = Instant::now();
     assert_eq!(
@@ -261,8 +264,9 @@ async fn push_later(first: &Deque, second: &Deque, third: &Deque) {
     });
 }
 
+// Redisson: testPollLastFromAny
 #[tokio::test]
-async fn test_poll_last_from_any() {
+async fn pop_back_wait_any_waits_for_the_first_pushed_element() {
     let (queue1, queue2, queue3) = (deque().await, deque().await, deque().await);
     push_later(&queue1, &queue2, &queue3).await;
     let started = Instant::now();
@@ -277,8 +281,9 @@ async fn test_poll_last_from_any() {
     assert!(started.elapsed() > Duration::from_millis(1000));
 }
 
+// Redisson: testPollFromAny
 #[tokio::test]
-async fn test_poll_from_any() {
+async fn pop_front_wait_any_waits_for_the_first_pushed_element() {
     let (queue1, queue2, queue3) = (deque().await, deque().await, deque().await);
     push_later(&queue1, &queue2, &queue3).await;
     let started = Instant::now();
@@ -292,8 +297,9 @@ async fn test_poll_from_any() {
     assert!(started.elapsed() > Duration::from_millis(1000));
 }
 
+// Redisson: testPollFromAnyWithName
 #[tokio::test]
-async fn test_poll_from_any_with_name() {
+async fn pop_front_wait_any_names_the_deque_it_popped_from() {
     let (queue1, queue2, queue3) = (deque().await, deque().await, deque().await);
     push_later(&queue1, &queue2, &queue3).await;
     let (name, value) = queue1
@@ -306,8 +312,9 @@ async fn test_poll_from_any_with_name() {
     assert_eq!(value, 2);
 }
 
+// Redisson: testPollLastFromAnyWithName
 #[tokio::test]
-async fn test_poll_last_from_any_with_name() {
+async fn pop_back_wait_any_checks_deques_in_the_given_order() {
     let (queue1, queue2, queue3) = (deque().await, deque().await, deque().await);
     let missing = deque().await;
     queue3.extend_back(&[1, 2, 3]).await.unwrap();
@@ -356,8 +363,9 @@ async fn zero_timeout_pops_from_any_once_without_waiting() {
     );
 }
 
+// Redisson: testFirstLast
 #[tokio::test]
-async fn test_first_last() {
+async fn push_front_and_push_back_add_at_both_ends() {
     let deque = deque().await;
     deque.push_front(&1).await.unwrap();
     deque.push_front(&2).await.unwrap();
@@ -366,8 +374,9 @@ async fn test_first_last() {
     assert_eq!(all(&deque).await, [2, 1, 3, 4]);
 }
 
+// Redisson: testTakeFirst
 #[tokio::test]
-async fn test_take_first() {
+async fn pop_front_wait_returns_elements_from_the_front() {
     let deque = deque().await;
     deque.push_front(&1).await.unwrap();
     deque.push_front(&2).await.unwrap();
@@ -379,8 +388,9 @@ async fn test_take_first() {
     assert_eq!(deque.len().await.unwrap(), 0);
 }
 
+// Redisson: testTakeLast
 #[tokio::test]
-async fn test_take_last() {
+async fn pop_back_wait_returns_elements_from_the_back() {
     let deque = deque().await;
     deque.push_front(&1).await.unwrap();
     deque.push_front(&2).await.unwrap();
@@ -402,8 +412,9 @@ fn fill_later(deque: &Deque) {
     });
 }
 
+// Redisson: testTakeFirstAwait
 #[tokio::test]
-async fn test_take_first_await() {
+async fn pop_front_wait_blocks_until_elements_are_pushed() {
     let deque = deque().await;
     fill_later(&deque);
     let started = Instant::now();
@@ -415,8 +426,9 @@ async fn test_take_first_await() {
     }
 }
 
+// Redisson: testTakeLastAwait
 #[tokio::test]
-async fn test_take_last_await() {
+async fn pop_back_wait_blocks_until_elements_are_pushed() {
     let deque = deque().await;
     fill_later(&deque);
     let started = Instant::now();
@@ -428,8 +440,9 @@ async fn test_take_last_await() {
     }
 }
 
+// Redisson: testPollFirst
 #[tokio::test]
-async fn test_poll_first() {
+async fn pop_front_wait_with_timeout_returns_none_once_empty() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3]).await.unwrap();
     for expected in [1, 2, 3] {
@@ -450,8 +463,9 @@ async fn test_poll_first() {
     assert!(started.elapsed() >= Duration::from_millis(1900));
 }
 
+// Redisson: testPollLast
 #[tokio::test]
-async fn test_poll_last() {
+async fn pop_back_wait_with_timeout_returns_none_once_empty() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3]).await.unwrap();
     for expected in [3, 2, 1] {
@@ -472,8 +486,9 @@ async fn test_poll_last() {
     assert!(started.elapsed() >= Duration::from_millis(1900));
 }
 
+// Redisson: testTake
 #[tokio::test]
-async fn test_take() {
+async fn pop_front_wait_without_timeout_waits_for_a_late_push() {
     let deque = deque().await;
     {
         let deque = deque.clone();
@@ -486,8 +501,9 @@ async fn test_take() {
     assert!(started.elapsed() > Duration::from_millis(1900));
 }
 
+// Redisson: testPoll
 #[tokio::test]
-async fn test_poll() {
+async fn pop_front_wait_returns_the_element_then_times_out() {
     let deque = deque().await;
     deque.push_back(&1).await.unwrap();
     let value = deque
@@ -506,8 +522,9 @@ async fn test_poll() {
     assert!(started.elapsed() >= Duration::from_millis(1900));
 }
 
+// Redisson: testAwait
 #[tokio::test]
-async fn test_await() {
+async fn pop_front_wait_returns_an_available_element_before_the_timeout() {
     let deque = deque().await;
     deque.push_back(&1).await.unwrap();
     let value = deque
@@ -518,8 +535,9 @@ async fn test_await() {
     assert_eq!(value, Some(1));
 }
 
+// Redisson: testPollLastAndOfferFirstTo
 #[tokio::test]
-async fn test_poll_last_and_offer_first_to() {
+async fn pop_back_push_front_wait_moves_a_late_element_to_the_front() {
     let client = client().await;
     let tag = unique("queue");
     let queue1 = client.vec_deque::<i32>(format!("{{{tag}}}1"));
@@ -546,8 +564,9 @@ async fn test_poll_last_and_offer_first_to() {
     assert_eq!(value, None);
 }
 
+// Redisson: testTakeLastAndOfferFirstTo
 #[tokio::test]
-async fn test_take_last_and_offer_first_to() {
+async fn pop_back_push_front_wait_without_timeout_waits_for_a_late_element() {
     let client = client().await;
     let tag = unique("queue");
     let queue1 = client.vec_deque::<i32>(format!("{{{tag}}}1"));
@@ -568,8 +587,9 @@ async fn test_take_last_and_offer_first_to() {
     assert_eq!(all(&queue2).await, [3, 4, 5, 6]);
 }
 
+// Redisson: testSingleCharAsKeyName
 #[tokio::test]
-async fn test_single_char_as_key_name() {
+async fn single_character_key_names_work_for_blocking_pops() {
     let client = client().await;
     let value = "Long Test Message;".repeat(40);
     for i in 0..10 {
@@ -586,8 +606,9 @@ async fn test_single_char_as_key_name() {
     }
 }
 
+// Redisson: testMoveTimeout
 #[tokio::test]
-async fn test_move_timeout() {
+async fn pop_front_push_back_wait_on_an_empty_source_times_out() {
     let source = deque().await;
     let destination = deque().await;
     let started = Instant::now();
@@ -601,8 +622,9 @@ async fn test_move_timeout() {
     assert!(destination.is_empty().await.unwrap());
 }
 
+// Redisson: testMoveSubSecondTimeout
 #[tokio::test]
-async fn test_move_sub_second_timeout() {
+async fn pop_front_push_back_wait_accepts_a_sub_second_timeout() {
     let source = deque().await;
     let destination = deque().await;
     let moved = source
@@ -614,8 +636,9 @@ async fn test_move_sub_second_timeout() {
     assert!(destination.is_empty().await.unwrap());
 }
 
+// Redisson: testTakeAsyncCancel
 #[tokio::test]
-async fn test_take_async_cancel() {
+async fn aborted_waiting_pops_do_not_consume_later_elements() {
     let deque = deque().await;
     for _ in 0..10 {
         let waiter = {

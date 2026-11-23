@@ -109,8 +109,9 @@ async fn each_value_goes_to_exactly_one_consumer() {
     assert_eq!(all, (0..50).collect::<Vec<_>>());
 }
 
+// Redisson: testTakeFirst
 #[tokio::test]
-async fn test_take_first() {
+async fn pop_first_wait_blocks_until_a_value_is_inserted() {
     let set = client().await.sorted_set::<i32>(unique("zset"));
     let producer = set.clone();
     tokio::spawn(async move {
@@ -139,8 +140,9 @@ async fn names(set: &redissun::SortedSet<String, redissun::JsonCodec>) -> Vec<St
         .collect()
 }
 
+// Redisson: testPollLastTimeout
 #[tokio::test]
-async fn test_poll_last_timeout() {
+async fn pop_last_wait_with_timeout_removes_the_highest_scored_value() {
     let empty = client().await.sorted_set::<String>(unique("zset"));
     assert!(empty
         .pop_last_wait()
@@ -158,8 +160,9 @@ async fn test_poll_last_timeout() {
     assert_eq!(names(&set).await, ["a", "b"]);
 }
 
+// Redisson: testPollFirstTimeout
 #[tokio::test]
-async fn test_poll_first_timeout() {
+async fn pop_first_wait_with_timeout_removes_the_lowest_scored_value() {
     let empty = client().await.sorted_set::<String>(unique("zset"));
     assert!(empty
         .pop_first_wait()
@@ -192,8 +195,9 @@ async fn six() -> redissun::SortedSet<String, redissun::JsonCodec> {
     set
 }
 
+// Redisson: testPollFirstTimeoutCount
 #[tokio::test]
-async fn test_poll_first_timeout_count() {
+async fn pop_first_many_wait_removes_the_lowest_scored_entries() {
     let set = six().await;
     let popped = set
         .pop_first_many_wait(2)
@@ -212,8 +216,9 @@ async fn test_poll_first_timeout_count() {
         .is_none());
 }
 
+// Redisson: testPollLastTimeoutCount
 #[tokio::test]
-async fn test_poll_last_timeout_count() {
+async fn pop_last_many_wait_removes_the_highest_scored_entries() {
     let set = six().await;
     let popped = set
         .pop_last_many_wait(2)
@@ -232,8 +237,9 @@ async fn test_poll_last_timeout_count() {
         .is_none());
 }
 
+// Redisson: testPollEntryDuration
 #[tokio::test]
-async fn test_poll_entry_duration() {
+async fn many_wait_pops_take_entries_from_both_ends() {
     let set = client().await.sorted_set::<String>(unique("zset"));
     for (value, score) in [
         ("v1", 1.1),

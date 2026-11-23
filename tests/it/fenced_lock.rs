@@ -84,8 +84,9 @@ async fn lock_info_methods_work() {
     drop(guard);
 }
 
+// Redisson: testTokenIncrease
 #[tokio::test]
-async fn test_token_increase() {
+async fn every_lock_method_increments_the_fencing_token() {
     let lock = lock_of(&client().await, &unique("lock"));
     let guard = lock.lock().await.unwrap();
     let token1 = guard.fencing_token().unwrap();
