@@ -287,6 +287,9 @@ async fn rw_lock_never_mixes_a_writer_with_others_under_faults() {
                     sleep(Duration::from_millis(10)).await;
                     readers.fetch_sub(1, Ordering::SeqCst);
                     let _ = guard.unlock().await;
+                    // Like Redisson's, the lock is not fair: ten readers that take it again at once
+                    // keep it held all the time and writers never get in.
+                    sleep(Duration::from_millis(50)).await;
                 }
             }
         }
