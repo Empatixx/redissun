@@ -31,6 +31,8 @@ pub(crate) struct NodeSettings {
     pub(crate) resp3: bool,
     pub(crate) push: Option<UnboundedSender<redis::PushInfo>>,
     pub(crate) reconnection_delay: DelayStrategy,
+    /// Sends `READONLY` on every new connection: a replica of Redis Cluster serves reads only to a connection that sent it.
+    pub(crate) readonly: bool,
 }
 
 /// A subscribe-like command of a pub/sub connection.
@@ -295,6 +297,9 @@ impl Node {
             cmd.arg("SETNAME").arg(name);
             setup(cmd).await?;
         }
+        if settings.readonly {
+            setup(redis::cmd("READONLY")).await?;
+        }
         let mut cmd = redis::cmd("CLIENT");
         cmd.arg("ID");
         let id = match setup(cmd).await? {
@@ -526,6 +531,7 @@ mod tests {
             resp3: false,
             push: None,
             reconnection_delay: DelayStrategy::Constant(Duration::from_millis(10)),
+            readonly: false,
         }
     }
 

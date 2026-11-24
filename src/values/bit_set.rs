@@ -115,7 +115,7 @@ impl BitSet {
     pub async fn get(&self, index: u64) -> Result<bool> {
         let reply = self
             .key
-            .command("GETBIT", vec![self.name(), index_value(index)?])
+            .read_command("GETBIT", vec![self.name(), index_value(index)?])
             .await?;
         Ok(number(&reply) == Some(1))
     }
@@ -187,7 +187,7 @@ impl BitSet {
 
     /// Number of bits that are set (`BITCOUNT`), Redisson's `cardinality`.
     pub async fn count(&self) -> Result<u64> {
-        let reply = self.key.command("BITCOUNT", vec![self.name()]).await?;
+        let reply = self.key.read_command("BITCOUNT", vec![self.name()]).await?;
         Ok(number(&reply).unwrap_or(0) as u64)
     }
 
@@ -195,7 +195,7 @@ impl BitSet {
     pub async fn first_set(&self) -> Result<Option<u64>> {
         let reply = self
             .key
-            .command("BITPOS", vec![self.name(), Arg::Int(1)])
+            .read_command("BITPOS", vec![self.name(), Arg::Int(1)])
             .await?;
         Ok(number(&reply).and_then(|position| u64::try_from(position).ok()))
     }
@@ -212,13 +212,13 @@ impl BitSet {
 
     /// Size of the underlying string in bits, always a multiple of 8, like Redisson's `size`.
     pub async fn size(&self) -> Result<u64> {
-        let reply = self.key.command("STRLEN", vec![self.name()]).await?;
+        let reply = self.key.read_command("STRLEN", vec![self.name()]).await?;
         Ok(number(&reply).unwrap_or(0) as u64 * 8)
     }
 
     /// Returns the raw bytes of the string, empty when the key is missing, like Redisson's `toByteArray`.
     pub async fn to_bytes(&self) -> Result<Vec<u8>> {
-        let raw: Option<Bytes> = self.key.query(self.key.key_cmd("GET")).await?;
+        let raw: Option<Bytes> = self.key.read(self.key.key_cmd("GET")).await?;
         Ok(raw.map(|raw| raw.to_vec()).unwrap_or_default())
     }
 

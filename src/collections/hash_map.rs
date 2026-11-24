@@ -190,7 +190,7 @@ where
     {
         let raw: Option<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HGET");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(&self.codec.encode(k)?[..]);
@@ -226,7 +226,7 @@ where
     {
         let found: bool = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HEXISTS");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(&self.codec.encode(k)?[..]);
@@ -240,7 +240,7 @@ where
     pub async fn len(&self) -> Result<usize> {
         let len: usize = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HLEN");
                 cmd.arg(self.key.redis_key());
                 cmd
@@ -310,7 +310,7 @@ where
             .collect::<Result<Vec<Bytes>>>()?;
         let raw: Vec<Option<Bytes>> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HMGET");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(crate::client::request::binary(&fields));
@@ -571,7 +571,7 @@ where
     {
         let size: usize = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HSTRLEN");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(&self.codec.encode(k)?[..]);
@@ -586,7 +586,7 @@ where
         let count = i64::try_from(count).unwrap_or(i64::MAX);
         let mut cmd = self.key.key_cmd("HRANDFIELD");
         cmd.arg(count);
-        let raw: Vec<Bytes> = self.key.query(cmd).await?;
+        let raw: Vec<Bytes> = self.key.read(cmd).await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
 
@@ -594,7 +594,7 @@ where
     pub async fn read_all_keys(&self) -> Result<Vec<K>> {
         let raw: Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HKEYS");
                 cmd.arg(self.key.redis_key());
                 cmd
@@ -607,7 +607,7 @@ where
     pub async fn read_all_values(&self) -> Result<Vec<V>> {
         let raw: Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("HVALS");
                 cmd.arg(self.key.redis_key());
                 cmd
@@ -620,7 +620,7 @@ where
     pub async fn read_all_entries(&self) -> Result<Vec<(K, V)>> {
         let mut cmd = redis::cmd("HGETALL");
         cmd.arg(self.key.redis_key());
-        let raw: redis::Value = self.key.query(cmd).await?;
+        let raw: redis::Value = self.key.read(cmd).await?;
         self.decode_pairs(raw)
     }
 

@@ -138,7 +138,7 @@ where
     pub async fn get(&self) -> Result<Option<V>> {
         let mut cmd = redis::cmd("GET");
         cmd.arg(self.key.redis_key());
-        let raw: Option<Bytes> = self.key.query(cmd).await?;
+        let raw: Option<Bytes> = self.key.read(cmd).await?;
         self.decode(raw)
     }
 
@@ -270,7 +270,7 @@ where
     pub async fn size(&self) -> Result<usize> {
         let mut cmd = redis::cmd("STRLEN");
         cmd.arg(self.key.redis_key());
-        let size: usize = self.key.query(cmd).await?;
+        let size: usize = self.key.read(cmd).await?;
         Ok(size)
     }
 

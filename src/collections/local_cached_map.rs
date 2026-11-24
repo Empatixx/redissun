@@ -779,7 +779,10 @@ where
             return Ok(cached.is_some());
         }
         self.local.begin_read(&field);
-        let found = self.map.contains_key(k).await;
+        // From the master, as `get`: a miss read from a replica could be cached after the write that ends it.
+        let mut cmd = self.key.key_cmd("HEXISTS");
+        cmd.arg(&field[..]);
+        let found: Result<bool> = self.key.query(cmd).await;
         let miss = matches!(found, Ok(false)) && self.store_cache_miss;
         self.local.finish_read(field, miss.then_some(None));
         found

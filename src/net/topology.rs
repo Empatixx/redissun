@@ -1,5 +1,6 @@
 //! Which node a command goes to: one server, the master that Sentinel names, or the master of the key's slot in Redis Cluster.
 
+use crate::client::read_mode::ReadMode;
 use crate::client::slot::keyslot;
 use crate::error::Error;
 use crate::net::node::{is_connection_failure, Failure, Node, NodeSettings};
@@ -95,6 +96,17 @@ impl SlotMap {
         masters
     }
 
+    /// Every replica the map lists.
+    pub(crate) fn replicas(&self) -> Vec<Address> {
+        let mut replicas: Vec<Address> = Vec::new();
+        for replica in self.ranges.iter().flat_map(|range| &range.replicas) {
+            if !replicas.contains(replica) {
+                replicas.push(replica.clone());
+            }
+        }
+        replicas
+    }
+
     /// Whether every one of the 16384 slots has a master, Redisson's `checkSlotsCoverage`.
     pub(crate) fn covers_every_slot(&self) -> bool {
         let covered: u32 = self
@@ -132,6 +144,106 @@ impl Pool {
     }
 }
 
+/// Picks the node a read goes to, as the client's [`ReadMode`] says.
+pub(crate) struct ReadRouting {
+    mode: ReadMode,
+    next: AtomicUsize,
+}
+
+impl ReadRouting {
+    pub(crate) fn new(mode: ReadMode) -> Self {
+        Self {
+            mode,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn mode(&self) -> ReadMode {
+        self.mode
+    }
+
+    /// The replica the next read goes to, or `None` for the master. Like Redisson's round robin, `MasterAndReplica` counts the master as one more replica, and `Replica` reads from the master while there is no replica.
+    fn pick<'a>(&self, replicas: &'a [Address]) -> Option<&'a Address> {
+        let candidates = match self.mode {
+            ReadMode::Master => return None,
+            ReadMode::Replica => replicas.len(),
+            ReadMode::MasterAndReplica => replicas.len() + 1,
+        };
+        if replicas.is_empty() {
+            return None;
+        }
+        let turn = self.next.fetch_add(1, Ordering::Relaxed) % candidates;
+        replicas.get(turn)
+    }
+}
+
+/// Whether a read that failed on a replica goes to the master instead: the replica could not be reached, does not serve the slot any more, is loading its data or lost its master. An error about the data itself (`WRONGTYPE`) would be the same on the master.
+fn replica_failed(failure: &Failure) -> bool {
+    match failure {
+        Failure::Connection(_) | Failure::Unsent(_) | Failure::Redirect { .. } => true,
+        Failure::Other(Error::Redis(message)) => [
+            "LOADING",
+            "MASTERDOWN",
+            "READONLY",
+            "CLUSTERDOWN",
+            "TRYAGAIN",
+        ]
+        .iter()
+        .any(|code| message.starts_with(code)),
+        Failure::Other(_) => false,
+    }
+}
+
+/// Pools to replicas, opened on their first read and dropped when the replica is no longer listed.
+struct ReplicaPools {
+    size: usize,
+    settings: Arc<NodeSettings>,
+    pools: RwLock<HashMap<Address, Arc<Pool>>>,
+}
+
+impl ReplicaPools {
+    fn new(size: usize, settings: Arc<NodeSettings>) -> Self {
+        Self {
+            size,
+            settings,
+            pools: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn pool(&self, address: &Address) -> Arc<Pool> {
+        if let Some(pool) = self
+            .pools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(address)
+        {
+            return pool.clone();
+        }
+        self.pools
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(address.clone())
+            .or_insert_with(|| Arc::new(Pool::new(address, self.size, &self.settings)))
+            .clone()
+    }
+
+    fn keep(&self, listed: &[Address]) {
+        self.pools
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|address, _| listed.contains(address));
+    }
+
+    fn nodes(&self) -> Vec<Arc<Node>> {
+        self.pools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .flat_map(|pool| pool.nodes.clone())
+            .collect()
+    }
+}
+
 /// The servers behind a client.
 pub(crate) enum Topology {
     Single(Pool),
@@ -150,6 +262,41 @@ impl Topology {
             Topology::Single(pool) => pool.next().send(cmd).await,
             Topology::Sentinel(sentinel) => sentinel.send(cmd).await,
             Topology::Cluster(cluster) => cluster.send(cmd, key).await,
+        }
+    }
+
+    /// Sends a command that only reads where the client's [`ReadMode`] says: to a replica of the node that serves `key`, or to that node. A read a replica cannot answer goes to the master.
+    pub(crate) async fn send_read(
+        &self,
+        cmd: &redis::Cmd,
+        key: Option<&[u8]>,
+    ) -> Result<Value, Failure> {
+        match self {
+            Topology::Single(pool) => pool.next().send(cmd).await,
+            Topology::Sentinel(sentinel) => sentinel.send_read(cmd).await,
+            Topology::Cluster(cluster) => cluster.send_read(cmd, key).await,
+        }
+    }
+
+    /// Looks for replicas again, like Redisson's `scanInterval`: the slot map of a cluster, the replicas Sentinel reports. A failed scan keeps what was known.
+    pub(crate) async fn scan_replicas(&self) {
+        match self {
+            Topology::Single(_) => {}
+            Topology::Sentinel(sentinel) => sentinel.scan_replicas().await,
+            Topology::Cluster(cluster) => drop(cluster.refresh().await),
+        }
+    }
+
+    /// The read mode, and how often to scan for replicas by default: Redisson's `scanInterval` is 1 s with Sentinel and 5 s in a cluster. `None` for a single server, which has no replicas.
+    pub(crate) fn replica_scanning(&self) -> Option<(ReadMode, std::time::Duration)> {
+        match self {
+            Topology::Single(_) => None,
+            Topology::Sentinel(sentinel) => {
+                Some((sentinel.reads.mode(), std::time::Duration::from_secs(1)))
+            }
+            Topology::Cluster(cluster) => {
+                Some((cluster.reads.mode(), std::time::Duration::from_secs(5)))
+            }
         }
     }
 
@@ -236,6 +383,52 @@ pub(crate) struct Sentinel {
     settings: Arc<NodeSettings>,
     sentinel_settings: Arc<NodeSettings>,
     master: tokio::sync::RwLock<Option<Arc<Pool>>>,
+    reads: ReadRouting,
+    /// The replicas Sentinel reported last, `None` before the first scan.
+    replicas: RwLock<Option<Vec<Address>>>,
+    replica_pools: ReplicaPools,
+}
+
+/// The replicas of a `SENTINEL REPLICAS` reply that serve `master`, leaving out, as Redisson does, those marked `s_down` or `disconnected` and those whose link to the master is in error.
+pub(crate) fn parse_sentinel_replicas(reply: &Value, master: &Address) -> Vec<Address> {
+    let Value::Array(entries) = reply else {
+        return Vec::new();
+    };
+    let text = |value: &Value| match value {
+        Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        Value::SimpleString(text) => Some(text.clone()),
+        _ => None,
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let fields: HashMap<String, String> = match entry {
+                Value::Array(flat) => flat
+                    .chunks(2)
+                    .filter_map(|pair| Some((text(pair.first()?)?, text(pair.get(1)?)?)))
+                    .collect(),
+                Value::Map(pairs) => pairs
+                    .iter()
+                    .filter_map(|(field, value)| Some((text(field)?, text(value)?)))
+                    .collect(),
+                _ => return None,
+            };
+            let field = |name: &str| fields.get(name).map(String::as_str).unwrap_or("");
+            let flags = field("flags");
+            if flags.contains("s_down")
+                || flags.contains("disconnected")
+                || field("master-link-status").contains("err")
+            {
+                return None;
+            }
+            let serves_master = field("master-host") == master.host
+                && field("master-port").parse::<u16>().ok() == Some(master.port);
+            if !serves_master {
+                return None;
+            }
+            Some(Address::new(field("ip"), field("port").parse().ok()?))
+        })
+        .collect()
 }
 
 impl Sentinel {
@@ -245,14 +438,66 @@ impl Sentinel {
         size: usize,
         settings: Arc<NodeSettings>,
         sentinel_settings: Arc<NodeSettings>,
+        read_mode: ReadMode,
     ) -> Self {
         Self {
             sentinels,
             service,
             size,
+            replica_pools: ReplicaPools::new(size, settings.clone()),
             settings,
             sentinel_settings,
             master: tokio::sync::RwLock::new(None),
+            reads: ReadRouting::new(read_mode),
+            replicas: RwLock::new(None),
+        }
+    }
+
+    /// Asks the sentinels which replicas serve the current master. Nothing changes when none answers.
+    async fn scan_replicas(&self) {
+        let Ok(master) = self.pool().await else {
+            return;
+        };
+        let master = master.address().clone();
+        let mut cmd = redis::cmd("SENTINEL");
+        cmd.arg("REPLICAS").arg(&self.service);
+        for sentinel in &self.sentinels {
+            let node = Node::new(sentinel.clone(), self.sentinel_settings.clone());
+            if let Ok(reply) = node.send(&cmd).await {
+                let replicas = parse_sentinel_replicas(&reply, &master);
+                self.replica_pools.keep(&replicas);
+                *self.replicas.write().unwrap_or_else(|e| e.into_inner()) = Some(replicas);
+                return;
+            }
+        }
+    }
+
+    async fn send_read(&self, cmd: &redis::Cmd) -> Result<Value, Failure> {
+        if self.reads.mode() == ReadMode::Master {
+            return self.send(cmd).await;
+        }
+        let known = self
+            .replicas
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let replicas = match known {
+            Some(replicas) => replicas,
+            None => {
+                self.scan_replicas().await;
+                self.replicas
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .unwrap_or_default()
+            }
+        };
+        let Some(replica) = self.reads.pick(&replicas) else {
+            return self.send(cmd).await;
+        };
+        match self.replica_pools.pool(replica).next().send(cmd).await {
+            Err(failure) if replica_failed(&failure) => self.send(cmd).await,
+            other => other,
         }
     }
 
@@ -316,6 +561,9 @@ impl Sentinel {
             return;
         }
         *master = Some(Arc::new(Pool::new(&address, self.size, &self.settings)));
+        drop(master);
+        // The replicas belong to the old master; the next read asks for those of the new one.
+        *self.replicas.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     async fn send(&self, cmd: &redis::Cmd) -> Result<Value, Failure> {
@@ -329,11 +577,14 @@ impl Sentinel {
     }
 
     fn nodes(&self) -> Vec<Arc<Node>> {
-        self.master
+        let mut nodes: Vec<Arc<Node>> = self
+            .master
             .try_read()
             .ok()
             .and_then(|master| master.as_ref().map(|pool| pool.nodes.clone()))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        nodes.extend(self.replica_pools.nodes());
+        nodes
     }
 }
 
@@ -345,10 +596,20 @@ pub(crate) struct Cluster {
     map: RwLock<SlotMap>,
     pools: RwLock<HashMap<Address, Arc<Pool>>>,
     refreshing: tokio::sync::Mutex<()>,
+    reads: ReadRouting,
+    /// Connections to replicas send `READONLY`, so they serve reads of the slots of their master.
+    replica_pools: ReplicaPools,
 }
 
 impl Cluster {
-    pub(crate) fn new(seeds: Vec<Address>, size: usize, settings: Arc<NodeSettings>) -> Self {
+    pub(crate) fn new(
+        seeds: Vec<Address>,
+        size: usize,
+        settings: Arc<NodeSettings>,
+        read_mode: ReadMode,
+    ) -> Self {
+        let mut replica_settings = NodeSettings::clone(&settings);
+        replica_settings.readonly = true;
         Self {
             seeds,
             size,
@@ -356,6 +617,32 @@ impl Cluster {
             map: RwLock::new(SlotMap::default()),
             pools: RwLock::new(HashMap::new()),
             refreshing: tokio::sync::Mutex::new(()),
+            reads: ReadRouting::new(read_mode),
+            replica_pools: ReplicaPools::new(size, Arc::new(replica_settings)),
+        }
+    }
+
+    /// Sends a read to a replica of the master that serves `key`, or to the master as the read mode says. A read the replica cannot answer goes to the master.
+    async fn send_read(&self, cmd: &redis::Cmd, key: Option<&[u8]>) -> Result<Value, Failure> {
+        let replica = match key {
+            Some(key) if self.reads.mode() != ReadMode::Master => {
+                let map = self.map();
+                map.range(keyslot(key))
+                    .and_then(|range| self.reads.pick(&range.replicas).cloned())
+            }
+            _ => None,
+        };
+        let Some(replica) = replica else {
+            return self.send(cmd, key).await;
+        };
+        match self.replica_pools.pool(&replica).next().send(cmd).await {
+            Err(failure) if replica_failed(&failure) => {
+                if !matches!(failure, Failure::Other(_)) {
+                    let _ = self.refresh().await;
+                }
+                self.send(cmd, key).await
+            }
+            other => other,
         }
     }
 
@@ -406,6 +693,7 @@ impl Cluster {
                     }
                     let map = SlotMap::new(ranges);
                     let masters = map.masters();
+                    self.replica_pools.keep(&map.replicas());
                     *self.map.write().unwrap_or_else(|e| e.into_inner()) = map;
                     self.pools
                         .write()
@@ -481,20 +769,130 @@ impl Cluster {
     }
 
     fn nodes(&self) -> Vec<Arc<Node>> {
-        self.pools
+        let mut nodes: Vec<Arc<Node>> = self
+            .pools
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .values()
             .flat_map(|pool| pool.nodes.clone())
-            .collect()
+            .collect();
+        nodes.extend(self.replica_pools.nodes());
+        nodes
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_slots, SlotMap};
+    use super::{parse_sentinel_replicas, parse_slots, replica_failed, ReadRouting, SlotMap};
+    use crate::client::read_mode::ReadMode;
+    use crate::error::Error;
+    use crate::net::node::Failure;
     use crate::net::stream::Address;
     use redis::Value;
+
+    fn replicas() -> Vec<Address> {
+        vec![
+            Address::new("127.0.0.1", 7003),
+            Address::new("127.0.0.1", 7004),
+        ]
+    }
+
+    fn picks(mode: ReadMode, replicas: &[Address], reads: usize) -> Vec<Option<u16>> {
+        let routing = ReadRouting::new(mode);
+        (0..reads)
+            .map(|_| routing.pick(replicas).map(|address| address.port))
+            .collect()
+    }
+
+    #[test]
+    fn master_mode_never_picks_a_replica() {
+        assert_eq!(picks(ReadMode::Master, &replicas(), 3), [None, None, None]);
+    }
+
+    #[test]
+    fn replica_mode_reads_from_each_replica_in_turn() {
+        assert_eq!(
+            picks(ReadMode::Replica, &replicas(), 4),
+            [Some(7003), Some(7004), Some(7003), Some(7004)]
+        );
+    }
+
+    #[test]
+    fn master_and_replica_mode_counts_the_master_as_one_more_replica() {
+        assert_eq!(
+            picks(ReadMode::MasterAndReplica, &replicas(), 6),
+            [Some(7003), Some(7004), None, Some(7003), Some(7004), None]
+        );
+    }
+
+    #[test]
+    fn without_replicas_every_mode_reads_from_the_master() {
+        for mode in [ReadMode::Replica, ReadMode::MasterAndReplica] {
+            assert_eq!(picks(mode, &[], 2), [None, None]);
+        }
+    }
+
+    fn sentinel_replica(port: &str, flags: &str, link: &str, master_port: &str) -> Value {
+        let pairs = [
+            ("ip", "127.0.0.1"),
+            ("port", port),
+            ("flags", flags),
+            ("master-link-status", link),
+            ("master-host", "127.0.0.1"),
+            ("master-port", master_port),
+        ];
+        Value::Array(
+            pairs
+                .iter()
+                .flat_map(|(field, value)| {
+                    [
+                        Value::BulkString(field.as_bytes().to_vec()),
+                        Value::BulkString(value.as_bytes().to_vec()),
+                    ]
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn sentinel_replicas_that_are_down_or_serve_another_master_get_no_reads() {
+        let reply = Value::Array(vec![
+            sentinel_replica("6380", "slave", "ok", "6379"),
+            sentinel_replica("6381", "s_down,slave", "ok", "6379"),
+            sentinel_replica("6382", "slave,disconnected", "ok", "6379"),
+            sentinel_replica("6383", "slave", "err", "6379"),
+            sentinel_replica("6384", "slave", "ok", "6390"),
+            sentinel_replica("6385", "slave", "ok", "6379"),
+        ]);
+        let master = Address::new("127.0.0.1", 6379);
+        let ports: Vec<u16> = parse_sentinel_replicas(&reply, &master)
+            .iter()
+            .map(|address| address.port)
+            .collect();
+        assert_eq!(ports, [6380, 6385]);
+    }
+
+    #[test]
+    fn a_read_goes_to_the_master_when_the_replica_cannot_answer_it() {
+        for failure in [
+            Failure::Connection("broken pipe".into()),
+            Failure::Unsent("connection refused".into()),
+            Failure::Redirect {
+                ask: false,
+                address: Address::new("127.0.0.1", 7000),
+            },
+            Failure::Other(Error::Redis("LOADING Redis is loading".into())),
+            Failure::Other(Error::Redis("MASTERDOWN Link with MASTER is down".into())),
+        ] {
+            assert!(replica_failed(&failure), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn an_error_about_the_data_is_the_answer_of_the_replica() {
+        let failure = Failure::Other(Error::Redis("WRONGTYPE Operation against a key".into()));
+        assert!(!replica_failed(&failure));
+    }
 
     fn node(host: &str, port: i64) -> Value {
         Value::Array(vec![

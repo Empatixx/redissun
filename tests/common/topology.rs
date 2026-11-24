@@ -54,7 +54,19 @@ impl Topology {
                     .await;
                 let replicas = field(&master, "num-slaves");
                 let sentinels = field(&master, "num-other-sentinels");
-                replicas.as_deref() == Some("2") && sentinels.as_deref() == Some("2")
+                if replicas.as_deref() != Some("2") || sentinels.as_deref() != Some("2") {
+                    return false;
+                }
+                // A replica's first sync waits for repl-diskless-sync-delay (5 s); until it is online the master's ROLE does not list it, and a client finds no replica to read from.
+                let Some(port) = field(&master, "port").and_then(|port| port.parse::<u16>().ok())
+                else {
+                    return false;
+                };
+                let info = topology.cli(port, &["INFO", "replication"]).await;
+                info.lines()
+                    .filter(|line| line.starts_with("slave") && line.contains("state=online"))
+                    .count()
+                    == 2
             })
             .await;
         topology
@@ -64,7 +76,29 @@ impl Topology {
         Self::wait_for_cluster(start(6, CLUSTER_SCRIPT, &[]).await).await
     }
 
+    /// A cluster whose replicas `CLUSTER SLOTS` does not list yet: they are synced, but nothing was written and they ping once a minute, so none has reported a replication offset.
+    pub async fn cluster_with_unlisted_replicas() -> Topology {
+        let script = CLUSTER_SCRIPT.replace(
+            "--repl-ping-replica-period 1",
+            "--repl-ping-replica-period 60",
+        );
+        Self::wait_for_cluster_nodes(start(6, &script, &[]).await, false).await
+    }
+
+    pub async fn cluster_slots_list_replicas(&self) -> bool {
+        let slots = self.cli(self.base, &["CLUSTER", "SLOTS"]).await;
+        slots
+            .lines()
+            .filter(|line| line.trim() == "127.0.0.1")
+            .count()
+            == 6
+    }
+
     async fn wait_for_cluster(topology: Topology) -> Topology {
+        Self::wait_for_cluster_nodes(topology, true).await
+    }
+
+    async fn wait_for_cluster_nodes(topology: Topology, replicas_listed: bool) -> Topology {
         topology
             .wait_for("cluster state ok", || async {
                 let mut ok = true;
@@ -76,6 +110,10 @@ impl Topology {
                     let replication = topology.cli(port, &["INFO", "replication"]).await;
                     ok &= !replication.contains("role:slave")
                         || replication.contains("master_link_status:up");
+                }
+                // CLUSTER SLOTS lists a replica only once it reported a replication offset, which a client needs to read from it.
+                if replicas_listed {
+                    ok &= topology.cluster_slots_list_replicas().await;
                 }
                 ok
             })
@@ -360,7 +398,7 @@ for i in 0 1 2 3 4 5; do
   redis-server --port $p --daemonize yes --save "" --appendonly no \
     --cluster-enabled yes --cluster-config-file /tmp/nodes-$p.conf \
     --cluster-node-timeout 2000 --cluster-announce-ip 127.0.0.1 \
-    --logfile /tmp/redis-$p.log
+    --repl-ping-replica-period 1 --logfile /tmp/redis-$p.log
   nodes="$nodes 127.0.0.1:$p"
 done
 for i in 0 1 2 3 4 5; do
@@ -418,7 +456,7 @@ for i in 0 1 2 3 4 5; do
   redis-server --port 0 --tls-port $p $TLS --daemonize yes --save "" --appendonly no \
     --cluster-enabled yes --cluster-config-file /tmp/nodes-$p.conf \
     --cluster-node-timeout 2000 --cluster-announce-ip 127.0.0.1 \
-    --logfile /tmp/redis-$p.log
+    --repl-ping-replica-period 1 --logfile /tmp/redis-$p.log
   nodes="$nodes 127.0.0.1:$p"
 done
 for i in 0 1 2 3 4 5; do

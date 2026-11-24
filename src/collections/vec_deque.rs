@@ -136,7 +136,8 @@ where
     {
         let encoded = list::encode_all(&self.codec, values)?;
         if encoded.is_empty() {
-            return list::len(&self.key).await;
+            // The length a push returns comes from the master, like the push's own reply.
+            return self.key.query(self.key.key_cmd("LLEN")).await;
         }
         let name = match (front, if_exists) {
             (true, false) => "LPUSH",
@@ -361,7 +362,7 @@ where
     async fn peek(&self, index: i64) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("LINDEX");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(index);

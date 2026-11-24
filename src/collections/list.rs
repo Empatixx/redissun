@@ -125,7 +125,7 @@ where
     C: Codec,
 {
     let raw: Vec<Bytes> = key
-        .query({
+        .read({
             let mut cmd = redis::cmd("LRANGE");
             cmd.arg(key.redis_key());
             cmd.arg(0);
@@ -146,7 +146,7 @@ where
     if last {
         cmd.arg("RANK").arg(-1);
     }
-    let index: Option<i64> = key.query(cmd).await?;
+    let index: Option<i64> = key.read(cmd).await?;
     Ok(index.map(|index| index as usize))
 }
 
@@ -169,7 +169,7 @@ where
 
 pub(crate) async fn len(key: &Key) -> Result<usize> {
     let len: usize = key
-        .query({
+        .read({
             let mut cmd = redis::cmd("LLEN");
             cmd.arg(key.redis_key());
             cmd

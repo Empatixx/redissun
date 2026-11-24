@@ -226,7 +226,7 @@ where
     {
         let found: bool = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SISMEMBER");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(&self.codec.encode(v)?[..]);
@@ -251,7 +251,7 @@ where
             .collect::<Result<Vec<Bytes>>>()?;
         let found: Vec<bool> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SMISMEMBER");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(crate::client::request::binary(&encoded));
@@ -278,7 +278,7 @@ where
     pub async fn len(&self) -> Result<usize> {
         let len: usize = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SCARD");
                 cmd.arg(self.key.redis_key());
                 cmd
@@ -341,7 +341,7 @@ where
         }
         let raw: Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SRANDMEMBER");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(count);
@@ -355,7 +355,7 @@ where
     pub async fn random(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SRANDMEMBER");
                 cmd.arg(self.key.redis_key());
                 cmd
@@ -394,7 +394,7 @@ where
     pub async fn union(&self, others: &[&HashSet<V, C>]) -> Result<Vec<V>> {
         let raw: Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SUNION");
                 cmd.arg(self.keys_with(others));
                 cmd
@@ -408,7 +408,7 @@ where
     pub async fn intersection(&self, others: &[&HashSet<V, C>]) -> Result<Vec<V>> {
         let raw: Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SINTER");
                 cmd.arg(self.keys_with(others));
                 cmd
@@ -422,7 +422,7 @@ where
     pub async fn difference(&self, others: &[&HashSet<V, C>]) -> Result<Vec<V>> {
         let raw: Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("SDIFF");
                 cmd.arg(self.keys_with(others));
                 cmd
