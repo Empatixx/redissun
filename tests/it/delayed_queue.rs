@@ -215,7 +215,15 @@ async fn due_times_come_from_the_client_clock() {
         "WITHSCORES",
     ])
     .await;
-    let score: i64 = reply.lines().nth(4).unwrap().parse().unwrap();
+    // The member starts with random bytes that may hold a newline, so the
+    // score is read as the reply's last value rather than by line number.
+    let score: i64 = reply
+        .trim_end_matches("\r\n")
+        .rsplit("\r\n")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(
         score >= before + 60_000 && score < before + 61_000,
         "{score}"
