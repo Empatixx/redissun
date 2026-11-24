@@ -347,7 +347,10 @@ impl PubSub {
             Ok(())
         }
         .await;
-        registry.wake_all();
+        // Only once the connection is back: woken while it is away (a failover in progress), a lock waiter would send its attempt, which goes once, to a node that is going down.
+        if outcome.is_ok() {
+            registry.wake_all();
+        }
         outcome
     }
 }
