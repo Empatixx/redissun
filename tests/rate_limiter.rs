@@ -365,7 +365,15 @@ async fn the_client_clock_and_redisson_key_layout_are_used() {
         "WITHSCORES",
     ])
     .await;
-    let score: u128 = reply.lines().nth(4).unwrap().parse().unwrap();
+    // The member starts with random bytes that may hold a newline, so the
+    // score is read as the reply's last value rather than by line number.
+    let score: u128 = reply
+        .trim_end_matches("\r\n")
+        .rsplit("\r\n")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(
         before <= score && score <= after,
         "{before} {score} {after}"
