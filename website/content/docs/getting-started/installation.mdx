@@ -15,7 +15,7 @@ Or write it in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = "0.21"
+redissun = "0.22"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 For TLS (`rediss://` URLs) turn on the `tls-rustls` feature:
 
 ```toml
-redissun = { version = "0.21", features = ["tls-rustls"] }
+redissun = { version = "0.22", features = ["tls-rustls"] }
 ```
 
 You also need a Redis server, version 6.2 or newer. To start one with Docker:

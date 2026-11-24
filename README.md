@@ -27,7 +27,7 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-redissun = "0.21"
+redissun = "0.22"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
