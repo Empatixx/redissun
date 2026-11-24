@@ -1,4 +1,4 @@
-//! Rust's std collections and locks, shared through Redis. Inspired by Redisson.
+//! Redisson for Rust: a Redis library with std-style collections, distributed locks, caches and streams.
 //!
 //! ```no_run
 //! use redissun::Client;

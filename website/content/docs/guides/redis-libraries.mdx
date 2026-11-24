@@ -1,0 +1,41 @@
+---
+title: Redis libraries for Rust
+description: redissun, redis-rs, fred and the Redlock crates compared, and when to use which Redis library in Rust.
+---
+
+Rust has several Redis libraries. They work at different levels, and they combine well.
+
+| Library | What it is | Use it when |
+|---|---|---|
+| [redis-rs](https://crates.io/crates/redis) (`redis`) | The common Redis client: commands, pipelines, pub/sub, Sentinel and Redis Cluster | you want to send Redis commands yourself |
+| [fred](https://crates.io/crates/fred) | An async Redis client with pools, reconnection, Sentinel and Cluster | you want a client that manages its connections for you |
+| [rslock](https://crates.io/crates/rslock), [redsync](https://crates.io/crates/redsync) | Redlock: one lock across several independent Redis servers | you need only a lock, held on a majority of servers |
+| redissun | Redisson for Rust: maps, sets, queues, locks, semaphores, caches, streams and rate limiters as Rust types | you want distributed objects instead of commands |
+
+## Commands or objects
+
+With a Redis client you write the commands:
+
+```rust
+let mut connection = redis::Client::open("redis://127.0.0.1/")?
+    .get_multiplexed_async_connection()
+    .await?;
+redis::cmd("HSET").arg("users").arg("jirka").arg("Jirka").exec_async(&mut connection).await?;
+```
+
+With redissun you use an object, and it writes the commands and Lua scripts for you:
+
+```rust
+let client = redissun::Client::builder().url("redis://127.0.0.1/").build().await?;
+client.hash_map::<String, String>("users").insert("jirka", "Jirka").await?;
+```
+
+The difference grows with the object. A [`Lock`](/docs/objects/lock) takes a script to acquire, a watchdog that extends the lease while you hold it, pub/sub to wake waiters and a script to release. A [`HashMapCache`](/docs/objects/hash-map-cache) keeps a hash and a sorted set in step and cleans up expired entries. redissun runs the same scripts as [Redisson](https://github.com/redisson/redisson), so they behave the way Redisson users know.
+
+## Locks: Redlock or one Redis
+
+The Redlock crates take a lock on most of several independent Redis servers. redissun's locks, like Redisson's, live on one master. On Sentinel and Redis Cluster a lock write waits until a replica has it (`WAIT`), so a failover keeps the lock. See [`Lock`](/docs/objects/lock) and [`check_lock_synced_replicas`](/docs/guides/configuration).
+
+## Under redissun
+
+redissun runs on redis-rs. It opens its own connections, so it has Redisson's settings: timeouts, retries, reconnection delays, `PING` checks, TLS, credentials and [reads from replicas](/docs/guides/configuration#reading-from-replicas). Coming from Java, see [Migrating from Redisson](/docs/guides/redisson-migration).
