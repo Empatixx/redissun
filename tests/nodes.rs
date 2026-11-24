@@ -234,7 +234,16 @@ async fn sentinel_lists_its_sentinels_and_answers_for_the_master() {
     assert_eq!(first.masters().await.unwrap().len(), 1);
     assert_eq!(first.replicas("mymaster").await.unwrap().len(), 2);
     assert_eq!(first.sentinels("mymaster").await.unwrap().len(), 2);
-    assert_eq!(nodes.replicas().await.len(), 2);
+    // The replicas are those the client heard of at its last scan (every second), which may predate them being online.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while nodes.replicas().await.len() != 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?}",
+            nodes.replicas().await
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     assert!(nodes.ping_all().await);
     let old = master.address().to_string();
     first.failover("mymaster").await.unwrap();
