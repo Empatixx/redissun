@@ -52,6 +52,7 @@ pub use batch::{
 };
 pub use client::config::ClientBuilder;
 pub use client::credentials::Credentials;
+pub use client::events::{ConnectionListener, NodeType};
 pub use client::read_mode::ReadMode;
 pub use client::retry::DelayStrategy;
 #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]

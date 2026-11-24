@@ -35,6 +35,7 @@ struct Settings {
     password: Option<String>,
     resolver: Option<crate::client::credentials::Resolver>,
     credentials_refresh: Option<Duration>,
+    listener: Option<std::sync::Arc<dyn crate::ConnectionListener>>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
     tls: crate::client::tls::TlsSettings,
 }
@@ -87,6 +88,7 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             .field("username", &settings.username)
             .field("password_set", &settings.password.is_some())
             .field("credentials_resolver", &settings.resolver)
+            .field("connection_listener", &settings.listener.is_some())
             .finish()
     }
 }
@@ -127,6 +129,7 @@ impl ClientBuilder<JsonCodec> {
                 password: None,
                 resolver: None,
                 credentials_refresh: None,
+                listener: None,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
                 tls: Default::default(),
             },
@@ -360,6 +363,12 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
+    /// Tells `listener` when a node gets connected and when it loses its connections, like Redisson's `setConnectionListener`. Not set by default.
+    pub fn connection_listener(mut self, listener: impl crate::ConnectionListener) -> Self {
+        self.settings.listener = Some(std::sync::Arc::new(listener));
+        self
+    }
+
     /// Replaces the codec used for values.
     pub fn codec<N: Codec>(self, codec: N) -> ClientBuilder<N> {
         ClientBuilder {
@@ -456,6 +465,10 @@ impl<C: Codec> ClientBuilder<C> {
                 None
             },
         };
+        let events = settings
+            .listener
+            .clone()
+            .map(|listener| std::sync::Arc::new(crate::client::events::Events::new(listener)));
         let node = std::sync::Arc::new(NodeSettings {
             stream: stream.clone(),
             db: settings.database.or(target.database).map(i64::from),
@@ -465,6 +478,8 @@ impl<C: Codec> ClientBuilder<C> {
             push: None,
             reconnection_delay: settings.reconnection_delay,
             readonly: false,
+            kind: crate::NodeType::Master,
+            events: events.clone(),
         });
         Ok(match target.kind {
             Kind::Single => {
@@ -481,6 +496,8 @@ impl<C: Codec> ClientBuilder<C> {
                     push: None,
                     reconnection_delay: settings.reconnection_delay,
                     readonly: false,
+                    kind: crate::NodeType::Sentinel,
+                    events,
                 });
                 Topology::Sentinel(Sentinel::new(
                     target.nodes,

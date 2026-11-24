@@ -441,11 +441,11 @@ fn master_moved(failure: &Failure) -> bool {
 
 /// The master that the sentinels name, and a pool to it that moves when they name another.
 pub(crate) struct Sentinel {
-    sentinels: Vec<Address>,
     service: String,
     size: usize,
     settings: Arc<NodeSettings>,
-    sentinel_settings: Arc<NodeSettings>,
+    /// One connection to each sentinel, kept open like Redisson's, so that asking them every scan opens nothing new.
+    sentinel_nodes: Vec<Arc<Node>>,
     master: tokio::sync::RwLock<Option<Arc<Pool>>>,
     reads: ReadRouting,
     /// The replicas Sentinel reported last, `None` before the first scan.
@@ -507,12 +507,18 @@ impl Sentinel {
         read_mode: ReadMode,
     ) -> Self {
         Self {
-            sentinels,
             service,
             size,
-            replica_pools: ReplicaPools::new(size, settings.clone()),
+            replica_pools: ReplicaPools::new(size, {
+                let mut replica_settings = NodeSettings::clone(&settings);
+                replica_settings.kind = crate::NodeType::Replica;
+                Arc::new(replica_settings)
+            }),
+            sentinel_nodes: sentinels
+                .iter()
+                .map(|sentinel| Arc::new(Node::new(sentinel.clone(), sentinel_settings.clone())))
+                .collect(),
             settings,
-            sentinel_settings,
             master: tokio::sync::RwLock::new(None),
             reads: ReadRouting::new(read_mode),
             replicas: RwLock::new(None),
@@ -528,8 +534,7 @@ impl Sentinel {
         let master = master.address().clone();
         let mut cmd = redis::cmd("SENTINEL");
         cmd.arg("REPLICAS").arg(&self.service);
-        for sentinel in &self.sentinels {
-            let node = Node::new(sentinel.clone(), self.sentinel_settings.clone());
+        for node in &self.sentinel_nodes {
             if let Ok(reply) = node.send(&cmd).await {
                 let replicas = parse_sentinel_replicas(&reply, &master);
                 self.replica_pools.keep(&replicas);
@@ -588,8 +593,7 @@ impl Sentinel {
     /// Asks each sentinel in turn for the master's address.
     async fn resolve(&self) -> Result<Address, Failure> {
         let mut last = Failure::Connection("no sentinel answered".into());
-        for sentinel in &self.sentinels {
-            let node = Node::new(sentinel.clone(), self.sentinel_settings.clone());
+        for node in &self.sentinel_nodes {
             let mut cmd = redis::cmd("SENTINEL");
             cmd.arg("GET-MASTER-ADDR-BY-NAME").arg(&self.service);
             match node.send(&cmd).await {
@@ -706,6 +710,7 @@ impl Cluster {
     ) -> Self {
         let mut replica_settings = NodeSettings::clone(&settings);
         replica_settings.readonly = true;
+        replica_settings.kind = crate::NodeType::Replica;
         Self {
             seeds,
             size,
