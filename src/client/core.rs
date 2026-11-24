@@ -401,6 +401,10 @@ impl Drop for Unblock {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // The connections close from here on; Redisson reports nothing while it shuts down.
+        if let Some(events) = &self.topology.settings().events {
+            events.close();
+        }
         let evictors = self.evictors.get_mut().unwrap_or_else(|e| e.into_inner());
         evictors.values().for_each(|evictor| evictor.handle.abort());
         let background = self.background.get_mut().unwrap_or_else(|e| e.into_inner());

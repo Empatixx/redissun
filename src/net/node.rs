@@ -33,6 +33,10 @@ pub(crate) struct NodeSettings {
     pub(crate) reconnection_delay: DelayStrategy,
     /// Sends `READONLY` on every new connection: a replica of Redis Cluster serves reads only to a connection that sent it.
     pub(crate) readonly: bool,
+    /// What the node is, for the connection listener.
+    pub(crate) kind: crate::NodeType,
+    /// Told about every connection that opens and ends, when the client has a connection listener.
+    pub(crate) events: Option<Arc<crate::client::events::Events>>,
 }
 
 /// A subscribe-like command of a pub/sub connection.
@@ -317,7 +321,12 @@ impl Node {
                     }
                     failure(error)
                 })?;
-        let driver = tokio::spawn(driver);
+        // The driver ends with the connection, whoever closed it; the connection listener hears of it then.
+        let (ended, end) = tokio::sync::oneshot::channel::<()>();
+        let driver = tokio::spawn(async move {
+            driver.await;
+            let _ = ended.send(());
+        });
         // An error reply (`BUSY` while a script runs) fails the opening, so no connection is kept without its name.
         let mut setup = async |cmd: redis::Cmd| match connection.send_packed_command(&cmd).await {
             Ok(redis::Value::ServerError(error)) => Err(server_failure(error)),
@@ -338,6 +347,14 @@ impl Node {
             redis::Value::Int(id) => id,
             _ => 0,
         };
+        if let Some(events) = &settings.events {
+            events.opened(&self.address, settings.kind);
+            let (events, address, kind) = (events.clone(), self.address.clone(), settings.kind);
+            tokio::spawn(async move {
+                let _ = end.await;
+                events.ended(&address, kind);
+            });
+        }
         Ok((connection, id, driver, probe, written))
     }
 
@@ -566,6 +583,8 @@ mod tests {
             push: None,
             reconnection_delay: DelayStrategy::Constant(Duration::from_millis(10)),
             readonly: false,
+            kind: crate::NodeType::Master,
+            events: None,
         }
     }
 

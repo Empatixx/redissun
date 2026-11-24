@@ -55,6 +55,7 @@ let client = Client::builder()
 | `check_slots_coverage` | true | `checkSlotsCoverage` | fail `build` for Redis Cluster while a slot has no master |
 | `read_mode` | `Master` | `readMode` (default `SLAVE`) | where reads go, see [Reading from replicas](#reading-from-replicas) |
 | `replica_scan_interval` | 5 s in a cluster, 1 s with Sentinel | `scanInterval` | how often the client looks for replicas again while it reads from them |
+| `connection_listener` | none | `connectionListener` | told when a node gets connected and when it loses its connections, see [Connection events](#connection-events) |
 
 ## Credentials
 
@@ -113,6 +114,38 @@ Every `ping_connection_interval` each pooled connection, the pub/sub connection 
 A command that waits longer than `timeout` fails with `Error::Timeout`, and its connection is checked by the next `PING`. Batches, blocking calls and the pub/sub connection wait on purpose: a batch waits `timeout` for its replies, a blocking call as long as it was asked to.
 
 The pub/sub connection is opened when an object first needs it: a lock or semaphore that waits, a `Topic` subscriber, cache events, a `LocalCachedMap` or a `DelayedQueue`.
+
+## Connection events
+
+A `ConnectionListener` is told when a node gets connected and when it loses its connections, like Redisson's `ConnectionListener`. Both methods have empty defaults, so implement only the ones you need.
+
+```rust
+use redissun::{Client, ConnectionListener, NodeType};
+
+struct Report;
+
+impl ConnectionListener for Report {
+    fn on_connect(&self, address: &str, node: NodeType) {
+        println!("{node:?} {address} connected");
+    }
+
+    fn on_disconnect(&self, address: &str, node: NodeType) {
+        println!("{node:?} {address} disconnected");
+    }
+}
+
+let client = Client::builder()
+    .url("redis://127.0.0.1:6379")
+    .connection_listener(Report)
+    .build()
+    .await?;
+```
+
+- `address` is `host:port`. `node` is `NodeType::Master` (also for a single server), `Replica` (a replica that takes reads) or `Sentinel`.
+- A node counts as connected from its first open connection until it has none left. A pool of several connections to one node is one `on_connect`, and one `on_disconnect` once all of them are gone.
+- Redisson reports a disconnect when any one connection of the node closes. redissun waits for the last one, so a blocking command that closes its own connection is no event.
+- A dropped client reports nothing more.
+- The methods run on the task that opened or lost the connection. Keep them quick and hand longer work to another task.
 
 ## Reading from replicas
 
