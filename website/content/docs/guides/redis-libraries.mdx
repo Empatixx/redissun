@@ -10,7 +10,9 @@ Rust has several Redis libraries. They work at different levels, and they combin
 | [redis-rs](https://crates.io/crates/redis) (`redis`) | The common Redis client: commands, pipelines, pub/sub, Sentinel and Redis Cluster | you want to send Redis commands yourself |
 | [fred](https://crates.io/crates/fred) | An async Redis client with pools, reconnection, Sentinel and Cluster | you want a client that manages its connections for you |
 | [rslock](https://crates.io/crates/rslock), [redsync](https://crates.io/crates/redsync) | Redlock: one lock across several independent Redis servers | you need only a lock, held on a majority of servers |
-| redissun | Redisson for Rust: maps, sets, queues, locks, semaphores, caches, streams and rate limiters as Rust types | you want distributed objects instead of commands |
+| [distkit](https://crates.io/crates/distkit) | Counters, `Mutex` and `RwLock`, and rate limiting on Redis | you need those primitives, such as counters that buffer increments in memory |
+| [redisson](https://crates.io/crates/redisson) | Another Redisson-inspired crate: locks, maps, lists, sets, streams and queues, with a sync and an async API | you want a Redisson-like library with a blocking API |
+| redissun | Redisson for Rust: maps, sets, queues, locks, semaphores, caches, streams and rate limiters as Rust types, with Redisson's scripts | you want distributed objects instead of commands, on tokio |
 
 ## Commands or objects
 
