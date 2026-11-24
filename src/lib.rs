@@ -37,6 +37,7 @@ mod locks;
 mod lua;
 mod messaging;
 mod net;
+mod nodes;
 mod object;
 mod pending;
 mod pubsub;
@@ -87,6 +88,7 @@ pub use messaging::stream::{
     StreamConsumer, StreamEntry, StreamGroup, StreamId, StreamInfo, StreamTrim,
 };
 pub use messaging::topic::{PatternSubscriber, PatternTopic, Subscriber, Topic};
+pub use nodes::{InfoSection, Nodes, RedisNode, SentinelNode, SetSlot};
 pub use object::Object;
 pub use pending::{Pending, PendingTimeout};
 pub use script::{Decoded, Function, LuaScript, Script, ScriptCall, ScriptMode, ScriptOutput};

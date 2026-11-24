@@ -404,6 +404,57 @@ impl Topology {
     }
 
     /// The settings every node of this client connects with.
+    /// The addresses of the nodes of `kind` the client knows now, Redisson's `getNodes(type)`. Replicas are known whatever the read mode, as Redisson knows them: those of the slot map, or those Sentinel reports.
+    pub(crate) async fn addresses(&self, kind: crate::NodeType) -> Vec<Address> {
+        use crate::NodeType;
+        match (self, kind) {
+            (Topology::Single(pool), NodeType::Master) => vec![pool.address().clone()],
+            (Topology::Sentinel(sentinel), NodeType::Master) => sentinel
+                .pool()
+                .await
+                .map(|pool| vec![pool.address().clone()])
+                .unwrap_or_default(),
+            (Topology::Sentinel(sentinel), NodeType::Replica) => sentinel.known_replicas().await,
+            (Topology::Cluster(cluster), NodeType::Master) => cluster.map().masters(),
+            (Topology::Cluster(cluster), NodeType::Replica) => cluster.map().replicas(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A connection to the node of `kind` at `address`, `None` when the client knows no such node now.
+    pub(crate) async fn node_at(
+        &self,
+        address: &Address,
+        kind: crate::NodeType,
+    ) -> Option<Arc<Node>> {
+        use crate::NodeType;
+        if !self.addresses(kind).await.contains(address) {
+            return None;
+        }
+        match (self, kind) {
+            (Topology::Single(pool), NodeType::Master) => Some(pool.next()),
+            (Topology::Sentinel(sentinel), NodeType::Master) => {
+                sentinel.pool().await.ok().map(|pool| pool.next())
+            }
+            (Topology::Sentinel(sentinel), NodeType::Replica) => {
+                Some(sentinel.replica_pools.pool(address).next())
+            }
+            (Topology::Cluster(cluster), NodeType::Master) => Some(cluster.pool(address).next()),
+            (Topology::Cluster(cluster), NodeType::Replica) => {
+                Some(cluster.replica_pools.pool(address).next())
+            }
+            _ => None,
+        }
+    }
+
+    /// The connections to the sentinels of the URL, empty without Sentinel.
+    pub(crate) fn sentinel_nodes(&self) -> Vec<Arc<Node>> {
+        match self {
+            Topology::Sentinel(sentinel) => sentinel.sentinel_nodes.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn settings(&self) -> &Arc<NodeSettings> {
         match self {
             Topology::Single(pool) => pool.nodes[0].settings_ref(),
@@ -561,26 +612,29 @@ impl Sentinel {
         }
     }
 
-    async fn send_read(&self, cmd: &redis::Cmd) -> Result<Value, Failure> {
-        if self.reads.mode() == ReadMode::Master {
-            return self.send(cmd).await;
-        }
+    /// The replicas Sentinel reported last; they are asked for when there are none yet.
+    async fn known_replicas(&self) -> Vec<Address> {
         let known = self
             .replicas
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let replicas = match known {
-            Some(replicas) => replicas,
-            None => {
-                self.scan_replicas().await;
-                self.replicas
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
-                    .unwrap_or_default()
-            }
-        };
+        if let Some(replicas) = known {
+            return replicas;
+        }
+        self.scan_replicas().await;
+        self.replicas
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
+    }
+
+    async fn send_read(&self, cmd: &redis::Cmd) -> Result<Value, Failure> {
+        if self.reads.mode() == ReadMode::Master {
+            return self.send(cmd).await;
+        }
+        let replicas = self.known_replicas().await;
         let Some(replica) = self.reads.pick(&replicas) else {
             return self.send(cmd).await;
         };

@@ -1,0 +1,72 @@
+---
+title: Nodes
+description: "Masters, replicas and sentinels of a client, with PING, INFO, CONFIG and cluster commands for each, like Redisson's RedisNodes."
+---
+
+`client.nodes()` lists the masters, replicas and sentinels the client knows and runs server commands on each of them, like Redisson's `getRedisNodes`. Use it for health checks, such as a readiness probe that calls `ping_all`, and for admin tasks.
+
+```rust
+use redissun::InfoSection;
+
+let nodes = client.nodes();
+if !nodes.ping_all().await {
+    eprintln!("a Redis node does not answer");
+}
+for master in nodes.masters().await {
+    let memory = master.info(InfoSection::Memory).await?;
+    println!("{} uses {:?}", master.address(), memory.get("used_memory_human"));
+}
+```
+
+## Which nodes
+
+| Call | Redisson | Gives |
+|---|---|---|
+| `ping_all()`, `ping_all_within(timeout)` | `pingAll()`, `pingAll(timeout, unit)` | whether every master and replica answers `PING`, within 1 s by default |
+| `masters()`, `master("host:port")` | `getMasters()`, `getMaster(address)`, `getInstance()` | the single server, the master Sentinel names now, or the masters of the cluster's slot map |
+| `replicas()`, `replica("host:port")` | `getSlaves()`, `getSlave(address)` | the replicas Sentinel reports, or those of the slot map. They are listed in every `ReadMode`, as in Redisson. |
+| `sentinels()`, `sentinel("host:port")` | `getSentinels()`, `getSentinel(address)` | the sentinels of the URL |
+
+Redisson has one `RedisNodes` type for each topology (`SINGLE`, `MASTER_SLAVE`, `SENTINEL_MASTER_SLAVE`, `CLUSTER`). redissun has one `Nodes` for all of them, and a single server simply has no replicas or sentinels.
+
+Every list is what the client knows when it is asked. A command on a node that has left the topology since fails with `Error::Redis`.
+
+## Commands of a master or replica
+
+Each command goes over the client's connections to that node and is limited by `timeout`.
+
+| redissun | Redisson | Command |
+|---|---|---|
+| `address()`, `node_type()` | `getAddr()` | `host:port`, and `NodeType::Master` or `Replica` |
+| `ping()`, `ping_within(timeout)` | `ping()`, `ping(timeout, unit)` | `PING`, within 1 s by default |
+| `info(InfoSection::Server)` | `info(InfoSection.SERVER)` | `INFO`, as field and value |
+| `time()` | `time()` | `TIME`, as a `SystemTime` |
+| `memory_statistics()` | `getMemoryStatistics()` | `MEMORY STATS` |
+| `config(param)`, `set_config(param, value)` | `getConfig`, `setConfig` | `CONFIG GET`, `CONFIG SET` |
+| `save()`, `bg_save()`, `schedule_bg_save()` | `save()`, `bgSave()`, `scheduleBgSave()` | `SAVE`, `BGSAVE`, `BGSAVE SCHEDULE` |
+| `last_save_time()` | `getLastSaveTime()` | `LASTSAVE` |
+| `bg_rewrite_aof()` | `bgRewriteAOF()` | `BGREWRITEAOF` |
+| `size()` | `size()` | `DBSIZE` |
+
+In a cluster, the same nodes also run the `CLUSTER` commands. Any other server answers them with an error.
+
+| redissun | Redisson | Command |
+|---|---|---|
+| `cluster_info()`, `cluster_id()` | `clusterInfo()`, `clusterId()` | `CLUSTER INFO`, `CLUSTER MYID` |
+| `cluster_slots()` | `clusterSlots()` | `CLUSTER SLOTS`: each slot range with the master and then its replicas |
+| `cluster_count_keys_in_slot(slot)`, `cluster_keys_in_slot(slot, count)` | `clusterCountKeysInSlot`, `clusterGetKeysInSlot` | `CLUSTER COUNTKEYSINSLOT`, `CLUSTER GETKEYSINSLOT` |
+| `cluster_add_slots(&[..])`, `cluster_delete_slots(&[..])`, `cluster_flush_slots()` | `clusterAddSlots`, `clusterDeleteSlots`, `clusterFlushSlots` | `CLUSTER ADDSLOTS`, `DELSLOTS`, `FLUSHSLOTS` |
+| `cluster_set_slot(slot, SetSlot::Migrating(id))` | `clusterSetSlot(slot, SetSlotCommand.MIGRATING, id)` | `CLUSTER SETSLOT`. `SetSlot` carries the node id: `Migrating`, `Importing`, `Node`, or `Stable` without one. |
+| `cluster_meet("host:port")`, `cluster_forget(id)`, `cluster_replicate(id)` | `clusterMeet`, `clusterForget`, `clusterReplicate` | `CLUSTER MEET`, `FORGET`, `REPLICATE` |
+| `cluster_count_failure_reports(id)` | `clusterCountFailureReports` | `CLUSTER COUNT-FAILURE-REPORTS` |
+
+## Commands of a sentinel
+
+A `SentinelNode` has the server commands above too, but a sentinel answers only some of them (`PING`, `INFO`), as in Redisson.
+
+| redissun | Redisson | Command |
+|---|---|---|
+| `master_addr(name)` | `getMasterAddr(name)` | `SENTINEL GET-MASTER-ADDR-BY-NAME`: `Some("host:port")`, or `None` for an unknown name |
+| `master(name)`, `masters()` | `getMaster(name)`, `getMasters()` | `SENTINEL MASTER`, `SENTINEL MASTERS` |
+| `replicas(name)`, `sentinels(name)` | `getSlaves(name)`, `getSentinels(name)` | `SENTINEL REPLICAS`, `SENTINEL SENTINELS` |
+| `failover(name)` | `failover(name)` | `SENTINEL FAILOVER` |

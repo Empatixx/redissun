@@ -433,6 +433,10 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `setReadMode(ReadMode.MASTER / SLAVE / MASTER_SLAVE)` | `.read_mode(ReadMode::Master / Replica / MasterAndReplica)`. The default is `Master`, where Redisson's is `SLAVE`. |
 | `setScanInterval` | `.replica_scan_interval()` |
 | `setConnectionListener`, `ConnectionListener`, `NodeType.MASTER / SLAVE / SENTINEL` | `.connection_listener()`, `ConnectionListener`, `NodeType::Master / Replica / Sentinel` |
+| `getRedisNodes(RedisNodes.SINGLE / SENTINEL_MASTER_SLAVE / CLUSTER)` | `client.nodes()`, one type for every topology, see [Nodes](/docs/guides/nodes) |
+| `pingAll`, `getMasters`, `getSlaves`, `getSentinels` | `ping_all()`, `masters()`, `replicas()`, `sentinels()` |
+| `RedisNode.info`, `time`, `getConfig`, `setConfig`, `save`, `bgSave`, `size` | `info()`, `time()`, `config()`, `set_config()`, `save()`, `bg_save()`, `size()` |
+| `SetSlotCommand.MIGRATING / IMPORTING / STABLE / NODE` | `SetSlot::Migrating(id) / Importing(id) / Stable / Node(id)` |
 | SLF4J logs | `tracing` events with the same messages and levels, see [Logging](/docs/guides/logging) |
 
 Not available: `subscriptionMode` (redissun subscribes on masters only), load balancers (replicas take reads in turn), `natMapper`, `nameMapper`, `commandMapper`, connection pool minimum idle sizes, `subscriptionsPerConnection` (one pub/sub connection per client), `idleConnectionTimeout`, `dnsMonitoringInterval`, `sslProvider`, `sslProtocols`, `sslCiphers`, `tcpKeepAliveCount` and `tcpUserTimeout`.
