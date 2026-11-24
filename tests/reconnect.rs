@@ -245,6 +245,8 @@ struct Switch {
     port: u16,
     on: std::sync::Arc<std::sync::atomic::AtomicBool>,
     generation: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    /// Connections that arrived while the switch was off.
+    refused: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Switch {
@@ -254,10 +256,12 @@ impl Switch {
         let port = listener.local_addr().unwrap().port();
         let on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let generation = std::sync::Arc::new(tokio::sync::watch::Sender::new(0u64));
-        let (accepting, epoch) = (on.clone(), generation.clone());
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (accepting, epoch, counted) = (on.clone(), generation.clone(), refused.clone());
         tokio::spawn(async move {
             while let Ok((mut client, _)) = listener.accept().await {
                 if !accepting.load(std::sync::atomic::Ordering::SeqCst) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     continue;
                 }
                 let target = target.clone();
@@ -277,6 +281,7 @@ impl Switch {
             port,
             on,
             generation,
+            refused,
         }
     }
 
@@ -318,5 +323,47 @@ async fn a_command_waits_within_its_timeout_for_redis_to_come_back() {
         .await
         .expect("the write never finished")
         .unwrap()
+        .unwrap();
+}
+
+/// A lock waiter is woken when its pub/sub connection is back, not each time restoring it fails. Woken while Redis is away (or while a cluster fails over), it would send its lock attempt, which is sent once, to a connection that is going down.
+#[tokio::test]
+async fn a_lock_waiter_is_not_woken_while_its_pub_sub_connection_is_away() {
+    let switch = Switch::start().await;
+    let client = redissun::Client::builder()
+        .url(format!("redis://127.0.0.1:{}", switch.port))
+        .timeout(Duration::from_secs(10))
+        .reconnection_delay(redissun::DelayStrategy::Constant(Duration::from_millis(
+            100,
+        )))
+        .ping_connection_interval(Duration::ZERO)
+        .build()
+        .await
+        .unwrap();
+    let holder = common::client().await;
+    let name = unique("away");
+    let held = holder.lock(name.clone()).lock().await.unwrap();
+    let waiter_lock = client.lock(name);
+    let waiter = tokio::spawn(async move { waiter_lock.lock().await });
+    sleep(Duration::from_millis(300)).await;
+
+    switch.off();
+    sleep(Duration::from_secs(1)).await;
+    let tries = switch.refused.load(std::sync::atomic::Ordering::SeqCst);
+    switch.on();
+    held.unlock().await.unwrap();
+
+    // The pub/sub connection tries again; a woken waiter would add one try per pooled connection every 100 ms.
+    assert!(
+        tries <= 5,
+        "{tries} connections while Redis was away: the waiter was woken"
+    );
+    timeout(Duration::from_secs(10), waiter)
+        .await
+        .expect("the waiter never got the lock")
+        .unwrap()
+        .unwrap()
+        .unlock()
+        .await
         .unwrap();
 }
