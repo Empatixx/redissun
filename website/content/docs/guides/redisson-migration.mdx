@@ -432,6 +432,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `setCodec` | `.codec()` |
 | `setReadMode(ReadMode.MASTER / SLAVE / MASTER_SLAVE)` | `.read_mode(ReadMode::Master / Replica / MasterAndReplica)`. The default is `Master`, where Redisson's is `SLAVE`. |
 | `setScanInterval` | `.replica_scan_interval()` |
+| SLF4J logs | `tracing` events with the same messages and levels, see [Logging](/docs/guides/logging) |
 
 Not available: `subscriptionMode` (redissun subscribes on masters only), load balancers (replicas take reads in turn), `natMapper`, `nameMapper`, `commandMapper`, connection pool minimum idle sizes, `subscriptionsPerConnection` (one pub/sub connection per client), `idleConnectionTimeout`, `dnsMonitoringInterval`, `sslProvider`, `sslProtocols`, `sslCiphers`, `tcpKeepAliveCount` and `tcpUserTimeout`.
 

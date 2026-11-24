@@ -107,6 +107,30 @@ impl SlotMap {
         replicas
     }
 
+    /// The replicas of `master`.
+    fn replicas_of(&self, master: &Address) -> Vec<Address> {
+        let mut replicas: Vec<Address> = Vec::new();
+        for range in self.ranges.iter().filter(|range| range.master == *master) {
+            for replica in &range.replicas {
+                if !replicas.contains(replica) {
+                    replicas.push(replica.clone());
+                }
+            }
+        }
+        replicas
+    }
+
+    /// The slots of `master` as Redisson logs them: `[0-5460]`.
+    fn slot_ranges(&self, master: &Address) -> String {
+        let ranges: Vec<String> = self
+            .ranges
+            .iter()
+            .filter(|range| range.master == *master)
+            .map(|range| format!("[{}-{}]", range.start, range.end))
+            .collect();
+        ranges.join(", ")
+    }
+
     /// Whether every one of the 16384 slots has a master, Redisson's `checkSlotsCoverage`.
     pub(crate) fn covers_every_slot(&self) -> bool {
         let covered: u32 = self
@@ -115,6 +139,46 @@ impl SlotMap {
             .map(|range| u32::from(range.end) - u32::from(range.start) + 1)
             .sum();
         covered == SLOTS
+    }
+}
+
+/// Logs the masters and replicas that `new` adds to or drops from `old`, as Redisson's `ClusterConnectionManager` does.
+fn log_slot_changes(old: &SlotMap, new: &SlotMap) {
+    let known = old.masters();
+    for master in new.masters() {
+        let slots = new.slot_ranges(&master);
+        if !known.contains(&master) {
+            tracing::info!("master: {master} added for slot ranges: {slots}");
+        }
+        let before = old.replicas_of(&master);
+        let now = new.replicas_of(&master);
+        for replica in now.iter().filter(|replica| !before.contains(replica)) {
+            tracing::info!("replica: {replica} added for master {master} slot ranges: {slots}");
+        }
+        for replica in before.iter().filter(|replica| !now.contains(replica)) {
+            tracing::info!("replica {replica} removed for master {master} slot ranges: {slots}");
+        }
+    }
+}
+
+/// Warns once for each master that has no replica to read from while reads should go to replicas, as Redisson's `MasterSlaveEntry` does; `warned` holds the masters already warned about.
+fn warn_missing_replicas(
+    mode: ReadMode,
+    masters: impl IntoIterator<Item = (Address, bool)>,
+    warned: &std::sync::Mutex<std::collections::HashSet<Address>>,
+) {
+    if mode == ReadMode::Master {
+        return;
+    }
+    let mut warned = warned.lock().unwrap_or_else(|e| e.into_inner());
+    for (master, has_replicas) in masters {
+        if has_replicas {
+            warned.remove(&master);
+        } else if warned.insert(master.clone()) {
+            tracing::warn!(
+                "ReadMode = {mode:?}, but replica nodes are not found for master {master}!"
+            );
+        }
     }
 }
 
@@ -387,6 +451,8 @@ pub(crate) struct Sentinel {
     /// The replicas Sentinel reported last, `None` before the first scan.
     replicas: RwLock<Option<Vec<Address>>>,
     replica_pools: ReplicaPools,
+    /// The master that was last warned about having no replica.
+    warned: std::sync::Mutex<std::collections::HashSet<Address>>,
 }
 
 /// The replicas of a `SENTINEL REPLICAS` reply that serve `master`, leaving out, as Redisson does, those marked `s_down` or `disconnected` and those whose link to the master is in error.
@@ -450,6 +516,7 @@ impl Sentinel {
             master: tokio::sync::RwLock::new(None),
             reads: ReadRouting::new(read_mode),
             replicas: RwLock::new(None),
+            warned: Default::default(),
         }
     }
 
@@ -466,7 +533,24 @@ impl Sentinel {
             if let Ok(reply) = node.send(&cmd).await {
                 let replicas = parse_sentinel_replicas(&reply, &master);
                 self.replica_pools.keep(&replicas);
-                *self.replicas.write().unwrap_or_else(|e| e.into_inner()) = Some(replicas);
+                let before = self
+                    .replicas
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(replicas.clone())
+                    .unwrap_or_default();
+                // Redisson's `SentinelConnectionManager` logs each replica that comes and goes.
+                for replica in replicas.iter().filter(|replica| !before.contains(replica)) {
+                    tracing::info!("replica: {replica} added");
+                }
+                for replica in before.iter().filter(|replica| !replicas.contains(replica)) {
+                    tracing::warn!("replica: {replica} is down");
+                }
+                warn_missing_replicas(
+                    self.reads.mode(),
+                    [(master.clone(), !replicas.is_empty())],
+                    &self.warned,
+                );
                 return;
             }
         }
@@ -550,8 +634,15 @@ impl Sentinel {
 
     /// Asks the sentinels again; the pool moves when they name another master.
     async fn refresh(&self) {
-        let Ok(address) = self.resolve().await else {
-            return;
+        let address = match self.resolve().await {
+            Ok(address) => address,
+            Err(failure) => {
+                tracing::error!(
+                    "Can't update cluster state. A new attempt will be made. {}",
+                    Error::from(failure)
+                );
+                return;
+            }
         };
         let mut master = self.master.write().await;
         if master
@@ -559,6 +650,9 @@ impl Sentinel {
             .is_some_and(|pool| *pool.address() == address)
         {
             return;
+        }
+        if let Some(old) = master.as_ref() {
+            tracing::info!("master {} has been changed to {address}", old.address());
         }
         *master = Some(Arc::new(Pool::new(&address, self.size, &self.settings)));
         drop(master);
@@ -599,6 +693,8 @@ pub(crate) struct Cluster {
     reads: ReadRouting,
     /// Connections to replicas send `READONLY`, so they serve reads of the slots of their master.
     replica_pools: ReplicaPools,
+    /// The masters already warned about having no replica.
+    warned: std::sync::Mutex<std::collections::HashSet<Address>>,
 }
 
 impl Cluster {
@@ -619,6 +715,7 @@ impl Cluster {
             refreshing: tokio::sync::Mutex::new(()),
             reads: ReadRouting::new(read_mode),
             replica_pools: ReplicaPools::new(size, Arc::new(replica_settings)),
+            warned: Default::default(),
         }
     }
 
@@ -671,6 +768,7 @@ impl Cluster {
         let _turn = self.refreshing.lock().await;
         let mut candidates = self.map().masters();
         candidates.extend(self.seeds.iter().cloned());
+        let tried: Vec<String> = candidates.iter().map(Address::to_string).collect();
         let mut last = Failure::Connection("no cluster node answered".into());
         let mut cmd = redis::cmd("CLUSTER");
         cmd.arg("SLOTS");
@@ -694,6 +792,14 @@ impl Cluster {
                     let map = SlotMap::new(ranges);
                     let masters = map.masters();
                     self.replica_pools.keep(&map.replicas());
+                    log_slot_changes(&self.map(), &map);
+                    warn_missing_replicas(
+                        self.reads.mode(),
+                        masters
+                            .iter()
+                            .map(|master| (master.clone(), !map.replicas_of(master).is_empty())),
+                        &self.warned,
+                    );
                     *self.map.write().unwrap_or_else(|e| e.into_inner()) = map;
                     self.pools
                         .write()
@@ -704,6 +810,10 @@ impl Cluster {
                 Err(failure) => last = failure,
             }
         }
+        tracing::error!(
+            "Can't update cluster state using nodes: {}. A new attempt will be made. {last:?}",
+            tried.join(", ")
+        );
         Err(last)
     }
 

@@ -332,18 +332,29 @@ impl PubSub {
         let outcome = async {
             let node = open(&self.topology, &self.push).await?;
             node.send(&redis::cmd("PING")).await.map_err(Error::from)?;
+            let address = node.address().clone();
             *self.node.lock().await = node;
             if !channels.is_empty() {
-                self.listen(channels, false).await?;
+                self.listen(channels.clone(), false).await?;
             }
             if !patterns.is_empty() {
-                self.listen(patterns, true).await?;
+                self.listen(patterns.clone(), true).await?;
             }
             self.node()
                 .await
                 .send(&redis::cmd("PING"))
                 .await
                 .map_err(Error::from)?;
+            for channel in &channels {
+                tracing::info!(
+                    "listeners of '{channel}' channel have been resubscribed to '{address}'"
+                );
+            }
+            for pattern in &patterns {
+                tracing::info!(
+                    "listeners of '{pattern}' channel-pattern have been resubscribed to '{address}'"
+                );
+            }
             Ok(())
         }
         .await;
