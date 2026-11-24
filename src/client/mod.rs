@@ -82,6 +82,11 @@ impl<C: Codec> Client<C> {
         Client::from_parts(self.core.clone(), codec)
     }
 
+    /// The masters, replicas and sentinels of the client, with server commands for each, like Redisson's `getRedisNodes`.
+    pub fn nodes(&self) -> crate::Nodes {
+        crate::Nodes::new(self.core.clone())
+    }
+
     /// Returns a [`Script`] that runs Lua scripts, like Redisson's `getScript()`. Arguments and [`Decoded`](crate::Decoded) replies use this client's codec.
     pub fn script(&self) -> Script<C> {
         Script::new(self.core.clone(), self.codec.clone())
