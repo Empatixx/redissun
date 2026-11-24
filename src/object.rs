@@ -251,6 +251,22 @@ impl Key {
             .await
     }
 
+    /// Like [`query`](Key::query) for a command that only reads, which goes to a replica when the client's `ReadMode` says so.
+    pub(crate) async fn read<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+        self.core
+            .query(Request::new(cmd).key(self.redis_key().as_bytes()).read())
+            .await
+    }
+
+    /// Like [`command`](Key::command) for a command that only reads, see [`read`](Key::read).
+    pub(crate) async fn read_command(
+        &self,
+        name: &str,
+        args: std::vec::Vec<Arg>,
+    ) -> Result<redis::Value> {
+        self.read(command(name, args)).await
+    }
+
     /// Like [`query`](Key::query) for a command that is never sent again after its connection failed.
     pub(crate) async fn query_once<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
         self.core
@@ -258,8 +274,9 @@ impl Key {
             .await
     }
 
+    /// Whether the key exists, read where the client's `ReadMode` says, as Redisson's `isExists` is for every object.
     pub(crate) async fn exists(&self) -> Result<bool> {
-        let found: i64 = self.query(self.key_cmd("EXISTS")).await?;
+        let found: i64 = self.read(self.key_cmd("EXISTS")).await?;
         Ok(found > 0)
     }
 
@@ -277,8 +294,9 @@ impl Key {
         Ok(applied)
     }
 
+    /// The time to live, read where the client's `ReadMode` says, as Redisson's `remainTimeToLive` is for every object.
     pub(crate) async fn ttl(&self) -> Result<Option<Duration>> {
-        let millis: i64 = self.query(self.key_cmd("PTTL")).await?;
+        let millis: i64 = self.read(self.key_cmd("PTTL")).await?;
         Ok((millis >= 0).then(|| Duration::from_millis(millis as u64)))
     }
 

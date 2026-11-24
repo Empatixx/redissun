@@ -53,6 +53,8 @@ let client = Client::builder()
 | `eviction_interval` | 5 s | `minCleanUpDelay` | first pause of the cache clean-up task |
 | `codec` | JSON | `codec` | how values are turned into bytes, see [Codecs](/docs/guides/codecs) |
 | `check_slots_coverage` | true | `checkSlotsCoverage` | fail `build` for Redis Cluster while a slot has no master |
+| `read_mode` | `Master` | `readMode` (default `SLAVE`) | where reads go, see [Reading from replicas](#reading-from-replicas) |
+| `replica_scan_interval` | 5 s in a cluster, 1 s with Sentinel | `scanInterval` | how often the client looks for replicas again while it reads from them |
 
 ## Credentials
 
@@ -111,6 +113,41 @@ Every `ping_connection_interval` each pooled connection, the pub/sub connection 
 A command that waits longer than `timeout` fails with `Error::Timeout`, and its connection is checked by the next `PING`. Batches, blocking calls and the pub/sub connection wait on purpose: a batch waits `timeout` for its replies, a blocking call as long as it was asked to.
 
 The pub/sub connection is opened when an object first needs it: a lock or semaphore that waits, a `Topic` subscriber, cache events, a `LocalCachedMap` or a `DelayedQueue`.
+
+## Reading from replicas
+
+`read_mode` sends reads to replicas, like Redisson's `readMode`:
+
+| `ReadMode` | Redisson | Reads go to |
+|---|---|---|
+| `Master` (default) | `MASTER` | the master |
+| `Replica` | `SLAVE` | the replicas in turn, the master while there is none |
+| `MasterAndReplica` | `MASTER_SLAVE` | the master and each replica in turn |
+
+```rust
+use redissun::ReadMode;
+
+let client = Client::builder()
+    .url("redis-cluster://127.0.0.1:7000?node=127.0.0.1:7001")
+    .read_mode(ReadMode::Replica)
+    .build()
+    .await?;
+```
+
+A replica copies the master with a delay, so a read from it can miss a write made just before. That is why the default is `Master`, unlike Redisson, where it is `SLAVE`.
+
+Reads are the plain commands that only look at data, the ones Redisson sends with `readAsync`: `get`, `len`, `contains`, ranges, ranks, scores and the like on `Bucket`, `BitSet`, `Geo`, `HashMap`, `HashSet`, `SortedSet`, `Vec` and `VecDeque`, and `exists` and `ttl` on every object. These always use the master, as in Redisson:
+
+- writes, and reads inside a write such as `insert` returning the old value,
+- `AtomicI64::get`, `AtomicF64::get`, `HyperLogLog` counts, `SortedSet` random members and `HashSet::intersection_len`,
+- scans (`iter`), whose cursor must stay on one node,
+- scripts, batches, blocking calls and pub/sub,
+- locks, semaphores, latches, rate limiters and the other coordination objects, which must see their own last write,
+- `LocalCachedMap::get` and `contains_key`, which would otherwise cache a stale value, and `HashMapCache` and `HashSetCache`, whose reads are scripts.
+
+Replicas are the ones `CLUSTER SLOTS` lists in Redis Cluster and the ones Sentinel reports with `SENTINEL REPLICAS`, leaving out, as Redisson does, those it marks `s_down` or `disconnected` and those whose link to the master is in error. The client looks for them again every `replica_scan_interval`. Redis Cluster lists a replica only once it has copied some data, so in a new cluster reads move to the replicas within a few seconds of the first writes. A single server has no replicas, as Redisson's single server mode has no `readMode`.
+
+Each replica gets a pool of `pool_size` connections when the first read goes to it; in Redis Cluster they send `READONLY`. A read that a replica cannot answer, because it is down, loading its data or no longer serves the slot, goes to the master.
 
 ## Tuning
 

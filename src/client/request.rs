@@ -1,10 +1,11 @@
 //! A command on its way to Redis: what to send, which key routes it, and whether it may be sent again.
 
-/// A command with what routes it. Build it with [`Request::new`], then [`key`](Request::key) and [`once`](Request::once).
+/// A command with what routes it. Build it with [`Request::new`], then [`key`](Request::key), [`once`](Request::once) and [`read`](Request::read).
 pub(crate) struct Request {
     cmd: redis::Cmd,
     key: Option<Vec<u8>>,
     once: bool,
+    read: bool,
 }
 
 impl Request {
@@ -13,6 +14,7 @@ impl Request {
             cmd,
             key: None,
             once: false,
+            read: false,
         }
     }
 
@@ -26,6 +28,16 @@ impl Request {
     pub(crate) fn once(mut self) -> Self {
         self.once = true;
         self
+    }
+
+    /// The command only reads, so it goes where the client's `ReadMode` says, to a replica or the master.
+    pub(crate) fn read(mut self) -> Self {
+        self.read = true;
+        self
+    }
+
+    pub(crate) fn is_read(&self) -> bool {
+        self.read
     }
 
     pub(crate) fn cmd(&self) -> &redis::Cmd {

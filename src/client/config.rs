@@ -27,6 +27,8 @@ struct Settings {
     tcp_keep_alive_interval: Option<Duration>,
     tcp_no_delay: bool,
     check_slots_coverage: bool,
+    read_mode: crate::ReadMode,
+    replica_scan_interval: Option<Duration>,
     client_name: Option<String>,
     database: Option<u8>,
     username: Option<String>,
@@ -78,6 +80,8 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             .field("keep_alive", &settings.keep_alive)
             .field("tcp_no_delay", &settings.tcp_no_delay)
             .field("check_slots_coverage", &settings.check_slots_coverage)
+            .field("read_mode", &settings.read_mode)
+            .field("replica_scan_interval", &settings.replica_scan_interval)
             .field("client_name", &settings.client_name)
             .field("database", &settings.database)
             .field("username", &settings.username)
@@ -115,6 +119,8 @@ impl ClientBuilder<JsonCodec> {
                 tcp_keep_alive_interval: None,
                 tcp_no_delay: true,
                 check_slots_coverage: true,
+                read_mode: crate::ReadMode::Master,
+                replica_scan_interval: None,
                 client_name: None,
                 database: None,
                 username: None,
@@ -235,6 +241,18 @@ impl<C: Codec> ClientBuilder<C> {
     /// Whether building a client for Redis Cluster fails while a slot has no master, like Redisson's `checkSlotsCoverage`. Defaults to `true`.
     pub fn check_slots_coverage(mut self, check: bool) -> Self {
         self.settings.check_slots_coverage = check;
+        self
+    }
+
+    /// Where read commands go: the master, the replicas, or both in turn, like Redisson's `readMode`. See [`ReadMode`](crate::ReadMode) for which calls count as reads and where the replicas come from. Defaults to [`ReadMode::Master`](crate::ReadMode::Master), unlike Redisson, whose default reads from replicas: a read never misses a write made just before.
+    pub fn read_mode(mut self, mode: crate::ReadMode) -> Self {
+        self.settings.read_mode = mode;
+        self
+    }
+
+    /// How often the client looks for replicas again while [`read_mode`](ClientBuilder::read_mode) is not `Master`, like Redisson's `scanInterval`: it reads `CLUSTER SLOTS` in Redis Cluster and asks Sentinel for the replicas, so a replica that was added, or one that comes back, starts getting reads. Defaults to Redisson's 5 seconds in a cluster and 1 second with Sentinel. Zero scans only when a read finds no replicas known yet.
+    pub fn replica_scan_interval(mut self, interval: Duration) -> Self {
+        self.settings.replica_scan_interval = Some(interval);
         self
     }
 
@@ -446,6 +464,7 @@ impl<C: Codec> ClientBuilder<C> {
             resp3: false,
             push: None,
             reconnection_delay: settings.reconnection_delay,
+            readonly: false,
         });
         Ok(match target.kind {
             Kind::Single => {
@@ -461,6 +480,7 @@ impl<C: Codec> ClientBuilder<C> {
                     resp3: false,
                     push: None,
                     reconnection_delay: settings.reconnection_delay,
+                    readonly: false,
                 });
                 Topology::Sentinel(Sentinel::new(
                     target.nodes,
@@ -468,11 +488,15 @@ impl<C: Codec> ClientBuilder<C> {
                     settings.pool_size,
                     node,
                     sentinels,
+                    settings.read_mode,
                 ))
             }
-            Kind::Cluster => {
-                Topology::Cluster(Cluster::new(target.nodes, settings.pool_size, node))
-            }
+            Kind::Cluster => Topology::Cluster(Cluster::new(
+                target.nodes,
+                settings.pool_size,
+                node,
+                settings.read_mode,
+            )),
         })
     }
 
@@ -502,6 +526,7 @@ impl<C: Codec> ClientBuilder<C> {
                 },
                 ping_interval: settings.ping_connection_interval,
                 credentials_refresh: settings.resolver.as_ref().and(settings.credentials_refresh),
+                replica_scan_interval: settings.replica_scan_interval,
             },
         )
         .await?;
@@ -519,6 +544,12 @@ mod tests {
         builder.topology(&url).unwrap().settings().clone()
     }
 
+    #[test]
+    fn reads_go_to_the_master_by_default() {
+        let builder = ClientBuilder::new();
+        assert_eq!(builder.settings.read_mode, crate::ReadMode::Master);
+        assert_eq!(builder.settings.replica_scan_interval, None);
+    }
     #[test]
     fn defaults_follow_redisson() {
         let builder = ClientBuilder::new().url("redis://127.0.0.1:6379");

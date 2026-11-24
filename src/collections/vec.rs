@@ -251,7 +251,7 @@ where
         };
         let raw: Option<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("LINDEX");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(index);
@@ -437,7 +437,7 @@ where
         };
         let raw: std::vec::Vec<Bytes> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("LRANGE");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(start);

@@ -477,7 +477,7 @@ where
     {
         let score: Option<f64> = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("ZSCORE");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(&self.codec.encode(v)?[..]);
@@ -498,7 +498,7 @@ where
         }
         let reply: Value = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("ZMSCORE");
                 cmd.arg(self.key.redis_key());
                 cmd.arg(crate::client::request::binary(&self.encode_many(values)?));
@@ -619,7 +619,7 @@ where
     {
         let mut cmd = self.key.key_cmd("ZRANK");
         cmd.arg(&self.codec.encode(v)?[..]);
-        let rank: Option<usize> = self.key.query(cmd).await?;
+        let rank: Option<usize> = self.key.read(cmd).await?;
         Ok(rank)
     }
 
@@ -631,7 +631,7 @@ where
     {
         let mut cmd = self.key.key_cmd("ZRANK");
         cmd.arg(&self.codec.encode(v)?[..]).arg("WITHSCORE");
-        let reply: Value = self.key.query(cmd).await?;
+        let reply: Value = self.key.read(cmd).await?;
         match reply {
             Value::Nil => Ok(None),
             Value::Array(items) => match items.as_slice() {
@@ -656,7 +656,7 @@ where
     {
         let mut cmd = self.key.key_cmd("ZREVRANK");
         cmd.arg(&self.codec.encode(v)?[..]);
-        let rank: Option<usize> = self.key.query(cmd).await?;
+        let rank: Option<usize> = self.key.read(cmd).await?;
         Ok(rank)
     }
 
@@ -688,7 +688,7 @@ where
     pub async fn len(&self) -> Result<usize> {
         let length: usize = self
             .key
-            .query({
+            .read({
                 let mut cmd = redis::cmd("ZCARD");
                 cmd.arg(self.key.redis_key());
                 cmd
@@ -711,7 +711,7 @@ where
     async fn at(&self, index: i64) -> Result<Option<(V, f64)>> {
         let mut cmd = self.key.key_cmd("ZRANGE");
         cmd.arg(index).arg(index).arg("WITHSCORES");
-        let raw: Vec<(Bytes, f64)> = self.key.query(cmd).await?;
+        let raw: Vec<(Bytes, f64)> = self.key.read(cmd).await?;
         self.decode_one(raw)
     }
 
@@ -912,7 +912,7 @@ where
             cmd.arg("REV");
         }
         cmd.arg("WITHSCORES");
-        let raw: Vec<(Bytes, f64)> = self.key.query(cmd).await?;
+        let raw: Vec<(Bytes, f64)> = self.key.read(cmd).await?;
         self.decode_all(raw)
     }
 
@@ -961,7 +961,7 @@ where
             args.extend([Arg::from("LIMIT"), reply::int(offset), reply::int(count)]);
         }
         args.push(Arg::from("WITHSCORES"));
-        let reply = self.key.command("ZRANGE", args).await?;
+        let reply = self.key.read_command("ZRANGE", args).await?;
         self.decode_all(scored(&reply)?)
     }
 

@@ -393,7 +393,7 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let args = vec![Arg::from(self.key.redis_key()), self.member(v)?];
-        let reply = self.key.command("GEOPOS", args).await?;
+        let reply = self.key.read_command("GEOPOS", args).await?;
         Ok(array(&reply).first().and_then(point))
     }
 
@@ -404,7 +404,7 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let args = vec![Arg::from(self.key.redis_key()), self.member(v)?];
-        let reply = self.key.command("GEOHASH", args).await?;
+        let reply = self.key.read_command("GEOHASH", args).await?;
         Ok(array(&reply).first().and_then(text))
     }
 
@@ -414,7 +414,10 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let reply = self.key.command("GEOPOS", self.members(members)?).await?;
+        let reply = self
+            .key
+            .read_command("GEOPOS", self.members(members)?)
+            .await?;
         Ok(array(&reply).iter().map(point).collect())
     }
 
@@ -424,7 +427,10 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let reply = self.key.command("GEOHASH", self.members(members)?).await?;
+        let reply = self
+            .key
+            .read_command("GEOHASH", self.members(members)?)
+            .await?;
         Ok(array(&reply).iter().map(text).collect())
     }
 
@@ -450,7 +456,7 @@ where
             self.member(to)?,
             Arg::from(unit.as_str()),
         ];
-        let reply = self.key.command("GEODIST", args).await?;
+        let reply = self.key.read_command("GEODIST", args).await?;
         Ok(float(&reply))
     }
 
@@ -458,7 +464,7 @@ where
     pub async fn len(&self) -> Result<usize> {
         let reply = self
             .key
-            .command("ZCARD", vec![Arg::from(self.key.redis_key())])
+            .read_command("ZCARD", vec![Arg::from(self.key.redis_key())])
             .await?;
         Ok(number(&reply).unwrap_or(0) as usize)
     }
@@ -471,7 +477,7 @@ where
     /// All members in score order, which for a geo set is geohash order (`ZRANGE 0 -1`). After a store with [`GeoSearch::store_dist`] it is nearest first. Redisson's `readAll`.
     pub async fn read_all(&self) -> Result<Vec<V>> {
         let args = vec![Arg::from(self.key.redis_key()), Arg::Int(0), Arg::Int(-1)];
-        let reply = self.key.command("ZRANGE", args).await?;
+        let reply = self.key.read_command("ZRANGE", args).await?;
         array(&reply)
             .iter()
             .map(|member| self.codec.decode(&bytes(member).ok_or_else(malformed)?))
@@ -492,7 +498,7 @@ where
         origin.args(&mut command)?;
         args.args(&mut command)?;
         command.extend([Arg::from("WITHDIST"), Arg::from("WITHCOORD")]);
-        let reply = match self.key.command("GEOSEARCH", command).await {
+        let reply = match self.key.read_command("GEOSEARCH", command).await {
             Ok(reply) => reply,
             Err(error) if missing_member(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error),

@@ -26,6 +26,8 @@ pub(crate) struct Startup {
     pub(crate) ping_interval: Duration,
     /// How often open connections log in again with what the credentials resolver gives now, Redisson's `nextRenewal`.
     pub(crate) credentials_refresh: Option<Duration>,
+    /// How often to look for replicas while reads may go to them; `None` takes the default of the topology.
+    pub(crate) replica_scan_interval: Option<Duration>,
 }
 
 pub(crate) struct Core {
@@ -88,6 +90,13 @@ impl Core {
             let renewal = tokio::spawn(renewal_loop(Arc::downgrade(&core), interval));
             core.spawned(renewal);
         }
+        if let Some((mode, default)) = core.topology.replica_scanning() {
+            let interval = startup.replica_scan_interval.unwrap_or(default);
+            if mode != crate::ReadMode::Master && !interval.is_zero() {
+                let scan = tokio::spawn(replica_scan_loop(Arc::downgrade(&core), interval));
+                core.spawned(scan);
+            }
+        }
         Ok(core)
     }
 
@@ -123,11 +132,16 @@ impl Core {
         let send = async {
             let mut attempt = 0;
             loop {
-                match self
-                    .topology
-                    .send(request.cmd(), request.routing_key())
-                    .await
-                {
+                let sent = if request.is_read() {
+                    self.topology
+                        .send_read(request.cmd(), request.routing_key())
+                        .await
+                } else {
+                    self.topology
+                        .send(request.cmd(), request.routing_key())
+                        .await
+                };
+                match sent {
                     // A command Redis never saw goes again, even one sent once; within `timeout` that costs no attempt, as the command waits for a connection (a node's reconnection delay paces it).
                     Err(Failure::Unsent(_)) if !self.retry.timeout.is_zero() => {}
                     Err(Failure::Unsent(_)) if attempt < attempts => attempt += 1,
@@ -243,6 +257,20 @@ impl Core {
 }
 
 /// Every `interval`, each open connection sends `AUTH` with what the credentials resolver gives for its node now; connections that a batch holds get theirs when they are opened again.
+/// Looks for replicas again every `interval`, like Redisson's `scanInterval`, so a replica that was added or came back gets reads, and one that left gets none.
+async fn replica_scan_loop(core: std::sync::Weak<Core>, interval: Duration) {
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    loop {
+        ticks.tick().await;
+        let Some(strong) = core.upgrade() else {
+            return;
+        };
+        let topology = strong.topology.clone();
+        drop(strong);
+        topology.scan_replicas().await;
+    }
+}
+
 async fn renewal_loop(core: std::sync::Weak<Core>, interval: Duration) {
     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     loop {
