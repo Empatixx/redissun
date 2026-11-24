@@ -17,8 +17,13 @@ pub(super) fn spawn(
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(period) => {}
             }
-            if let Ok(false) = renew(&key, &owner, lease, mode).await {
-                break;
+            match renew(&key, &owner, lease, mode).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                // The lease runs on; the next period tries again, as Redisson's `RenewalTask` does.
+                Err(error) => {
+                    tracing::error!("Can't update lock {} expiration: {error}", key.name)
+                }
             }
         }
     });

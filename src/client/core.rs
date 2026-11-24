@@ -148,6 +148,10 @@ impl Core {
                     Err(Failure::Connection(_)) if !once && attempt < attempts => attempt += 1,
                     result => return result.map_err(Error::from),
                 }
+                tracing::debug!(
+                    "attempt {attempt} for {}",
+                    crate::net::node::command_name(request.cmd())
+                );
             }
         };
         if self.retry.timeout.is_zero() {
@@ -293,7 +297,32 @@ async fn renewal_loop(core: std::sync::Weak<Core>, interval: Duration) {
         );
         drop(strong);
         // A failed renewal keeps the login the connection has; the next one tries again.
-        futures::future::join_all(nodes.iter().map(|node| node.renew_credentials())).await;
+        let renewed =
+            futures::future::join_all(nodes.iter().map(|node| node.renew_credentials())).await;
+        for (node, result) in nodes.iter().zip(renewed) {
+            if let Err(failure) = result {
+                tracing::warn!(
+                    "Renewal cycle failed, retrying: {}: {}",
+                    node.address(),
+                    Error::from(failure)
+                );
+            }
+        }
+    }
+}
+
+/// Whether `node` answers `PING` within `wait`; one that does not is logged like Redisson's `PingConnectionHandler` logs it.
+async fn pinged(node: &Node, wait: Duration) -> bool {
+    match tokio::time::timeout(wait, node.send(&redis::cmd("PING"))).await {
+        Ok(answered) => answered.is_ok(),
+        Err(_) => {
+            tracing::debug!(
+                "connection to {} closed due to PING response timeout set in {} ms",
+                node.address(),
+                wait.as_millis()
+            );
+            false
+        }
     }
 }
 
@@ -316,8 +345,7 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
         drop(strong);
         // A node whose PING gets no reply in time is closed; the next command opens a new connection.
         for node in nodes {
-            let answered = tokio::time::timeout(wait, node.send(&redis::cmd("PING"))).await;
-            if !matches!(answered, Ok(Ok(_))) {
+            if !pinged(&node, wait).await {
                 node.reset().await;
             }
         }
@@ -329,10 +357,7 @@ async fn ping_loop(core: std::sync::Weak<Core>, interval: Duration) {
         drop(strong);
         for (address, nodes) in idle {
             for node in nodes {
-                let answered = matches!(
-                    tokio::time::timeout(wait, node.send(&redis::cmd("PING"))).await,
-                    Ok(Ok(_))
-                );
+                let answered = pinged(&node, wait).await;
                 match core.upgrade() {
                     Some(strong) if answered => strong
                         .exclusive

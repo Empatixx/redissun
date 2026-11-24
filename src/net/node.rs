@@ -70,6 +70,22 @@ impl From<Failure> for Error {
     }
 }
 
+/// The name of `cmd` (`GET`, `EVALSHA`…) as logged; its arguments may hold values or secrets and are never logged.
+pub(crate) fn command_name(cmd: &redis::Cmd) -> String {
+    match cmd.args_iter().next() {
+        Some(redis::Arg::Simple(name)) => String::from_utf8_lossy(name).to_uppercase(),
+        _ => String::new(),
+    }
+}
+
+/// Whether Redis turned the login down (`WRONGPASS`, `NOAUTH`).
+fn auth_rejected(error: &redis::RedisError) -> bool {
+    matches!(error.kind(), redis::ErrorKind::AuthenticationFailed)
+        || error
+            .code()
+            .is_some_and(|code| matches!(code, "WRONGPASS" | "NOAUTH"))
+}
+
 pub(crate) fn is_connection_failure(failure: &Failure) -> bool {
     matches!(failure, Failure::Connection(_) | Failure::Unsent(_))
 }
@@ -193,6 +209,11 @@ impl Node {
             }
             self.set_live(&mut state, None);
         }
+        // A node that had a connection, or failed to open one, is reconnecting, as Redisson's `ConnectionWatchdog` logs it.
+        let reconnecting = state.generation > 0 || state.failed_at.is_some();
+        if reconnecting {
+            tracing::debug!("reconnecting to {}", self.address);
+        }
         if let Some(failed_at) = state.failed_at {
             let pause = self
                 .settings
@@ -219,6 +240,9 @@ impl Node {
                     written,
                 });
                 self.set_live(&mut state, Some(live));
+                if reconnecting {
+                    tracing::debug!("connected to {}", self.address);
+                }
                 Ok((connection, generation))
             }
             Err(error) => {
@@ -284,7 +308,15 @@ impl Node {
         let (mut connection, driver) =
             MultiplexedConnection::new_with_config(&info, stream, config)
                 .await
-                .map_err(failure)?;
+                .map_err(|error| {
+                    if auth_rejected(&error) {
+                        tracing::debug!(
+                            "connection to {} closed due to AUTH error response",
+                            self.address
+                        );
+                    }
+                    failure(error)
+                })?;
         let driver = tokio::spawn(driver);
         // An error reply (`BUSY` while a script runs) fails the opening, so no connection is kept without its name.
         let mut setup = async |cmd: redis::Cmd| match connection.send_packed_command(&cmd).await {
@@ -329,6 +361,7 @@ impl Node {
         cmd: &redis::Cmd,
     ) -> std::result::Result<redis::Value, Failure> {
         let (mut connection, generation) = self.live().await?;
+        tracing::trace!("command {} to {}", command_name(cmd), self.address);
         match connection.send_packed_command(cmd).await {
             // redis-rs hands an error reply over as a value; it is a failure like any other.
             Ok(redis::Value::ServerError(error)) => Err(server_failure(error)),
@@ -351,6 +384,7 @@ impl Node {
         count: usize,
     ) -> std::result::Result<Vec<redis::Value>, Failure> {
         let (mut connection, generation) = self.live().await?;
+        tracing::trace!("pipeline of {count} commands to {}", self.address);
         match connection.send_packed_commands(pipe, offset, count).await {
             Ok(values) => Ok(values),
             Err(error) => {

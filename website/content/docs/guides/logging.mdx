@@ -1,0 +1,38 @@
+---
+title: Logging
+description: "What redissun logs through tracing: the same events and levels as Redisson's SLF4J logs."
+---
+
+redissun logs through the [`tracing`](https://docs.rs/tracing) crate. It logs the same events as Redisson does through SLF4J, at the same levels. Without a subscriber nothing is printed and the logging costs nothing. To see the logs, install a subscriber in your application, for example with [`tracing-subscriber`](https://docs.rs/tracing-subscriber) and its `env-filter` feature:
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter("redissun=info")
+    .init();
+```
+
+`redissun=debug` shows reconnects and retries too. The events come from the `redissun::…` modules, so `redissun=…` selects all of them. An application that uses the `log` crate can forward them with `tracing`'s `log` feature.
+
+Values, passwords and command arguments are never logged, and the only key in a log line is the name of a lock whose lease could not be renewed. At `trace`, redissun logs only the name of each command, while Redisson logs the whole message.
+
+## Events
+
+| Level | Message | When | Redisson |
+|---|---|---|---|
+| `info` | `master: {address} added for slot ranges: {slots}` | A cluster master is found | `ClusterConnectionManager` |
+| `info` | `replica: {address} added for master {master} slot ranges: {slots}` | A cluster replica is found | `ClusterConnectionManager` |
+| `info` | `replica {address} removed for master {master} slot ranges: {slots}` | A cluster replica is gone | `ClusterConnectionManager` |
+| `info` | `replica: {address} added` | Sentinel reports a new replica | `SentinelConnectionManager` |
+| `warn` | `replica: {address} is down` | Sentinel no longer reports a replica | `SentinelConnectionManager` |
+| `info` | `master {old} has been changed to {new}` | Sentinel names another master | `MasterSlaveEntry` |
+| `warn` | `ReadMode = {mode}, but replica nodes are not found for master {master}!` | Reads should go to replicas, but a master has none. Logged once until replicas appear. | `MasterSlaveEntry` |
+| `error` | `Can't update cluster state using nodes: {nodes}. A new attempt will be made.` | No cluster node answers `CLUSTER SLOTS` | `ClusterConnectionManager` |
+| `error` | `Can't update cluster state. A new attempt will be made.` | No sentinel names the master | `SentinelConnectionManager` |
+| `info` | `listeners of '{channel}' channel have been resubscribed to '{address}'` | A subscription is restored after its connection was lost. Patterns say `channel-pattern`. | `PublishSubscribeService` |
+| `error` | `Can't update lock {name} expiration: {error}` | The watchdog cannot extend a lock's lease. It tries again in the next period. | `RenewalTask` |
+| `warn` | `Renewal cycle failed, retrying: {address}: {error}` | A connection cannot log in again with the credentials resolver | `BaseConnectionHandler` |
+| `debug` | `reconnecting to {address}`, `connected to {address}` | A connection to a node is opened again | `ConnectionWatchdog` |
+| `debug` | `connection to {address} closed due to PING response timeout set in {ms} ms` | A `PING` of `ping_connection_interval` gets no reply in time | `PingConnectionHandler` |
+| `debug` | `connection to {address} closed due to AUTH error response` | Redis rejects the login | `BaseConnectionHandler` |
+| `debug` | `attempt {n} for {command}` | A command is sent again after its connection failed | `RedisExecutor` |
+| `trace` | `command {name} to {address}`, `pipeline of {n} commands to {address}` | Every command and pipeline | `CommandEncoder` |
