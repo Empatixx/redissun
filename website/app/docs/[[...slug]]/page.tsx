@@ -45,11 +45,21 @@ export async function generateMetadata(props: {
   const page = source.getPage(params.slug)
   if (!page) notFound()
 
+  const url = `${SITE_URL}${page.url}`
   return {
     title: page.data.title,
     description: page.data.description,
     alternates: {
+      canonical: url,
       types: { 'text/markdown': `${SITE_URL}${markdownUrl(page.slugs)}` },
+    },
+    openGraph: {
+      type: 'article',
+      siteName: 'redissun',
+      url,
+      title: `${page.data.title} | redissun`,
+      description: page.data.description,
+      images: [`${SITE_URL}/logo.png`],
     },
   }
 }

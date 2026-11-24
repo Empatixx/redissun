@@ -4,6 +4,7 @@ import { DynamicCodeBlock } from 'fumadocs-ui/components/dynamic-codeblock'
 import { baseOptions } from '@/lib/layout.shared'
 import { GithubStars, REPO_NAME, REPO_OWNER } from '@/components/github-stars'
 import { Logo } from '@/components/logo'
+import { SITE_URL } from '@/lib/source'
 
 type Entry = { name: string; text: string; slug: string }
 
@@ -98,19 +99,39 @@ function Badge({ src, alt, href }: { src: string; alt: string; href: string }) {
   )
 }
 
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: 'redissun',
+  description:
+    'Redisson for Rust: a Redis library with std-style collections, distributed locks, caches and streams.',
+  url: SITE_URL,
+  codeRepository: 'https://github.com/Empatixx/redissun',
+  programmingLanguage: 'Rust',
+  runtimePlatform: 'tokio',
+  license: 'https://www.apache.org/licenses/LICENSE-2.0',
+  keywords: 'Redisson, Rust, Redis, Redis library, Redis client, distributed lock, Valkey',
+}
+
 const total = groups.reduce((sum, group) => sum + group.entries.length, 0)
 
 export default function Home() {
   const repo = `https://github.com/${REPO_OWNER}/${REPO_NAME}`
   return (
     <HomeLayout {...baseOptions()}>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/</g, '\\u003c') }}
+      />
       <div className="hero-glow">
         <section className="mx-auto flex max-w-4xl flex-col items-center gap-6 px-4 pb-16 pt-20 text-center">
           <Logo className="size-40 drop-shadow-md" />
           <h1 className="text-5xl font-bold tracking-tight sm:text-6xl">redissun</h1>
+          <p className="text-xl font-semibold text-fd-primary">Redisson for Rust</p>
           <p className="max-w-2xl text-lg text-fd-muted-foreground">
-            Rust&apos;s std collections and locks, shared through Redis. Inspired by Redisson: maps,
-            queues, locks, caches and streams as ordinary async Rust types.
+            A Redis library with std-style collections, distributed locks, caches and streams: maps,
+            queues, locks, semaphores and rate limiters as ordinary async Rust types, on Redis,
+            Sentinel and Redis Cluster.
           </p>
           <div className="flex flex-wrap justify-center gap-2">
             <Badge href="https://crates.io/crates/redissun" alt="crates.io" src="https://img.shields.io/crates/v/redissun?color=c2461f" />

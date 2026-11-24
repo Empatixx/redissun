@@ -4,7 +4,7 @@
 
 # redissun
 
-Rust's std collections and locks, shared through Redis. Inspired by [Redisson](https://github.com/redisson/redisson).
+[Redisson](https://github.com/redisson/redisson) for Rust: a Redis library with std-style collections, distributed locks, caches and streams.
 
 [![CI](https://github.com/Empatixx/redissun/actions/workflows/ci.yml/badge.svg)](https://github.com/Empatixx/redissun/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/redissun.svg)](https://crates.io/crates/redissun)
@@ -12,6 +12,8 @@ Rust's std collections and locks, shared through Redis. Inspired by [Redisson](h
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 With redissun you use a `HashMap`, a `VecDeque` or a `Lock` in your code, with the names and methods you know from `std`. The data lives in Redis, so every program that uses the same name sees the same object. Every call is async on tokio.
+
+It uses the same data layout and Lua scripts as Redisson. It runs on [redis-rs](https://crates.io/crates/redis) and talks to a single Redis server, Sentinel or Redis Cluster, with TLS, retries and reads from replicas. Valkey works too.
 
 ## Install
 

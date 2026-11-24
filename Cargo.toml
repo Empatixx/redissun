@@ -4,10 +4,12 @@ version = "0.21.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Empatixx/redissun"
-description = "Rust's std collections and locks, shared through Redis. Inspired by Redisson."
+homepage = "https://empatixx.github.io/redissun"
+documentation = "https://docs.rs/redissun"
+description = "Redisson for Rust: a Redis library with std-style collections, distributed locks, caches and streams."
 readme = "README.md"
 exclude = ["website/", "docs/", ".github/", "benches/redisson/", "benches/results/", "benches/plot.py"]
-keywords = ["redis", "distributed-lock", "redisson", "tokio", "async"]
+keywords = ["redis", "redisson", "distributed-lock", "redis-client", "cache"]
 categories = ["asynchronous", "concurrency", "database"]
 
 [dependencies]

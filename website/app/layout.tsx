@@ -3,18 +3,44 @@ import { Inter } from 'next/font/google'
 import type { ReactNode } from 'react'
 import type { Metadata } from 'next'
 import './global.css'
+import { SITE_URL } from '@/lib/source'
 
 const inter = Inter({ subsets: ['latin'] })
 
+const description =
+  'Redisson for Rust: a Redis library with std-style collections, distributed locks, caches and streams. Maps, queues, locks, semaphores and rate limiters on tokio and serde, for Redis, Sentinel and Redis Cluster.'
+
 export const metadata: Metadata = {
+  metadataBase: new URL(`${SITE_URL}/`),
   title: {
     template: '%s | redissun',
-    default: "redissun — Rust's std collections and locks, shared through Redis",
+    default: 'redissun: Redisson for Rust, a Redis library with distributed locks and collections',
   },
-  description:
-    "Rust's std collections and locks, shared through Redis. Inspired by Redisson: maps, queues, locks, caches and streams on tokio and serde.",
+  description,
+  keywords: [
+    'Redisson for Rust',
+    'Rust Redis library',
+    'Rust Redis client',
+    'Redis distributed lock Rust',
+    'Redisson',
+    'Redis',
+    'Valkey',
+    'tokio',
+  ],
+  alternates: { canonical: `${SITE_URL}/` },
   openGraph: {
-    images: ['https://empatixx.github.io/redissun/logo.png'],
+    type: 'website',
+    siteName: 'redissun',
+    url: `${SITE_URL}/`,
+    title: 'redissun: Redisson for Rust',
+    description,
+    images: [`${SITE_URL}/logo.png`],
+  },
+  twitter: {
+    card: 'summary',
+    title: 'redissun: Redisson for Rust',
+    description,
+    images: [`${SITE_URL}/logo.png`],
   },
 }
 
