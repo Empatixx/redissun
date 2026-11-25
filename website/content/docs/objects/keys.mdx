@@ -1,0 +1,57 @@
+---
+title: Keys
+description: Find, count, expire and delete keys by name, on every master.
+---
+
+`Keys` runs commands on keys by their names, like Redisson's `RKeys`. It can list and delete keys by a pattern, count them, and change their expiry without a handle for each object.
+
+```rust
+use futures::TryStreamExt;
+
+let keys = client.keys();
+
+let sessions: Vec<String> = keys.iter_matching("session:*").try_collect().await?;
+let deleted = keys.delete_by_pattern("cache:*").await?;
+keys.expire_many(&["report:1", "report:2"], Duration::from_secs(3600)).await?;
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `iter()` | every key, as a stream |
+| `iter_matching("user:*")` | the keys that match a glob-style pattern, 10 at a time from each master |
+| `iter_with(KeysScan::new().pattern(p).limit(n).chunk_size(c).key_type(t))` | with a pattern, a limit on the number of keys, the page size of each `SCAN` and the type of the value |
+| `count()` | the number of keys on all masters (`DBSIZE`) |
+| `count_exists(&names)` | how many of the names exist |
+| `key_type(name)` | the `KeyType` of the value, `None` when the key is missing |
+| `slot(name)` | the cluster hash slot, computed without a round trip |
+| `random_key()` | a random key, `None` when every master is empty |
+| `delete(&names)`, `unlink(&names)` | returns how many keys existed |
+| `delete_by_pattern(p)`, `unlink_by_pattern(p)` | deletes the matching keys on every master; returns how many |
+| `touch(&names)` | marks the keys as used; returns how many exist |
+| `ttl(name)` | the time left, `None` when there is no expiry or no key |
+| `expire(name, ttl)`, `expire_at(name, time)` | returns whether the key exists |
+| `expire_many(&names, ttl)`, `expire_at_many(&names, time)` | returns how many keys exist |
+| `persist(name)` | removes the expiry |
+| `rename(name, new)`, `rename_nx(name, new)` | `rename_nx` only when `new` is free |
+| `migrate(Migrate::new(keys, host, port, db, timeout))` | moves keys to another server; `.copy()`, `.replace()`, `.username()` and `.password()` |
+| `move_to_db(name, db)`, `swap_db(a, b)` | between the databases of one server |
+| `time()` | the clock of the server |
+| `flush_db()`, `flush_all()` | deletes the keys of this database, or of every database, on every master |
+| `flush_db_parallel()`, `flush_all_parallel()` | the same with `ASYNC`: the server frees the memory in the background |
+| `listen(KeyEvent::Deleted)` | a stream of the names of keys that were created, set, expired or deleted |
+
+## On a cluster
+
+Calls that take many names, such as `delete` and `count_exists`, send one command for each hash slot, all at once. Calls that read or delete every key, such as `iter`, `count`, `delete_by_pattern` and `flush_db`, go to every master. `iter` reads one master after the other, and returns a key that exists the whole time at least once. It may return a key twice.
+
+`delete_by_pattern` reads each master with `SCAN` and deletes 500 keys at a time, so other programs can see a half-deleted set of keys. When a master fails after others have deleted keys, the error says how many were deleted.
+
+`SCAN` goes to the masters, whatever the client's `ReadMode`.
+
+## Key events
+
+`listen` needs keyspace notifications, which Redis sends only when its `notify-keyspace-events` setting enables them, for example `CONFIG SET notify-keyspace-events KEA`. `KeyEvent::New` also needs `n`. Neither Redisson nor redissun changes this setting. Drop the `KeyEvents` to stop listening.
+
+Redisson's `FlushListener` needs RESP3 and is not available.

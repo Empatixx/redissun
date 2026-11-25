@@ -7,6 +7,15 @@ pub(crate) fn keyslot(key: &[u8]) -> u16 {
     crc16(hashed_part(key)) % SLOTS
 }
 
+/// The indexes of `keys` grouped by hash slot, in slot order and in the order of the keys within a slot.
+pub(crate) fn group_by_slot<'a>(keys: impl IntoIterator<Item = &'a [u8]>) -> Vec<Vec<usize>> {
+    let mut slots = std::collections::BTreeMap::<u16, Vec<usize>>::new();
+    for (index, key) in keys.into_iter().enumerate() {
+        slots.entry(keyslot(key)).or_default().push(index);
+    }
+    slots.into_values().collect()
+}
+
 fn hashed_part(key: &[u8]) -> &[u8] {
     let Some(open) = key.iter().position(|byte| *byte == b'{') else {
         return key;
@@ -31,7 +40,14 @@ fn crc16(bytes: &[u8]) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::keyslot;
+    use super::{group_by_slot, keyslot};
+
+    #[test]
+    fn keys_of_one_slot_are_grouped_in_their_order() {
+        let keys: [&[u8]; 4] = [b"{a}1", b"bar", b"{a}2", b"hello"];
+        // hello is slot 866, {a} slot 15495, bar slot 5061.
+        assert_eq!(group_by_slot(keys), vec![vec![3], vec![1], vec![0, 2]]);
+    }
 
     #[test]
     fn keys_land_in_the_slots_redis_gives_them() {

@@ -366,3 +366,139 @@ async fn every_cluster_node_connection_gets_the_client_name() {
         );
     }
 }
+
+// Redisson's testExistsInCluster, testDeleteInCluster, testKeysByPattern and testGetInCluster on one fresh cluster, whose keys spread over every master.
+#[tokio::test]
+async fn keys_and_buckets_span_every_master_of_a_cluster() {
+    let topology = Topology::cluster().await;
+    let client = connect(&topology).await;
+    let keys = client.keys();
+    let size = 2000;
+    let names: std::vec::Vec<String> = (0..size).map(|i| format!("test{i}")).collect();
+    let buckets = client.buckets::<i32>();
+    buckets
+        .set(
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.as_str(), &VALUES[i % 3])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys.count().await.unwrap(), size as u64);
+    assert_eq!(
+        keys.count_exists(&["test1", "test2", "test34", "test45", "asdfl;jasf"])
+            .await
+            .unwrap(),
+        4
+    );
+
+    let mut queried = names.clone();
+    queried.push("test_invalid".into());
+    let found = buckets.get(&queried).await.unwrap();
+    assert_eq!(found.len(), size);
+    assert_eq!(found["test5"], VALUES[5 % 3]);
+
+    let scanned: std::collections::HashSet<String> = keys
+        .iter_with(redissun::KeysScan::new().pattern("test*").chunk_size(20))
+        .map(|key| key.unwrap())
+        .collect()
+        .await;
+    assert_eq!(scanned.len(), size);
+    assert_eq!(
+        keys.iter_with(redissun::KeysScan::new().limit(7))
+            .count()
+            .await,
+        7
+    );
+
+    // test1 and fresh are in different slots; as in Redisson, each slot is set on its own and one that was set makes it true.
+    assert_ne!(keys.slot("test1"), keys.slot("fresh"));
+    assert!(buckets
+        .try_set([("test1", &1), ("fresh", &2)])
+        .await
+        .unwrap());
+    assert_eq!(
+        client.bucket::<i32>("test1").get().await.unwrap(),
+        Some(VALUES[1])
+    );
+    assert_eq!(client.bucket::<i32>("fresh").get().await.unwrap(), Some(2));
+    assert_eq!(keys.delete(&names[..1000]).await.unwrap(), 1000);
+    assert_eq!(keys.delete_by_pattern("test*").await.unwrap(), 1000);
+    assert_eq!(keys.count().await.unwrap(), 1);
+    keys.flush_db().await.unwrap();
+    assert_eq!(keys.count().await.unwrap(), 0);
+    assert_eq!(keys.random_key().await.unwrap(), None);
+}
+
+const VALUES: [i32; 3] = [7, 8, 9];
+
+// Redisson's testClusterSharding and testGetInClusterNameMapper of RPermitExpirableSemaphore.
+#[tokio::test]
+async fn sharded_topics_and_permits_work_on_a_cluster() {
+    let topology = Topology::cluster().await;
+    let client = connect(&topology).await;
+    let mut subscribers = std::vec::Vec::new();
+    for i in 0..10 {
+        let topic = client.sharded_topic::<i32>(format!("test{i}"));
+        subscribers.push(topic.subscribe().await.unwrap());
+    }
+    for i in 0..10 {
+        let topic = client.sharded_topic::<i32>(format!("test{i}"));
+        assert_eq!(topic.publish(&i).await.unwrap(), 1);
+    }
+    for (i, subscriber) in subscribers.iter_mut().enumerate() {
+        let message = timeout(Duration::from_secs(5), subscriber.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message, i as i32);
+    }
+    for i in 0..10 {
+        client
+            .sharded_topic::<i32>(format!("test{i}"))
+            .remove_all_listeners();
+    }
+
+    let semaphore = client.permit_expirable_semaphore("semaphore");
+    semaphore.try_set_permits(1).await.unwrap();
+    let id = semaphore.acquire().await.unwrap();
+    semaphore.release(&id).await.unwrap();
+
+    let reliable = client.reliable_topic::<String>("reliable");
+    let mut reader = reliable.subscribe().await.unwrap();
+    reliable.publish("on a cluster").await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(5), reader.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "on a cluster"
+    );
+}
+
+// Redisson's testReattachInClusterMaster: the master of the channel's slot goes down, and the subscriber listens on the replica that takes over.
+#[tokio::test]
+async fn a_sharded_subscriber_follows_its_slot_to_the_new_master() {
+    let topology = Topology::cluster().await;
+    let client = connect(&topology).await;
+    let topic = client.sharded_topic::<i32>("3");
+    let mut subscriber = topic.subscribe().await.unwrap();
+    assert_eq!(topic.subscriber_count().await.unwrap(), 1);
+    topology.cluster_failover_of("3").await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the subscriber never came back");
+        if topic.publish(&1).await.unwrap_or(0) == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        timeout(Duration::from_secs(5), subscriber.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+}

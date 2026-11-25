@@ -1,0 +1,31 @@
+---
+title: ShardedTopic
+description: Pub/sub that scales with Redis Cluster, with shard channels.
+---
+
+A `ShardedTopic` is a [`Topic`](./topic) on a Redis 7 shard channel (`SPUBLISH`, `SSUBSCRIBE`), like Redisson's `RShardedTopic`. In Redis Cluster a message goes only to the master that serves the channel's slot and its replicas, not to every node, so pub/sub scales with the number of masters. Without a cluster it works like a `Topic`.
+
+```rust
+let orders = client.sharded_topic::<u64>("orders:eu");
+
+let mut subscriber = orders.subscribe().await?;
+orders.publish(&42).await?;
+let id = subscriber.recv().await?;
+```
+
+## Methods
+
+| Method | Redis command | Notes |
+|---|---|---|
+| `publish(&m)` | `SPUBLISH` | returns how many connections got the message |
+| `subscribe()` | `SSUBSCRIBE` | returns a `ShardedSubscriber` with `recv()` and `into_stream()` |
+| `subscriber_count()` | `PUBSUB SHARDNUMSUB` | counts connections of all programs |
+| `listener_count()` | | counts the subscribers of this client |
+| `remove_all_listeners()` | | ends every subscriber of this client |
+
+## Good to know
+
+- It needs Redis 7.0 or newer; `subscribe` fails on older servers.
+- A shard channel and a plain channel of the same name are different channels.
+- Each channel that a client listens to has a connection of its own to the master of its slot. After a failover, or when the slot moves, it connects to the new master and subscribes again; messages published in between are lost, as with any pub/sub.
+- A subscriber that falls more than 256 messages behind gets `Error::Lagged`.

@@ -10,6 +10,7 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | Object | Stored in Redis as | Redisson name |
 |---|---|---|
 | `Bucket` | string | `RBucket` |
+| `Buckets` | strings | `RBuckets` |
 | `HashMap` | hash | `RMap` |
 | `Vec` | list | `RList` |
 | `VecDeque` | list | `RDeque` |
@@ -28,6 +29,8 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `HashMapCache` | hash and sorted set | `RMapCache` |
 | `HashSetCache` | sorted set | `RSetCache` |
 | `Topic` | pub/sub | `RTopic` |
+| `ReliableTopic` | stream and sorted set | `RReliableTopic` |
+| `ShardedTopic` | shard pub/sub | `RShardedTopic` |
 | `Stream` | stream | `RStream` |
 | `Geo` | sorted set | `RGeo` |
 | `AtomicI64` | string | `RAtomicLong` |
@@ -35,9 +38,11 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `Adder` | local memory, pub/sub | `RLongAdder`, `RDoubleAdder` |
 | `IdGenerator` | strings | `RIdGenerator` |
 | `Semaphore` | string and pub/sub | `RSemaphore` |
+| `PermitExpirableSemaphore` | string, sorted set and pub/sub | `RPermitExpirableSemaphore` |
 | `CountDownLatch` | string and pub/sub | `RCountDownLatch` |
 | `RateLimiter` | hash, string and sorted set | `RRateLimiter` |
 
+- `client.keys()` finds, counts, expires and deletes keys by name on every master, like Redisson's `RKeys`.
 - `client.batch()` sends commands of many objects in one round trip.
 - It uses tokio. Every call is `async`.
 - Values are turned into bytes by a codec. The default is JSON.

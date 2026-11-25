@@ -3,6 +3,7 @@ use crate::client::retry::Retry;
 use crate::error::{Error, Result};
 use crate::lua::Lua;
 use crate::net::node::{Failure, Node};
+use crate::net::stream::Address;
 use crate::net::topology::Topology;
 use crate::pubsub::PubSub;
 use bytes::Bytes;
@@ -21,6 +22,7 @@ pub(crate) struct Startup {
     pub(crate) lock_lease: Duration,
     pub(crate) connect_timeout: Duration,
     pub(crate) eviction_interval: Duration,
+    pub(crate) reliable_topic_watchdog_timeout: Duration,
     pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) retry: Retry,
     pub(crate) ping_interval: Duration,
@@ -37,6 +39,7 @@ pub(crate) struct Core {
     pub(crate) lock_lease: Duration,
     pub(crate) lock_settings: crate::locks::LockSettings,
     pub(crate) eviction_interval: Duration,
+    pub(crate) reliable_topic_watchdog_timeout: Duration,
     pub(crate) retry: Retry,
     pub(crate) read_only_scripts: std::sync::atomic::AtomicBool,
     background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -45,6 +48,8 @@ pub(crate) struct Core {
     /// The idle connections of batches, by node.
     pub(crate) exclusive:
         std::sync::Mutex<std::collections::HashMap<crate::net::stream::Address, Vec<Arc<Node>>>>,
+    /// The shard channels this client listens to.
+    pub(crate) sharded: crate::messaging::sharded_topic::Registry,
     /// The adders of this client by name, so that one name is one counter.
     pub(crate) adders: crate::coordination::adder::Registry,
     /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
@@ -73,12 +78,14 @@ impl Core {
             lock_lease: startup.lock_lease,
             lock_settings: startup.lock_settings,
             eviction_interval: startup.eviction_interval,
+            reliable_topic_watchdog_timeout: startup.reliable_topic_watchdog_timeout,
             retry: startup.retry,
             read_only_scripts: std::sync::atomic::AtomicBool::new(true),
             background: std::sync::Mutex::new(Vec::new()),
             pubsub: tokio::sync::OnceCell::new(),
             evictors: std::sync::Mutex::new(std::collections::HashMap::new()),
             exclusive: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sharded: Default::default(),
             adders: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
         });
@@ -164,6 +171,80 @@ impl Core {
 
     pub(crate) fn topology(&self) -> &Arc<Topology> {
         &self.topology
+    }
+
+    /// Whether the client talks to a Redis Cluster, where a command's keys must share one hash slot.
+    pub(crate) fn is_cluster(&self) -> bool {
+        matches!(*self.topology, Topology::Cluster(_))
+    }
+
+    /// The masters the client knows now, Redisson's `getEntrySet`: the one server, the master the sentinels name, or every master of a cluster.
+    pub(crate) async fn masters(&self) -> Result<Vec<Address>> {
+        let masters = self.topology.addresses(crate::NodeType::Master).await;
+        if masters.is_empty() {
+            return Err(Error::Redis("the client knows no master".into()));
+        }
+        Ok(masters)
+    }
+
+    /// Sends `cmd` to the master at `address`, limited by the client's `timeout`, as Redisson sends a command to one entry of `getEntrySet`.
+    pub(crate) async fn query_master(
+        &self,
+        address: &Address,
+        cmd: &redis::Cmd,
+    ) -> Result<redis::Value> {
+        let node = self
+            .topology
+            .node_at(address, crate::NodeType::Master)
+            .await
+            .ok_or_else(|| {
+                Error::Redis(format!("{address} is no longer a master of the client"))
+            })?;
+        self.send_on(&node, cmd).await
+    }
+
+    /// Sends `cmd` to every master at once and returns their replies in the order of [`masters`](Core::masters), Redisson's `readAllAsync` and `writeAllAsync`.
+    pub(crate) async fn query_masters(&self, cmd: &redis::Cmd) -> Result<Vec<redis::Value>> {
+        let masters = self.masters().await?;
+        futures::future::try_join_all(masters.iter().map(|master| self.query_master(master, cmd)))
+            .await
+    }
+
+    /// Sends `cmd` on `node`, limited by the client's `timeout`.
+    pub(crate) async fn send_on(&self, node: &Node, cmd: &redis::Cmd) -> Result<redis::Value> {
+        let sent = node.send(cmd);
+        if self.retry.timeout.is_zero() {
+            return sent.await.map_err(Error::from);
+        }
+        match tokio::time::timeout(self.retry.timeout, sent).await {
+            Ok(result) => result.map_err(Error::from),
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
+    /// Sends a command over many keys, built by `build` from the indexes of the keys it carries, as Redisson's `readBatchedAsync` and `writeBatchedAsync` do: one command for all of them, or in a cluster one for each hash slot, all at once. Returns each command's indexes with its reply.
+    pub(crate) async fn query_by_slot<K: AsRef<[u8]>>(
+        &self,
+        keys: &[K],
+        read: bool,
+        build: impl Fn(&[usize]) -> redis::Cmd,
+    ) -> Result<Vec<(Vec<usize>, redis::Value)>> {
+        let groups = if self.is_cluster() {
+            crate::client::slot::group_by_slot(keys.iter().map(AsRef::as_ref))
+        } else {
+            vec![(0..keys.len()).collect()]
+        };
+        let sends = groups
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .map(|group| {
+                let mut request = Request::new(build(&group)).key(keys[group[0]].as_ref());
+                if read {
+                    request = request.read();
+                }
+                async move { Ok::<_, Error>((group, self.query_value(request).await?)) }
+            });
+        futures::future::try_join_all(sends).await
     }
 
     /// Sends a blocking command (`BLPOP`, `BZMPOP`, `XREAD BLOCK`…) once, without the command timeout, on a connection of its own to the master that serves `key`, as Redisson does. When the caller stops waiting, the connection is killed with `CLIENT KILL ID`, so the command takes nothing after that.

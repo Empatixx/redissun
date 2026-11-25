@@ -33,6 +33,7 @@ mod collections;
 mod coordination;
 mod error;
 mod eviction;
+mod keys;
 mod locks;
 mod lua;
 mod messaging;
@@ -74,15 +75,19 @@ pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};
 pub use coordination::latch::CountDownLatch;
+pub use coordination::permit_semaphore::{PermitExpirableSemaphore, PermitRequest};
 pub use coordination::rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
 pub use coordination::semaphore::{Permits, Semaphore};
 pub use error::{Error, Result};
+pub use keys::{KeyEvent, KeyEvents, KeyType, Keys, KeysScan, Migrate};
 pub use locks::fair_lock::FairLock;
 pub use locks::fenced_lock::FencedLock;
 pub use locks::multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
 pub use locks::rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use locks::{Lock, LockGuard, LockRequest};
 pub use messaging::delayed_queue::DelayedQueue;
+pub use messaging::reliable_topic::{ReliableSubscriber, ReliableTopic};
+pub use messaging::sharded_topic::{ShardedSubscriber, ShardedTopic};
 pub use messaging::stream::{
     AutoClaim, PendingEntry, PendingRange, PendingSummary, ReadGroup, Stream, StreamAdd,
     StreamConsumer, StreamEntry, StreamGroup, StreamId, StreamInfo, StreamTrim,
@@ -97,6 +102,7 @@ pub use values::atomic_i64::{AtomicI64, Comparison};
 pub use values::bit_set::BitSet;
 pub use values::bloom_filter::BloomFilter;
 pub use values::bucket::Bucket;
+pub use values::buckets::{Buckets, Expiry};
 pub use values::geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
 pub use values::hyper_log_log::HyperLogLog;
 pub use values::id_generator::IdGenerator;

@@ -60,6 +60,7 @@ async fn main() -> redissun::Result<()> {
 | Object | Stored in Redis as | Status |
 |---|---|---|
 | [`Bucket`](https://empatixx.github.io/redissun/docs/objects/bucket) | string | stable |
+| [`Buckets`](https://empatixx.github.io/redissun/docs/objects/buckets) | strings | stable |
 | [`HashMap`](https://empatixx.github.io/redissun/docs/objects/hash-map) | hash | stable |
 | [`Vec`](https://empatixx.github.io/redissun/docs/objects/vec) | list | stable |
 | [`VecDeque`](https://empatixx.github.io/redissun/docs/objects/vec-deque) | list | stable |
@@ -78,6 +79,8 @@ async fn main() -> redissun::Result<()> {
 | [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash and sorted set | stable |
 | [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |
+| [`ReliableTopic`](https://empatixx.github.io/redissun/docs/objects/reliable-topic) | stream and sorted set | stable |
+| [`ShardedTopic`](https://empatixx.github.io/redissun/docs/objects/sharded-topic) | shard pub/sub | stable |
 | [`Stream`](https://empatixx.github.io/redissun/docs/objects/stream) | stream | stable |
 | [`Geo`](https://empatixx.github.io/redissun/docs/objects/geo) | sorted set | stable |
 | [`AtomicI64`](https://empatixx.github.io/redissun/docs/objects/atomic-i64) | string | stable |
@@ -85,8 +88,10 @@ async fn main() -> redissun::Result<()> {
 | [`Adder`](https://empatixx.github.io/redissun/docs/objects/adder) | local memory and pub/sub | experimental |
 | [`IdGenerator`](https://empatixx.github.io/redissun/docs/objects/id-generator) | strings | experimental |
 | [`Semaphore`](https://empatixx.github.io/redissun/docs/objects/semaphore) | string and pub/sub | stable |
+| [`PermitExpirableSemaphore`](https://empatixx.github.io/redissun/docs/objects/permit-expirable-semaphore) | string, sorted set and pub/sub | stable |
 | [`CountDownLatch`](https://empatixx.github.io/redissun/docs/objects/count-down-latch) | string and pub/sub | stable |
 | [`RateLimiter`](https://empatixx.github.io/redissun/docs/objects/rate-limiter) | hash, string and sorted set | stable |
+| [`Keys`](https://empatixx.github.io/redissun/docs/objects/keys) | any key, on every master | stable |
 | [`Batch`](https://empatixx.github.io/redissun/docs/objects/batch) | the commands it holds | experimental |
 | [`Script`](https://empatixx.github.io/redissun/docs/guides/scripts) | Lua scripts | stable |
 | [`Function`](https://empatixx.github.io/redissun/docs/guides/scripts) | Redis functions | experimental |

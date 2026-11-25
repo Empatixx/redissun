@@ -51,6 +51,61 @@ pub async fn redis_url() -> String {
         .clone()
 }
 
+static CONTAINER_8: OnceCell<(ContainerAsync<Redis>, String)> = OnceCell::const_new();
+static CONTAINER_8_ID: OnceLock<String> = OnceLock::new();
+
+extern "C" fn remove_container_8() {
+    if let Some(id) = CONTAINER_8_ID.get() {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", "-v", id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// A Redis 8 server for the commands Redis 7.4 lacks, such as `MSETEX`; `REDISSUN_TEST_REDIS8_URL` names one you already run.
+pub async fn redis8_url() -> String {
+    if let Ok(url) = std::env::var("REDISSUN_TEST_REDIS8_URL") {
+        return url;
+    }
+    CONTAINER_8
+        .get_or_init(|| async {
+            let container = Redis::default()
+                .with_tag("8.8-alpine")
+                .start()
+                .await
+                .unwrap();
+            let port = container.get_host_port_ipv4(6379).await.unwrap();
+            if CONTAINER_8_ID.set(container.id().to_string()).is_ok() {
+                unsafe {
+                    libc::atexit(remove_container_8);
+                }
+            }
+            wait_until_ready(port).await;
+            (container, format!("redis://127.0.0.1:{port}"))
+        })
+        .await
+        .1
+        .clone()
+}
+
+pub async fn redis8_client() -> Client {
+    Client::builder()
+        .url(redis8_url().await)
+        .build()
+        .await
+        .unwrap()
+}
+
+/// A Redis server of its own, removed when the returned container is dropped, for tests that wipe every database.
+pub async fn own_redis() -> (ContainerAsync<Redis>, String) {
+    let container = Redis::default().with_tag("7.4").start().await.unwrap();
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    wait_until_ready(port).await;
+    (container, format!("redis://127.0.0.1:{port}"))
+}
+
 pub async fn connect_with(configure: impl Fn(ClientBuilder) -> ClientBuilder) -> Client {
     let url = redis_url().await;
     let mut last = None;
