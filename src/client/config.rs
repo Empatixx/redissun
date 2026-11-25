@@ -14,6 +14,7 @@ struct Settings {
     lock_lease: Duration,
     connect_timeout: Duration,
     eviction_interval: Duration,
+    reliable_topic_watchdog_timeout: Duration,
     check_lock_synced_replicas: bool,
     replicas_sync_timeout: Duration,
     fair_lock_wait_timeout: Duration,
@@ -65,6 +66,10 @@ impl<C: Codec> fmt::Debug for ClientBuilder<C> {
             .field("connect_timeout", &settings.connect_timeout)
             .field("eviction_interval", &settings.eviction_interval)
             .field(
+                "reliable_topic_watchdog_timeout",
+                &settings.reliable_topic_watchdog_timeout,
+            )
+            .field(
                 "check_lock_synced_replicas",
                 &settings.check_lock_synced_replicas,
             )
@@ -102,6 +107,7 @@ impl ClientBuilder<JsonCodec> {
                 lock_lease: Duration::from_secs(30),
                 connect_timeout: Duration::from_secs(10),
                 eviction_interval: Duration::from_secs(5),
+                reliable_topic_watchdog_timeout: Duration::from_secs(600),
                 check_lock_synced_replicas: true,
                 replicas_sync_timeout: Duration::from_secs(1),
                 fair_lock_wait_timeout: Duration::from_secs(300),
@@ -166,6 +172,12 @@ impl<C: Codec> ClientBuilder<C> {
     /// The first and shortest pause between two background clean-ups of expired `HashMapCache` and `HashSetCache` entries, like Redisson's `minCleanUpDelay`. As in Redisson, the pause grows by half, up to 30 minutes, after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. Defaults to 5 seconds.
     pub fn eviction_interval(mut self, eviction_interval: Duration) -> Self {
         self.settings.eviction_interval = eviction_interval;
+        self
+    }
+
+    /// How long a [`ReliableTopic`](crate::ReliableTopic) subscriber stays registered after its client stopped renewing it, like Redisson's `reliableTopicWatchdogTimeout`. A subscriber renews itself every third of it, and messages that only a vanished subscriber still holds are trimmed from the stream after it. Defaults to 10 minutes.
+    pub fn reliable_topic_watchdog_timeout(mut self, timeout: Duration) -> Self {
+        self.settings.reliable_topic_watchdog_timeout = timeout;
         self
     }
 
@@ -390,6 +402,10 @@ impl<C: Codec> ClientBuilder<C> {
             ("lock_lease", settings.lock_lease),
             ("connect_timeout", settings.connect_timeout),
             ("eviction_interval", settings.eviction_interval),
+            (
+                "reliable_topic_watchdog_timeout",
+                settings.reliable_topic_watchdog_timeout,
+            ),
             ("replicas_sync_timeout", settings.replicas_sync_timeout),
             ("fair_lock_wait_timeout", settings.fair_lock_wait_timeout),
         ];
@@ -531,6 +547,7 @@ impl<C: Codec> ClientBuilder<C> {
                 lock_lease: settings.lock_lease,
                 connect_timeout: settings.connect_timeout,
                 eviction_interval: settings.eviction_interval,
+                reliable_topic_watchdog_timeout: settings.reliable_topic_watchdog_timeout,
                 lock_settings: crate::locks::LockSettings::new(
                     settings.check_lock_synced_replicas,
                     settings.replicas_sync_timeout,

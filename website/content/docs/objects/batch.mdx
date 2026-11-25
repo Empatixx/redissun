@@ -29,7 +29,7 @@ Objects from a batch do not talk to Redis. Their methods queue a command and ret
 | `.atomic()` | `IN_MEMORY_ATOMIC` | held in memory and run in one `MULTI`/`EXEC` per Redis node on a connection only this batch uses, so nothing runs between the commands of a node |
 | `.stored_in_redis()` | `REDIS_WRITE_ATOMIC` | each command is sent to Redis when you queue it and waits in a `MULTI` transaction per node on a connection only this batch uses. `execute()` runs `EXEC`. Nothing is held in memory, and nothing is applied if you drop the batch. |
 
-As in Redisson, a command that Redis rejects fails its own handle and makes `execute()` return that error. The other handles still get their replies. Redis does not roll back a transaction, so the other commands are applied in every mode. `REDIS_READ_ATOMIC` is the same as `stored_in_redis` but reads from a replica. redissun does not route reads to replicas, so there is no separate read mode.
+As in Redisson, a command that Redis rejects fails its own handle and makes `execute()` return that error. The other handles still get their replies. Redis does not roll back a transaction, so the other commands are applied in every mode. `REDIS_READ_ATOMIC` is the same as `stored_in_redis` but reads from a replica. A batch always goes to the masters, whatever the client's `ReadMode`, so there is no separate read mode.
 
 ## Options
 

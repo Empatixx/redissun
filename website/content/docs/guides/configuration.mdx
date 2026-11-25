@@ -51,6 +51,7 @@ let client = Client::builder()
 | `replicas_sync_timeout` | 1 s | `slavesSyncTimeout` | how long a lock write waits for replicas |
 | `fair_lock_wait_timeout` | 5 min | `fairLockWaitTimeout` | how long a `FairLock` waiter keeps its place |
 | `eviction_interval` | 5 s | `minCleanUpDelay` | first pause of the cache clean-up task |
+| `reliable_topic_watchdog_timeout` | 10 min | `reliableTopicWatchdogTimeout` | how long a `ReliableTopic` subscriber that stopped renewing itself stays registered |
 | `codec` | JSON | `codec` | how values are turned into bytes, see [Codecs](/docs/guides/codecs) |
 | `check_slots_coverage` | true | `checkSlotsCoverage` | fail `build` for Redis Cluster while a slot has no master |
 | `read_mode` | `Master` | `readMode` (default `SLAVE`) | where reads go, see [Reading from replicas](#reading-from-replicas) |

@@ -31,7 +31,11 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RSetCache` | `HashSetCache` |
 | `RTopic` | `Topic` |
 | `RPatternTopic` | `PatternTopic` |
+| `RReliableTopic` | `ReliableTopic` |
+| `RShardedTopic` | `ShardedTopic` |
 | `RBatch` | `Batch` |
+| `RKeys` | `Keys` (`client.keys()`) |
+| `RBuckets` | `Buckets` (`client.buckets::<V>()`) |
 | `RStream` | `Stream` |
 | `RGeo` | `Geo` |
 | `RAtomicLong` | `AtomicI64` |
@@ -39,6 +43,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RLongAdder`, `RDoubleAdder` | `Adder<i64>`, `Adder<f64>` (`client.adder::<i64>("x").await?`); `destroy()` is dropping it |
 | `RIdGenerator` | `IdGenerator` |
 | `RSemaphore` | `Semaphore` |
+| `RPermitExpirableSemaphore` | `PermitExpirableSemaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
 | `RScript` | `Script` (`client.script()`) |
@@ -74,6 +79,38 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `compareAndSet(e, null)` | `compare_and_set(Some(&e), None)`: deletes when the value equals `e` |
 | `compareAndDelete(e)` | `compare_and_delete(&e)` |
 | `set(null)`, `getAndSet(null)` | `del()`, `get_del()` |
+
+## Keys
+
+| Redisson | redissun |
+|---|---|
+| `getKeys()`, `getKeysStream()` | `iter()` |
+| `getKeysByPattern(p)`, `getKeysStreamByPattern(p)` | `iter_matching(p)` |
+| `getKeys(KeysScanOptions)`, `getKeysWithLimit(…)` | `iter_with(KeysScan::new().pattern(p).limit(n).chunk_size(c).key_type(t))` |
+| `getType(name)` | `key_type(name)`, `KeyType` instead of `RType` |
+| `getSlot(name)` | `slot(name)`, computed without a round trip |
+| `countExists(names…)`, `touch(names…)` | `count_exists(&names)`, `touch(&names)` |
+| `delete(names…)`, `unlink(names…)` | `delete(&names)`, `unlink(&names)`; for objects pass their `name()` |
+| `deleteByPattern(p)`, `unlinkByPattern(p)` | `delete_by_pattern(p)`, `unlink_by_pattern(p)` |
+| `count()`, `randomKey()`, `time()` | `count()`, `random_key()`, `time()` |
+| `flushdb()`, `flushdbParallel()`, `flushall()`, `flushallParallel()` | `flush_db()`, `flush_db_parallel()`, `flush_all()`, `flush_all_parallel()` |
+| `remainTimeToLive(name)` | `ttl(name)`, `None` instead of `-1`/`-2` |
+| `expire(name, ttl, unit)`, `expireAt(name, ms)`, `clearExpire(name)` | `expire(name, ttl)`, `expire_at(name, time)`, `persist(name)` |
+| `expire(duration, names…)`, `expireAt(instant, names…)` | `expire_many(&names, ttl)`, `expire_at_many(&names, time)` |
+| `rename(a, b)`, `renamenx(a, b)` | `rename(a, b)`, `rename_nx(a, b)` |
+| `migrate(MigrateArgs…)`, `copy(…)` | `migrate(Migrate::new(keys, host, port, db, timeout))` with `.copy()`, `.replace()`, `.username()`, `.password()` |
+| `move(name, db)`, `swapdb(a, b)` | `move_to_db(name, db)`, `swap_db(a, b)` |
+| `addListener(NewObjectListener)` and the other `ObjectListener`s | `listen(KeyEvent::New)` and so on; `removeListener` is dropping the `KeyEvents` |
+| `addListener(FlushListener)` | not available: it needs RESP3 |
+
+## Buckets
+
+| Redisson | redissun |
+|---|---|
+| `get(names…)` | `get(&names)` |
+| `set(map)`, `trySet(map)` | `set(entries)`, `try_set(entries)` |
+| `setIfAllKeysExist(SetArgs)`, `setIfAllKeysAbsent(SetArgs)` | `set_if_all_exist(entries, expiry)`, `set_if_all_absent(entries, expiry)` |
+| `SetArgs.timeToLive(d)`, `.expireAt(i)`, `.keepTTL()` | `Expiry::After(d)`, `Expiry::At(time)`, `Expiry::KeepTtl` |
 
 ## HashMap
 
@@ -300,6 +337,10 @@ For objects that use more than one key, `expire`, `persist` and `rename` change 
 | `countListeners()` | `listener_count()` |
 | `countSubscribers()` | `subscriber_count()` |
 
+## ReliableTopic and ShardedTopic
+
+They map like `Topic`. A `ReliableTopic` also has `size()`, and each `client.reliable_topic(name)` handle is one subscriber, as each `getReliableTopic` call is in Redisson.
+
 ## RwLock
 
 | Redisson | redissun |
@@ -379,6 +420,22 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `tryAcquire(n, wait, unit)` | `acquire(n).timeout(wait)` |
 | `release(n)` | `permits.release()` or `semaphore.release(n)` |
 
+## PermitExpirableSemaphore
+
+| Redisson | redissun |
+|---|---|
+| `acquire()`, `acquire(lease, unit)` | `acquire().await`, `acquire().lease(l).await` |
+| `acquire(n)`, `acquire(n, lease, unit)` | `acquire_many(n)`, with `.lease(l)` |
+| `tryAcquire()`, `tryAcquire(n)` | `try_acquire()`, `try_acquire_many(n)` |
+| `tryAcquire(wait, unit)`, `tryAcquire(wait, lease, unit)` | `acquire().timeout(w)`, `acquire().lease(l).timeout(w)` |
+| `tryAcquire(n, wait, lease, unit)` | `acquire_many(n).lease(l).timeout(w)` |
+| `release(id)`, `release(ids)` | `release(&id)`, `release_many(&ids)`; `IllegalArgumentException` is `Error::PermitNotHeld` |
+| `tryRelease(id)`, `tryRelease(ids)` | `try_release(&id)`, `try_release_many(&ids)` |
+| `availablePermits()`, `acquiredPermits()`, `getPermits()` | `available_permits()`, `acquired_permits()`, `permits()` |
+| `trySetPermits(n)`, `setPermits(n)`, `addPermits(n)` | `try_set_permits(n)`, `set_permits(n)`, `add_permits(n)` |
+| `updateLeaseTime(id, lease, unit)` | `update_lease(&id, Some(lease))` |
+| `getLeaseTime(id)` | `lease_time(&id)`, `None` instead of `-1` |
+
 ## CountDownLatch
 
 | Redisson | redissun |
@@ -429,6 +486,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `setCheckLockSyncedSlaves`, `setSlavesSyncTimeout` | `.check_lock_synced_replicas()`, `.replicas_sync_timeout()` |
 | `setFairLockWaitTimeout` | `.fair_lock_wait_timeout()` |
 | `setMinCleanUpDelay` | `.eviction_interval()` |
+| `setReliableTopicWatchdogTimeout` | `.reliable_topic_watchdog_timeout()` |
 | `setCodec` | `.codec()` |
 | `setReadMode(ReadMode.MASTER / SLAVE / MASTER_SLAVE)` | `.read_mode(ReadMode::Master / Replica / MasterAndReplica)`. The default is `Master`, where Redisson's is `SLAVE`. |
 | `setScanInterval` | `.replica_scan_interval()` |

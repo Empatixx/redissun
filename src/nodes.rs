@@ -511,15 +511,7 @@ fn sentinel(args: &[&str]) -> redis::Cmd {
 
 /// Sends `cmd` to `node` within the client's `timeout`, zero meaning no limit.
 async fn send(core: &Core, node: &Node, cmd: &redis::Cmd) -> Result<Value> {
-    let sent = node.send(cmd);
-    let timeout = core.retry.timeout;
-    if timeout.is_zero() {
-        return sent.await.map_err(Error::from);
-    }
-    match tokio::time::timeout(timeout, sent).await {
-        Ok(result) => result.map_err(Error::from),
-        Err(_) => Err(Error::Timeout),
-    }
+    core.send_on(node, cmd).await
 }
 
 /// A reply as text: strings as they are, numbers written out, nested lists joined with spaces.
@@ -580,7 +572,7 @@ fn records(value: &Value) -> Vec<HashMap<String, String>> {
 }
 
 /// The reply of `TIME`: seconds and microseconds since the epoch.
-fn time(value: Value) -> Result<SystemTime> {
+pub(crate) fn time(value: Value) -> Result<SystemTime> {
     let (seconds, micros): (u64, u64) = redis::from_redis_value(value)?;
     Ok(UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_micros(micros))
 }

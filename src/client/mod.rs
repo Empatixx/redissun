@@ -87,6 +87,11 @@ impl<C: Codec> Client<C> {
         crate::Nodes::new(self.core.clone())
     }
 
+    /// Commands on keys by name across every master, like Redisson's `getKeys`.
+    pub fn keys(&self) -> crate::Keys {
+        crate::Keys::new(self.core.clone())
+    }
+
     /// Returns a [`Script`] that runs Lua scripts, like Redisson's `getScript()`. Arguments and [`Decoded`](crate::Decoded) replies use this client's codec.
     pub fn script(&self) -> Script<C> {
         Script::new(self.core.clone(), self.codec.clone())
@@ -140,6 +145,11 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Bucket`] stored under `name`.
     pub fn bucket<V>(&self, name: impl Into<Arc<str>>) -> Bucket<V, C> {
         Bucket::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns [`Buckets`](crate::Buckets) that read and write many buckets of `V` together, like Redisson's `getBuckets`.
+    pub fn buckets<V>(&self) -> crate::Buckets<V, C> {
+        crate::Buckets::new(self.core.clone(), self.codec.clone())
     }
 
     /// Returns the [`HashMap`] stored under `name`.
@@ -219,6 +229,16 @@ impl<C: Codec> Client<C> {
         Topic::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
+    /// Returns a [`ReliableTopic`](crate::ReliableTopic) named `name`, like Redisson's `getReliableTopic`. Each call is a subscriber of its own; clones of the returned handle share it.
+    pub fn reliable_topic<M>(&self, name: impl Into<Arc<str>>) -> crate::ReliableTopic<M, C> {
+        crate::ReliableTopic::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`ShardedTopic`](crate::ShardedTopic) named `name`, like Redisson's `getShardedTopic`.
+    pub fn sharded_topic<M>(&self, name: impl Into<Arc<str>>) -> crate::ShardedTopic<M, C> {
+        crate::ShardedTopic::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
     /// Returns the [`PatternTopic`] for the channels matching `pattern`.
     pub fn pattern_topic<M>(&self, pattern: impl Into<Arc<str>>) -> PatternTopic<M, C> {
         PatternTopic::new(Key::new(self.core.clone(), pattern), self.codec.clone())
@@ -267,6 +287,14 @@ impl<C: Codec> Client<C> {
     /// Returns the [`Semaphore`] named `name`.
     pub fn semaphore(&self, name: impl Into<Arc<str>>) -> Semaphore {
         Semaphore::new(Key::new(self.core.clone(), name))
+    }
+
+    /// Returns the [`PermitExpirableSemaphore`](crate::PermitExpirableSemaphore) named `name`, like Redisson's `getPermitExpirableSemaphore`.
+    pub fn permit_expirable_semaphore(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> crate::PermitExpirableSemaphore {
+        crate::PermitExpirableSemaphore::new(Key::new(self.core.clone(), name))
     }
 
     /// Returns the [`CountDownLatch`] named `name`.

@@ -1,0 +1,30 @@
+---
+title: Buckets
+description: Read and write many buckets in one round trip.
+---
+
+`Buckets` reads and writes many [`Bucket`](./bucket)s together, like Redisson's `RBuckets`. The values use the client's codec.
+
+```rust
+let buckets = client.buckets::<u32>();
+
+buckets.set([("{user:1}:age", &30), ("{user:1}:score", &7)]).await?;
+let values = buckets.get(&["{user:1}:age", "{user:1}:score", "{user:1}:missing"]).await?;
+assert_eq!(values.len(), 2);
+```
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `get(&names)` | a `HashMap` of the keys that exist (`MGET`) |
+| `set(entries)` | stores every value (`MSET`) |
+| `try_set(entries)` | stores the values only when none of the keys exists (`MSETNX`); returns whether it did |
+| `set_if_all_exist(entries, expiry)` | stores the values only when every key exists (`MSETEX … XX`) |
+| `set_if_all_absent(entries, expiry)` | stores the values only when no key exists (`MSETEX … NX`) |
+
+`expiry` is `Expiry::None`, `Expiry::After(ttl)`, `Expiry::At(time)` or `Expiry::KeepTtl`. `set_if_all_exist` and `set_if_all_absent` need Redis 8.4 or newer.
+
+## On a cluster
+
+Each call sends one command for each hash slot, all at once, as Redisson does. So `try_set`, `set_if_all_exist` and `set_if_all_absent` are checked for each slot on its own, and return `true` when the values of at least one slot were stored. Give keys that must change together the same hash tag, such as `{user:1}`.
