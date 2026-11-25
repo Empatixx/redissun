@@ -99,7 +99,9 @@ async fn an_expired_subscriber_is_removed_with_its_unread_messages() {
     assert_eq!(topic.subscriber_count().await.unwrap(), 2);
     sleep(Duration::from_millis(1500)).await;
     for i in 0..10 {
+        // Redisson trims the stream up to the millisecond of the last message read, so a message in the same millisecond as the next one stays; a pause gives each message its own.
         topic.publish(&i).await.unwrap();
+        sleep(Duration::from_millis(2)).await;
     }
     for i in 0..10 {
         assert_eq!(next(&mut subscriber).await, i);
@@ -143,7 +145,9 @@ async fn messages_are_trimmed_once_every_subscriber_read_them() {
     let mut a = first.subscribe().await.unwrap();
     let mut b = second.subscribe().await.unwrap();
     for i in 0..10 {
+        // Redisson trims the stream up to the millisecond of the last message read, so a message in the same millisecond as the next one stays; a pause gives each message its own.
         assert_eq!(first.publish(&i).await.unwrap(), 2);
+        sleep(Duration::from_millis(2)).await;
     }
     for i in 0..10 {
         assert_eq!(next(&mut a).await, i);

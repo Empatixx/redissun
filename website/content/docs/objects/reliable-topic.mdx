@@ -28,7 +28,7 @@ let message = subscriber.recv().await?;
 
 Each handle from `client.reliable_topic(name)` is one subscriber: a consumer group of the stream. All the `ReliableSubscriber`s of a handle and its clones share it, and each of them gets every message. Two handles of the same name are two subscribers, as two calls of Redisson's `getReliableTopic` are.
 
-A new subscriber first reads the messages that are still in the stream, then the new ones. After each batch, the stream is trimmed to the messages that some subscriber still has to read.
+A new subscriber first reads the messages that are still in the stream, then the new ones. After each batch, the stream is trimmed to the messages that some subscriber still has to read. As in Redisson, it is trimmed up to the millisecond of the oldest last-read message, so messages published in that same millisecond stay until a later batch.
 
 A subscriber renews itself every third of the client's `reliable_topic_watchdog_timeout`, 10 minutes by default. When its program stops without dropping it, the other subscribers remove it after that time, and its unread messages with it. Dropping the last `ReliableSubscriber` of a handle removes the subscriber at once.
 
