@@ -61,7 +61,7 @@ pub use client::retry::DelayStrategy;
 pub use client::tls::TlsVerification;
 pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
-pub use collections::hash_map::HashMap;
+pub use collections::hash_map::{Extend as HashMapExtend, HashMap};
 pub use collections::hash_map_cache::{
     Event, EventKind, Events, EvictionMode, HashMapCache, Insert, InsertNx,
 };

@@ -1008,3 +1008,27 @@ async fn random_entries_returns_existing_pairs() {
         assert_eq!(map.get(&k).await.unwrap(), Some(v));
     }
 }
+
+// Redisson: putAll(map, batchSize)
+#[tokio::test]
+async fn extend_in_batches_writes_everything() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let keys: Vec<String> = (0..250).map(|i| format!("k{i}")).collect();
+    let values: Vec<i64> = (0..250).collect();
+    map.extend(keys.iter().map(String::as_str).zip(values.iter()))
+        .batch_size(100)
+        .await
+        .unwrap();
+    assert_eq!(map.len().await.unwrap(), 250);
+    assert_eq!(map.get("k249").await.unwrap(), Some(249));
+}
+
+#[tokio::test]
+async fn extend_batch_of_zero_is_one_call() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    map.extend([("a", &1i64), ("b", &2i64)])
+        .batch_size(0)
+        .await
+        .unwrap();
+    assert_eq!(map.len().await.unwrap(), 2);
+}

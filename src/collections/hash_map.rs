@@ -17,9 +17,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::LazyLock;
 
 pub(crate) static INSERT: LazyLock<Lua> = LazyLock::new(|| {
@@ -393,11 +394,12 @@ where
         Ok(())
     }
 
-    /// Inserts all entries in one round trip. Entries are `(&key, &value)` pairs, for example `map.extend(other.iter())`.
-    pub async fn extend<'a, Q, W>(
+    /// Inserts all entries, in one round trip unless [`batch_size`](Extend::batch_size) splits them, Redisson's `putAll`. Entries are `(&key, &value)` pairs, for example `map.extend(other.iter()).await`.
+    #[doc(alias = "putAll")]
+    pub fn extend<'a, Q, W>(
         &self,
         entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
-    ) -> Result<()>
+    ) -> Extend<'_, K, V, C>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
@@ -407,19 +409,12 @@ where
         let encoded = entries
             .into_iter()
             .map(|(k, v)| Ok((self.codec.encode(k)?, self.codec.encode(v)?)))
-            .collect::<Result<Vec<(Bytes, Bytes)>>>()?;
-        if encoded.is_empty() {
-            return Ok(());
+            .collect::<Result<Vec<(Bytes, Bytes)>>>();
+        Extend {
+            map: self,
+            encoded,
+            batch_size: 0,
         }
-        self.key
-            .query::<()>({
-                let mut cmd = redis::cmd("HSET");
-                cmd.arg(self.key.redis_key());
-                cmd.arg(crate::client::request::binary_pairs(&encoded));
-                cmd
-            })
-            .await?;
-        Ok(())
     }
 
     /// Returns the values for several keys, in the order of the keys.
@@ -918,5 +913,56 @@ where
         cmd.arg(&k[..]);
         let _: i64 = self.key.query(cmd).await?;
         Ok(())
+    }
+}
+
+/// The insert of [`HashMap::extend`]; await it to run. Exported as `HashMapExtend`.
+#[must_use = "an extend does nothing until it is awaited"]
+pub struct Extend<'m, K, V, C: Codec> {
+    map: &'m HashMap<K, V, C>,
+    encoded: Result<Vec<(Bytes, Bytes)>>,
+    batch_size: usize,
+}
+
+impl<K, V, C: Codec> fmt::Debug for Extend<'_, K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extend")
+            .field("batch_size", &self.batch_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K, V, C: Codec> Extend<'_, K, V, C> {
+    /// Sends one `HSET` per `batch_size` entries, in order, Redisson's `putAll(map, batchSize)`. Zero, the default, sends everything at once.
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+}
+
+impl<'m, K, V, C> IntoFuture for Extend<'m, K, V, C>
+where
+    K: Send + Sync + 'm,
+    V: Send + Sync + 'm,
+    C: Codec,
+{
+    type Output = Result<()>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'm>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let encoded = self.encoded?;
+            let size = if self.batch_size == 0 {
+                encoded.len().max(1)
+            } else {
+                self.batch_size
+            };
+            for batch in encoded.chunks(size) {
+                let mut cmd = self.map.key.key_cmd("HSET");
+                cmd.arg(crate::client::request::binary_pairs(batch));
+                self.map.key.query::<()>(cmd).await?;
+            }
+            Ok(())
+        })
     }
 }
