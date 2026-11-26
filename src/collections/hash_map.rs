@@ -1,6 +1,7 @@
 use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::collections::map::key_hash::map_key_name;
+use crate::collections::map::ops::{self, AtomicMap};
 use crate::coordination::latch::CountDownLatch;
 use crate::coordination::permit_semaphore::PermitExpirableSemaphore;
 use crate::coordination::semaphore::Semaphore;
@@ -16,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
@@ -167,6 +169,50 @@ where
 {
     fn decode_value(&self, raw: Option<Bytes>) -> Result<Option<V>> {
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
+    }
+
+    /// Redisson's `compute`: under the key's [`lock`](HashMap::lock), the closure gets the current value; `Some` stores what it returns, `None` removes the entry. Returns the new value.
+    pub async fn compute<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+        F: FnOnce(Option<V>) -> Fut + Send,
+        Fut: Future<Output = Option<V>> + Send,
+    {
+        ops::compute(self, self.codec.encode(k)?, f).await
+    }
+
+    /// Redisson's `computeIfAbsent`: returns the present value without calling the closure; for a missing key it stores and returns what the closure gives, under the key's lock. `None` stores nothing.
+    pub async fn compute_if_absent<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Option<V>> + Send,
+    {
+        ops::compute_if_absent(self, self.codec.encode(k)?, f).await
+    }
+
+    /// Redisson's `computeIfPresent`: under the key's lock, the closure gets the present value; `Some` replaces it, `None` removes it. A missing key returns `None` without calling the closure.
+    pub async fn compute_if_present<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+        F: FnOnce(V) -> Fut + Send,
+        Fut: Future<Output = Option<V>> + Send,
+    {
+        ops::compute_if_present(self, self.codec.encode(k)?, f).await
+    }
+
+    /// Redisson's `merge`: under the key's lock, stores `value` for a missing key, or what the closure makes of the old value and `value`; `None` removes the entry. Returns the new value.
+    pub async fn merge<Q, F, Fut>(&self, k: &Q, value: V, f: F) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+        F: FnOnce(V, V) -> Fut + Send,
+        Fut: Future<Output = Option<V>> + Send,
+    {
+        ops::merge(self, self.codec.encode(k)?, value, f).await
     }
 
     /// The key of the object Redisson keeps for map key `k` under `suffix`.
@@ -758,5 +804,63 @@ where
     /// Streams all values.
     pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
         self.iter().map(|entry| entry.map(|(_, v)| v))
+    }
+}
+
+impl<K, V, C> AtomicMap<V> for HashMap<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    fn map_key(&self) -> &Key {
+        &self.key
+    }
+
+    async fn get_encoded(&self, k: &Bytes) -> Result<Option<V>> {
+        let mut cmd = self.key.key_cmd("HGET");
+        cmd.arg(&k[..]);
+        let raw: Option<Bytes> = self.key.read(cmd).await?;
+        self.decode_value(raw)
+    }
+
+    async fn fast_insert_encoded(&self, k: &Bytes, v: &V) -> Result<()> {
+        let mut cmd = self.key.key_cmd("HSET");
+        cmd.arg((&k[..], &self.codec.encode(v)?[..]));
+        let _: i64 = self.key.query(cmd).await?;
+        Ok(())
+    }
+
+    async fn insert_if_absent_encoded(&self, k: &Bytes, v: &V) -> Result<Option<V>> {
+        let raw: Option<Bytes> = self
+            .key
+            .core
+            .eval_once(
+                &PUT_IF_ABSENT,
+                vec![self.key.redis_key()],
+                vec![k.clone(), self.codec.encode(v)?],
+            )
+            .await?;
+        self.decode_value(raw)
+    }
+
+    async fn fast_insert_if_exists_encoded(&self, k: &Bytes, v: &V) -> Result<bool> {
+        self.eval_flag(&FAST_PUT_IF_EXISTS, vec![k.clone(), self.codec.encode(v)?])
+            .await
+    }
+
+    fn encode_value(&self, v: &V) -> Result<Bytes> {
+        self.codec.encode(v)
+    }
+
+    async fn remove_if_encoded(&self, k: &Bytes, v: &Bytes) -> Result<bool> {
+        self.eval_flag(&REMOVE_IF, vec![k.clone(), v.clone()]).await
+    }
+
+    async fn fast_remove_encoded(&self, k: &Bytes) -> Result<()> {
+        let mut cmd = self.key.key_cmd("HDEL");
+        cmd.arg(&k[..]);
+        let _: i64 = self.key.query(cmd).await?;
+        Ok(())
     }
 }

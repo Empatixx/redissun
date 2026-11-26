@@ -768,3 +768,155 @@ async fn per_key_semaphore_and_latch_work() {
     let _ = map.rw_lock("k").unwrap();
     let _ = map.permit_expirable_semaphore("k").unwrap();
 }
+
+#[tokio::test]
+async fn compute_inserts_updates_and_removes() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    assert_eq!(
+        map.compute("k", |_| async { Some(1) }).await.unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        map.compute("k", |v| async move { v.map(|x| x + 1) })
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(map.get("k").await.unwrap(), Some(2));
+    assert_eq!(map.compute("k", |_| async { None }).await.unwrap(), None);
+    assert!(!map.contains_key("k").await.unwrap());
+}
+
+#[tokio::test]
+async fn compute_none_on_missing_writes_nothing() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    assert_eq!(map.compute("k", |_| async { None }).await.unwrap(), None);
+    assert_eq!(map.len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn compute_if_absent_keeps_existing() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    map.insert("a", &1).await.unwrap();
+    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = called.clone();
+    let result = map
+        .compute_if_absent("a", || async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Some(5)
+        })
+        .await
+        .unwrap();
+    assert_eq!(result, Some(1));
+    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        map.compute_if_absent("b", || async { Some(7) })
+            .await
+            .unwrap(),
+        Some(7)
+    );
+    assert_eq!(map.get("b").await.unwrap(), Some(7));
+}
+
+#[tokio::test]
+async fn compute_if_present_skips_missing() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = called.clone();
+    let result = map
+        .compute_if_present("a", |v| async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Some(v + 1)
+        })
+        .await
+        .unwrap();
+    assert_eq!(result, None);
+    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    map.insert("a", &1).await.unwrap();
+    assert_eq!(
+        map.compute_if_present("a", |v| async move { Some(v + 1) })
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        map.compute_if_present("a", |_| async { None })
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!map.contains_key("a").await.unwrap());
+}
+
+#[tokio::test]
+async fn merge_inserts_then_combines() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    assert_eq!(
+        map.merge("k", 5, |a, b| async move { Some(a + b) })
+            .await
+            .unwrap(),
+        Some(5)
+    );
+    assert_eq!(
+        map.merge("k", 5, |a, b| async move { Some(a + b) })
+            .await
+            .unwrap(),
+        Some(10)
+    );
+    assert_eq!(map.get("k").await.unwrap(), Some(10));
+}
+
+#[tokio::test]
+async fn merge_none_removes() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    map.insert("k", &1).await.unwrap();
+    assert_eq!(
+        map.merge("k", 2, |_, _| async { None }).await.unwrap(),
+        None
+    );
+    assert!(!map.contains_key("k").await.unwrap());
+}
+
+#[tokio::test]
+async fn merge_is_atomic_across_tasks() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let tasks: Vec<_> = (0..20)
+        .map(|_| {
+            let map = map.clone();
+            tokio::spawn(async move {
+                map.merge("k", 1, |a, b| async move {
+                    tokio::task::yield_now().await;
+                    Some(a + b)
+                })
+                .await
+                .unwrap();
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(map.get("k").await.unwrap(), Some(20));
+}
+
+#[tokio::test]
+async fn cancelled_compute_releases_the_lock() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let pending = map.compute("k", |_| async {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        Some(1)
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), pending)
+            .await
+            .is_err()
+    );
+    let lock = map.lock("k").unwrap();
+    for _ in 0..40 {
+        if !lock.is_locked().await.unwrap() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the per-key lock stayed held after the compute future was dropped");
+}
