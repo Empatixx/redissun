@@ -173,6 +173,8 @@ where
     }
 
     /// Redisson's `compute`: under the key's [`lock`](HashMap::lock), the closure gets the current value; `Some` stores what it returns, `None` removes the entry. Returns the new value.
+    ///
+    /// Calls for the same key from this client run one at a time, also when they are futures joined in one task. The closure must not call the compute family for the same key, which would wait for itself.
     pub async fn compute<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
     where
         K: Borrow<Q>,
@@ -886,7 +888,8 @@ where
     async fn get_encoded(&self, k: &Bytes) -> Result<Option<V>> {
         let mut cmd = self.key.key_cmd("HGET");
         cmd.arg(&k[..]);
-        let raw: Option<Bytes> = self.key.read(cmd).await?;
+        // Always the master: the compute family writes what it read, and a lagging replica would lose updates.
+        let raw: Option<Bytes> = self.key.query(cmd).await?;
         self.decode_value(raw)
     }
 

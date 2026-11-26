@@ -7,7 +7,33 @@ use crate::error::Result;
 use crate::locks::{Lock, LockGuard};
 use crate::object::Key;
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::future::Future;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+
+/// One async mutex per client and per-key lock, taken before the distributed lock.
+///
+/// The distributed lock is reentrant for its owner, the client and the current tokio task, so futures joined inside one task (`join_all`, `join!`) would all hold it at once and lose updates. This mutex lets one of them in at a time, in this process; the distributed lock still excludes every other process and client.
+static LOCAL: LazyLock<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn local_turn(client_id: &str, lock_name: &str) -> OwnedMutexGuard<()> {
+    let id = format!("{client_id}\0{lock_name}");
+    let mutex = {
+        let mut all = LOCAL.lock().unwrap_or_else(|e| e.into_inner());
+        match all.get(&id).and_then(Weak::upgrade) {
+            Some(mutex) => mutex,
+            None => {
+                all.retain(|_, mutex| mutex.strong_count() > 0);
+                let mutex = Arc::new(AsyncMutex::new(()));
+                all.insert(id, Arc::downgrade(&mutex));
+                mutex
+            }
+        }
+    };
+    mutex.lock_owned().await
+}
 
 /// The atomic operations on an encoded key that the compute family needs.
 pub(crate) trait AtomicMap<V>: Sync {
@@ -31,17 +57,26 @@ pub(crate) trait AtomicMap<V>: Sync {
     fn fast_remove_encoded(&self, k: &Bytes) -> impl Future<Output = Result<()>> + Send;
 }
 
-fn key_lock<V>(map: &impl AtomicMap<V>, k: &Bytes) -> Lock {
-    let key = map.map_key();
-    Lock::new(Key::new(
-        key.core.clone(),
-        map_key_name(key.name(), k, "lock"),
-    ))
+/// Holds the key's turn in this process and its distributed lock, Redisson's `getLock(key)`.
+struct KeyLock {
+    turn: OwnedMutexGuard<()>,
+    guard: LockGuard,
 }
 
-/// Releases the lock after `body`, and returns the body's error before the unlock's.
-async fn release<T>(guard: LockGuard, body: Result<T>) -> Result<T> {
+async fn lock_key<V>(map: &impl AtomicMap<V>, k: &Bytes) -> Result<KeyLock> {
+    let key = map.map_key();
+    let name = map_key_name(key.name(), k, "lock");
+    let turn = local_turn(key.core.client_id(), &name).await;
+    let lock = Lock::new(Key::new(key.core.clone(), name));
+    let guard = lock.lock().await?;
+    Ok(KeyLock { turn, guard })
+}
+
+/// Releases the lock after `body`, and returns the body's error before the unlock's. The turn in this process ends after the unlock.
+async fn release<T>(lock: KeyLock, body: Result<T>) -> Result<T> {
+    let KeyLock { turn, guard } = lock;
     let unlocked = guard.unlock().await;
+    drop(turn);
     let value = body?;
     unlocked?;
     Ok(value)
@@ -54,8 +89,7 @@ where
     F: FnOnce(Option<V>) -> Fut + Send,
     Fut: Future<Output = Option<V>> + Send,
 {
-    let lock = key_lock(map, &k);
-    let guard = lock.lock().await?;
+    let lock = lock_key(map, &k).await?;
     let body = async {
         let old = map.get_encoded(&k).await?;
         let existed = old.is_some();
@@ -73,7 +107,7 @@ where
         }
     }
     .await;
-    release(guard, body).await
+    release(lock, body).await
 }
 
 /// `computeIfAbsent`: returns the present value, or stores and returns what the closure gives for a missing key.
@@ -91,8 +125,7 @@ where
     if let Some(value) = map.get_encoded(&k).await? {
         return Ok(Some(value));
     }
-    let lock = key_lock(map, &k);
-    let guard = lock.lock().await?;
+    let lock = lock_key(map, &k).await?;
     let body = async {
         if let Some(value) = map.get_encoded(&k).await? {
             return Ok(Some(value));
@@ -106,7 +139,7 @@ where
         }
     }
     .await;
-    release(guard, body).await
+    release(lock, body).await
 }
 
 /// `computeIfPresent`: the closure gets the present value; `Some` replaces it, `None` removes it. A missing key stays missing.
@@ -120,8 +153,7 @@ where
     F: FnOnce(V) -> Fut + Send,
     Fut: Future<Output = Option<V>> + Send,
 {
-    let lock = key_lock(map, &k);
-    let guard = lock.lock().await?;
+    let lock = lock_key(map, &k).await?;
     let body = async {
         let Some(old) = map.get_encoded(&k).await? else {
             return Ok(None);
@@ -143,7 +175,7 @@ where
         }
     }
     .await;
-    release(guard, body).await
+    release(lock, body).await
 }
 
 /// `merge`: stores `value` for a missing key, otherwise what the closure makes of the old value and `value`; `None` removes the entry.
@@ -158,8 +190,7 @@ where
     F: FnOnce(V, V) -> Fut + Send,
     Fut: Future<Output = Option<V>> + Send,
 {
-    let lock = key_lock(map, &k);
-    let guard = lock.lock().await?;
+    let lock = lock_key(map, &k).await?;
     let body = async {
         let new = match map.get_encoded(&k).await? {
             Some(old) => f(old, value).await,
@@ -177,5 +208,5 @@ where
         }
     }
     .await;
-    release(guard, body).await
+    release(lock, body).await
 }

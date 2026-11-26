@@ -203,3 +203,30 @@ async fn a_read_goes_to_the_master_while_its_replica_is_down() {
     let after = calls(&topology, master, "get").await;
     assert_eq!(after - before, READS);
 }
+
+/// The value that `merge` and `compute` change must come from the master: a lagging replica would make them lose updates.
+#[tokio::test]
+async fn replica_mode_computes_from_the_master() {
+    let topology = Topology::cluster().await;
+    let client = cluster_client(&topology, ReadMode::Replica).await;
+    let map = client.hash_map::<String, i64>(unique("read-mode-map"));
+    let master = cluster_master(&topology, redissun::Object::name(&map)).await;
+    map.insert("k", &0).await.unwrap();
+    topology.wait_until_replicated(master).await;
+    let mut on_replicas_before = 0;
+    for replica in replicas_of(&topology, master).await {
+        on_replicas_before += calls(&topology, replica, "hget").await;
+    }
+    for _ in 0..READS {
+        map.merge("k", 1, |a, b| async move { Some(a + b) })
+            .await
+            .unwrap();
+        map.compute("k", |v| async move { v }).await.unwrap();
+    }
+    let mut on_replicas_after = 0;
+    for replica in replicas_of(&topology, master).await {
+        on_replicas_after += calls(&topology, replica, "hget").await;
+    }
+    assert_eq!(on_replicas_after - on_replicas_before, 0);
+    assert_eq!(map.get("k").await.unwrap(), Some(READS as i64));
+}

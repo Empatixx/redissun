@@ -1436,3 +1436,35 @@ async fn redisson_put_listener_with_keyevent_and_subkeyevent() {
             .is_err()
     );
 }
+
+// Futures joined in one task share the task's lock owner; merge must still not lose updates.
+#[tokio::test]
+async fn merge_is_atomic_within_one_task() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let merges = (0..20).map(|_| {
+        map.merge("k", 1, |a, b| async move {
+            tokio::task::yield_now().await;
+            Some(a + b)
+        })
+    });
+    for result in futures::future::join_all(merges).await {
+        result.unwrap();
+    }
+    assert_eq!(map.get("k").await.unwrap(), Some(20));
+}
+
+// Redisson's lock is reentrant: a compute under the key's lock held by the same task must not wait for itself.
+#[tokio::test]
+async fn compute_inside_the_held_key_lock_does_not_deadlock() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let guard = map.lock("k").unwrap().lock().await.unwrap();
+    let computed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        map.compute("k", |_| async { Some(1) }),
+    )
+    .await
+    .expect("compute waited for the lock its own task holds")
+    .unwrap();
+    assert_eq!(computed, Some(1));
+    guard.unlock().await.unwrap();
+}

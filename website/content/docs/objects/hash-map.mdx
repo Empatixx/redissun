@@ -63,7 +63,7 @@ let some: Vec<String> = users
 
 ## Compute and merge
 
-`compute`, `compute_if_absent`, `compute_if_present` and `merge` work like Redisson's. They take an async closure and run it under the key's lock, the same lock a Redisson client takes, so two programs never compute the same key at once. The closure returns `Some(value)` to store it or `None` to remove the entry.
+`compute`, `compute_if_absent`, `compute_if_present` and `merge` work like Redisson's. They take an async closure and run it under the key's lock, the same lock a Redisson client takes, so two programs never compute the same key at once. The closure returns `Some(value)` to store it or `None` to remove the entry. Calls for the same key made in one program, even futures joined in one task, also run one after the other. A closure must not call `compute` or `merge` for its own key: that call would wait for itself.
 
 ```rust
 let visits = client.hash_map::<String, i64>("visits");
