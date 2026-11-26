@@ -733,3 +733,38 @@ async fn small_map_reads_keep_the_insertion_order() {
     sorted.sort();
     assert_eq!(all, sorted);
 }
+
+// Redisson: RMap.getLock(key), named by RedissonObject.getLockByMapKey
+#[tokio::test]
+async fn per_key_lock_lives_under_the_redisson_name() {
+    let name = unique("map");
+    let map = client().await.hash_map::<String, i64>(name.clone());
+    let lock_key = format!("{{{name}}}:IKm9EBQhlzpVIBxUXDHBWw:lock");
+    let guard = map.lock("key").unwrap().lock().await.unwrap();
+    assert_eq!(
+        crate::common::raw_command(&["EXISTS", &lock_key]).await,
+        ":1\r\n"
+    );
+    guard.unlock().await.unwrap();
+    assert_eq!(
+        crate::common::raw_command(&["EXISTS", &lock_key]).await,
+        ":0\r\n"
+    );
+}
+
+#[tokio::test]
+async fn per_key_semaphore_and_latch_work() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let semaphore = map.semaphore("k").unwrap();
+    assert!(semaphore.try_set_permits(2).await.unwrap());
+    let permits = semaphore.acquire(1).await.unwrap();
+    assert_eq!(semaphore.available_permits().await.unwrap(), 1);
+    permits.release().await.unwrap();
+    let latch = map.count_down_latch("k").unwrap();
+    assert!(latch.try_set_count(1).await.unwrap());
+    latch.count_down().await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 0);
+    let _ = map.fair_lock("k").unwrap();
+    let _ = map.rw_lock("k").unwrap();
+    let _ = map.permit_expirable_semaphore("k").unwrap();
+}

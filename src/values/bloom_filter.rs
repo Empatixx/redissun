@@ -1,5 +1,6 @@
 use crate::client::request::Request;
 use crate::codec::Codec;
+use crate::collections::map::key_hash::HASH_KEY;
 use crate::coordination::rate_limiter::{suffix_name, EXPIRE_ANY, PERSIST_ANY};
 use crate::error::{Error, Result};
 use crate::lua::Lua;
@@ -15,13 +16,6 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 const MAX_SIZE: u64 = 2 * i32::MAX as u64;
-
-const HASH_KEY: highway::Key = highway::Key([
-    0x9e37_79b9_7f4a_7c15,
-    0xf39c_c060_5ced_c834,
-    0x1082_276b_f3a2_7251,
-    0xf86c_6a11_d0c1_8e95,
-]);
 
 static INIT: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(

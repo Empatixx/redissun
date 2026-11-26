@@ -1,6 +1,13 @@
 use crate::client::request::Arg;
 use crate::codec::Codec;
+use crate::collections::map::key_hash::map_key_name;
+use crate::coordination::latch::CountDownLatch;
+use crate::coordination::permit_semaphore::PermitExpirableSemaphore;
+use crate::coordination::semaphore::Semaphore;
 use crate::error::{Error, Result};
+use crate::locks::fair_lock::FairLock;
+use crate::locks::rw_lock::RwLock;
+use crate::locks::Lock;
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
@@ -160,6 +167,81 @@ where
 {
     fn decode_value(&self, raw: Option<Bytes>) -> Result<Option<V>> {
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
+    }
+
+    /// The key of the object Redisson keeps for map key `k` under `suffix`.
+    fn per_key<Q>(&self, k: &Q, suffix: &str) -> Result<Key>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        let encoded = self.codec.encode(k)?;
+        Ok(Key::new(
+            self.key.core.clone(),
+            map_key_name(self.key.name(), &encoded, suffix),
+        ))
+    }
+
+    /// The [`Lock`] of one key of the map, Redisson's `getLock(key)`. A Redisson client locking the same key of the same map takes the same lock.
+    #[doc(alias = "getLock")]
+    pub fn lock<Q>(&self, k: &Q) -> Result<Lock>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        Ok(Lock::new(self.per_key(k, "lock")?))
+    }
+
+    /// The [`FairLock`] of one key of the map, Redisson's `getFairLock(key)`.
+    #[doc(alias = "getFairLock")]
+    pub fn fair_lock<Q>(&self, k: &Q) -> Result<FairLock>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        Ok(FairLock::new(self.per_key(k, "fairlock")?))
+    }
+
+    /// The [`RwLock`] of one key of the map, Redisson's `getReadWriteLock(key)`.
+    #[doc(alias = "getReadWriteLock")]
+    pub fn rw_lock<Q>(&self, k: &Q) -> Result<RwLock>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        Ok(RwLock::new(self.per_key(k, "rw_lock")?))
+    }
+
+    /// The [`Semaphore`] of one key of the map, Redisson's `getSemaphore(key)`.
+    #[doc(alias = "getSemaphore")]
+    pub fn semaphore<Q>(&self, k: &Q) -> Result<Semaphore>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        Ok(Semaphore::new(self.per_key(k, "semaphore")?))
+    }
+
+    /// The [`CountDownLatch`] of one key of the map, Redisson's `getCountDownLatch(key)`.
+    #[doc(alias = "getCountDownLatch")]
+    pub fn count_down_latch<Q>(&self, k: &Q) -> Result<CountDownLatch>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        Ok(CountDownLatch::new(self.per_key(k, "countdownlatch")?))
+    }
+
+    /// The [`PermitExpirableSemaphore`] of one key of the map, Redisson's `getPermitExpirableSemaphore(key)`.
+    #[doc(alias = "getPermitExpirableSemaphore")]
+    pub fn permit_expirable_semaphore<Q>(&self, k: &Q) -> Result<PermitExpirableSemaphore>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized,
+    {
+        Ok(PermitExpirableSemaphore::new(
+            self.per_key(k, "permitexpirablesemaphore")?,
+        ))
     }
 
     /// Inserts an entry and returns the value it replaced. The key and value are borrowed: `map.insert("a", &value)`.

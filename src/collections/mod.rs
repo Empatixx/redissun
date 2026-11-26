@@ -4,6 +4,7 @@ pub(crate) mod hash_set;
 pub(crate) mod hash_set_cache;
 pub(crate) mod list;
 pub(crate) mod local_cached_map;
+pub(crate) mod map;
 pub(crate) mod sorted_set;
 pub(crate) mod vec;
 pub(crate) mod vec_deque;
