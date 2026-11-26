@@ -920,3 +920,91 @@ async fn cancelled_compute_releases_the_lock() {
     }
     panic!("the per-key lock stayed held after the compute future was dropped");
 }
+
+async fn thousand_keys() -> redissun::HashMap<String, i64, redissun::JsonCodec> {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    let keys: Vec<String> = (0..1000).map(|i| format!("k{i}")).collect();
+    let values: Vec<i64> = (0..1000).collect();
+    map.extend(keys.iter().map(String::as_str).zip(values.iter()))
+        .await
+        .unwrap();
+    map
+}
+
+#[tokio::test]
+async fn scan_with_pattern_reads_every_page() {
+    let map = thousand_keys().await;
+    let found: std::collections::HashSet<String> = map
+        .keys_with(redissun::MapScan::new().pattern("\"k1*").page_size(10))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 111);
+    let values: Vec<i64> = map
+        .values_with(redissun::MapScan::new().pattern("\"k99*"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(values.len(), 11);
+    let entries: Vec<(String, i64)> = map
+        .iter_with(redissun::MapScan::new().page_size(7))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1000);
+}
+
+#[tokio::test]
+async fn scan_pattern_without_matches_is_empty() {
+    let map = thousand_keys().await;
+    let found: Vec<String> = map
+        .keys_with(redissun::MapScan::new().pattern("nothing*"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(found.is_empty());
+}
+
+#[tokio::test]
+async fn read_all_keys_matching_is_not_limited_to_one_page() {
+    let map = thousand_keys().await;
+    assert_eq!(
+        map.read_all_keys_matching("\"k1*").await.unwrap().len(),
+        111
+    );
+    assert_eq!(
+        map.read_all_values_matching("\"k1*").await.unwrap().len(),
+        111
+    );
+    let entries = map.read_all_entries_matching("\"k99*").await.unwrap();
+    assert_eq!(entries.len(), 11);
+    assert!(entries.iter().all(|(k, v)| *k == format!("k{v}")));
+}
+
+#[tokio::test]
+async fn read_all_map_and_get_all() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    map.insert("a", &1).await.unwrap();
+    map.insert("b", &2).await.unwrap();
+    let all = map.read_all_map().await.unwrap();
+    assert_eq!(
+        all,
+        HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)])
+    );
+    let some = map.get_all(&["a", "missing"]).await.unwrap();
+    assert_eq!(some, HashMap::from([("a".to_string(), 1)]));
+    assert!(map.get_all::<str>(&[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn random_entries_returns_existing_pairs() {
+    let map = client().await.hash_map::<String, i64>(unique("map"));
+    for (k, v) in [("a", 1), ("b", 2), ("c", 3)] {
+        map.insert(k, &v).await.unwrap();
+    }
+    let picked = map.random_entries(2).await.unwrap();
+    assert_eq!(picked.len(), 2);
+    for (k, v) in picked {
+        assert_eq!(map.get(&k).await.unwrap(), Some(v));
+    }
+}

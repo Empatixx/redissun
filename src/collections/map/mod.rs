@@ -2,3 +2,4 @@
 
 pub(crate) mod key_hash;
 pub(crate) mod ops;
+pub(crate) mod scan;

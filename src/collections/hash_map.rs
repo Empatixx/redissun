@@ -1,23 +1,24 @@
-use crate::client::request::Arg;
 use crate::codec::Codec;
 use crate::collections::map::key_hash::map_key_name;
 use crate::collections::map::ops::{self, AtomicMap};
+use crate::collections::map::scan::{decode_pairs, hscan, MapScan};
 use crate::coordination::latch::CountDownLatch;
 use crate::coordination::permit_semaphore::PermitExpirableSemaphore;
 use crate::coordination::semaphore::Semaphore;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::locks::fair_lock::FairLock;
 use crate::locks::rw_lock::RwLock;
 use crate::locks::Lock;
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use futures::{stream, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
 use std::future::Future;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
@@ -119,8 +120,6 @@ static CONTAINS_VALUE: LazyLock<Lua> = LazyLock::new(|| {
         return 0",
     )
 });
-
-const SCAN_PAGE: i64 = 100;
 
 /// A distributed map stored in a Redis hash.
 pub struct HashMap<K, V, C: Codec> {
@@ -752,58 +751,115 @@ where
         self.decode_pairs(raw)
     }
 
-    /// The pairs of an `HGETALL` or `HSCAN` reply: a map in RESP3, a flat array of fields and values in RESP2.
     fn decode_pairs(&self, raw: redis::Value) -> Result<Vec<(K, V)>> {
-        let flat: Vec<Bytes> = match raw {
-            redis::Value::Map(map) => map
-                .into_iter()
-                .flat_map(|(field, value)| [field, value])
-                .map(redis::FromRedisValue::from_redis_value)
-                .collect::<std::result::Result<_, _>>()?,
-            other => redis::FromRedisValue::from_redis_value(other)?,
-        };
-        flat.as_chunks::<2>()
-            .0
-            .iter()
-            .map(|[field, value]| Ok((self.codec.decode(field)?, self.codec.decode(value)?)))
-            .collect()
+        decode_pairs(&self.codec, raw)
     }
 
     /// Streams all entries, reading the hash in pages of 100 with `HSCAN`.
     pub fn iter(&self) -> impl Stream<Item = Result<(K, V)>> + '_ {
-        stream::try_unfold(Some(Bytes::from_static(b"0")), move |cursor| async move {
-            let Some(cursor) = cursor else {
-                return Ok::<_, Error>(None);
-            };
-            let reply = self
-                .key
-                .command(
-                    "HSCAN",
-                    vec![
-                        Arg::from(self.key.redis_key()),
-                        Arg::from(cursor),
-                        Arg::from("COUNT"),
-                        Arg::from(SCAN_PAGE),
-                    ],
-                )
-                .await?;
-            let (next, page): (Bytes, redis::Value) =
-                redis::FromRedisValue::from_redis_value(reply)?;
-            let next = (next.as_ref() != b"0").then_some(next);
-            let items = self.decode_pairs(page)?;
-            Ok(Some((stream::iter(items.into_iter().map(Ok)), next)))
-        })
-        .try_flatten()
+        self.iter_with(MapScan::new())
     }
 
     /// Streams all keys.
     pub fn keys(&self) -> impl Stream<Item = Result<K>> + '_ {
-        self.iter().map(|entry| entry.map(|(k, _)| k))
+        self.keys_with(MapScan::new())
     }
 
     /// Streams all values.
     pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
-        self.iter().map(|entry| entry.map(|(_, v)| v))
+        self.values_with(MapScan::new())
+    }
+
+    /// Streams the entries `scan` selects, Redisson's `entrySet(pattern, count)`.
+    #[doc(alias = "entrySet")]
+    pub fn iter_with(&self, scan: MapScan) -> impl Stream<Item = Result<(K, V)>> + '_ {
+        hscan(&self.key, &self.codec, scan)
+    }
+
+    /// Streams the keys of the entries `scan` selects, Redisson's `keySet(pattern, count)`.
+    #[doc(alias = "keySet")]
+    pub fn keys_with(&self, scan: MapScan) -> impl Stream<Item = Result<K>> + '_ {
+        self.iter_with(scan).map(|entry| entry.map(|(k, _)| k))
+    }
+
+    /// Streams the values of the entries `scan` selects, Redisson's `values(pattern, count)`.
+    pub fn values_with(&self, scan: MapScan) -> impl Stream<Item = Result<V>> + '_ {
+        self.iter_with(scan).map(|entry| entry.map(|(_, v)| v))
+    }
+
+    /// Every entry whose encoded key matches `pattern`, Redisson's `readAllEntrySet(pattern)`. See [`MapScan`] for how patterns match.
+    ///
+    /// Unlike Redisson, which reads only the first `HSCAN` page, this scans the whole hash.
+    pub async fn read_all_entries_matching(&self, pattern: &str) -> Result<Vec<(K, V)>> {
+        self.iter_with(MapScan::new().pattern(pattern))
+            .try_collect()
+            .await
+    }
+
+    /// Every key that matches `pattern`, Redisson's `readAllKeySet(pattern)`, scanning the whole hash.
+    pub async fn read_all_keys_matching(&self, pattern: &str) -> Result<Vec<K>> {
+        self.keys_with(MapScan::new().pattern(pattern))
+            .try_collect()
+            .await
+    }
+
+    /// The values of the keys that match `pattern`, Redisson's `readAllValues(pattern)`, scanning the whole hash.
+    pub async fn read_all_values_matching(&self, pattern: &str) -> Result<Vec<V>> {
+        self.values_with(MapScan::new().pattern(pattern))
+            .try_collect()
+            .await
+    }
+}
+
+impl<K, V, C> HashMap<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Eq + Hash + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    /// The whole map in one call (`HGETALL`), Redisson's `readAllMap`.
+    pub async fn read_all_map(&self) -> Result<std::collections::HashMap<K, V>> {
+        Ok(self.read_all_entries().await?.into_iter().collect())
+    }
+
+    /// The entries of the given keys that exist, in one `HMGET`, Redisson's `getAll`.
+    #[doc(alias = "getAll")]
+    pub async fn get_all<Q>(&self, ks: &[&Q]) -> Result<std::collections::HashMap<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if ks.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let fields = ks
+            .iter()
+            .map(|k| self.codec.encode(*k))
+            .collect::<Result<Vec<Bytes>>>()?;
+        let raw: Vec<Option<Bytes>> = self
+            .key
+            .read({
+                let mut cmd = redis::cmd("HMGET");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(crate::client::request::binary(&fields));
+                cmd
+            })
+            .await?;
+        fields
+            .iter()
+            .zip(raw)
+            .filter_map(|(field, value)| value.map(|value| (field, value)))
+            .map(|(field, value)| Ok((self.codec.decode(field)?, self.codec.decode(&value)?)))
+            .collect()
+    }
+
+    /// Up to `count` distinct random entries (`HRANDFIELD … WITHVALUES`), Redisson's `randomEntries`.
+    pub async fn random_entries(&self, count: usize) -> Result<std::collections::HashMap<K, V>> {
+        let count = i64::try_from(count).unwrap_or(i64::MAX);
+        let mut cmd = self.key.key_cmd("HRANDFIELD");
+        cmd.arg(count).arg("WITHVALUES");
+        let raw: redis::Value = self.key.read(cmd).await?;
+        Ok(decode_pairs(&self.codec, raw)?.into_iter().collect())
     }
 }
 
