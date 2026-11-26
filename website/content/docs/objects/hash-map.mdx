@@ -26,7 +26,13 @@ This differs from `HashMap::insert`, which takes ownership. redissun only encode
 | `contains_key(&k)` | `HEXISTS` | |
 | `len()` and `is_empty()` | `HLEN` | |
 | `clear()` | `DEL` | |
-| `extend(entries)` | `HSET` | entries are `(&key, &value)` pairs, for example `map.extend(other.iter())`. One request. An empty list does nothing. |
+| `extend(entries)` | `HSET` | entries are `(&key, &value)` pairs, for example `map.extend(other.iter())`. One request, or one per `n` entries with `.batch_size(n)`. An empty list does nothing. |
+| `get_all(&[&k])` | `HMGET` | a `HashMap` of the keys that exist |
+| `read_all_map()` | `HGETALL` | |
+| `random_entries(n)` | `HRANDFIELD … WITHVALUES` | |
+| `compute`, `compute_if_absent`, `compute_if_present`, `merge` | under the key's lock | async closures, see below |
+| `lock(&k)` and the other per-key objects | | see below |
+| `events()` | keyspace notifications | see below |
 | `get_many(&[&k])` | `HMGET` | same order as the keys |
 | `insert_nx(k, v)` | `HSETNX` | `true` if the entry was added |
 | `incr_by(&k, delta)` | `HINCRBY` | a missing entry starts at zero |
@@ -43,6 +49,34 @@ use futures::TryStreamExt;
 
 let entries: Vec<(String, User)> = users.iter().try_collect().await?;
 ```
+
+`iter_with`, `keys_with` and `values_with` take a `MapScan` with a pattern and a page size. The pattern is matched against the encoded key, as in Redisson: with the JSON codec the key `abc` is stored as `"abc"`, so keys starting with `a` match `"a*`.
+
+```rust
+use redissun::MapScan;
+
+let some: Vec<String> = users
+    .keys_with(MapScan::new().pattern("\"j*").page_size(500))
+    .try_collect()
+    .await?;
+```
+
+## Compute and merge
+
+`compute`, `compute_if_absent`, `compute_if_present` and `merge` work like Redisson's. They take an async closure and run it under the key's lock, the same lock a Redisson client takes, so two programs never compute the same key at once. The closure returns `Some(value)` to store it or `None` to remove the entry.
+
+```rust
+let visits = client.hash_map::<String, i64>("visits");
+visits.merge("home", 1, |old, one| async move { Some(old + one) }).await?;
+```
+
+## Per-key locks and synchronizers
+
+`lock(&k)`, `fair_lock`, `rw_lock`, `semaphore`, `count_down_latch` and `permit_expirable_semaphore` return the object Redisson's `getLock(key)` and friends return, under the same name in Redis. A Java service and a Rust service locking the same key of the same map exclude each other.
+
+## Events
+
+`events()` returns a stream of `MapEvent`: `Put`, `Incremented`, `Removed`, `Deleted` and `Expired`. `events_of(&[MapEventKind::Removed])` listens to some kinds only. Redis sends these events only when `notify-keyspace-events` enables them: `Eh` for field events, `g` for deletes, `x` for expiry. With `T` (Redis 8.8 or newer) the events name the changed key; otherwise `key` is `None`, as in Redisson.
 
 ## Missing keys and null values
 

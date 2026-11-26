@@ -1120,3 +1120,319 @@ async fn events_of_filters_kinds() {
         redissun::MapEvent::Removed { key: None }
     ));
 }
+
+// ---- Ported from Redisson 4.8.0 BaseMapTest / RedissonMapTest ----
+
+async fn string_map(prefix: &str) -> redissun::HashMap<String, String, redissun::StringCodec> {
+    client()
+        .await
+        .with_codec(redissun::StringCodec)
+        .hash_map(unique(prefix))
+}
+
+// Redisson: testRandomEntries
+#[tokio::test]
+async fn redisson_random_entries() {
+    let map = client().await.hash_map::<i32, i32>(unique("map"));
+    assert!(map.random_entries(1).await.unwrap().is_empty());
+    for (k, v) in [(1, 11), (2, 21), (3, 31), (4, 41)] {
+        map.insert(&k, &v).await.unwrap();
+    }
+    let picked = map.random_entries(2).await.unwrap();
+    assert_eq!(picked.len(), 2);
+    assert!(picked.keys().all(|k| (1..=4).contains(k)));
+}
+
+// Redisson: testComputeIfPresent
+#[tokio::test]
+async fn redisson_compute_if_present() {
+    let map = client().await.hash_map::<String, String>(unique("map"));
+    map.compute_if_present("1", |_| async { Some("12".to_string()) })
+        .await
+        .unwrap();
+    assert_eq!(map.get("1").await.unwrap(), None);
+    map.insert("1", "10").await.unwrap();
+    map.compute_if_present("1", |value| async move {
+        assert_eq!(value, "10");
+        Some("12".to_string())
+    })
+    .await
+    .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+}
+
+// Redisson: testComputeIfPresentMutable
+#[tokio::test]
+async fn redisson_compute_if_present_mutable() {
+    let map = client().await.hash_map::<String, User>(unique("map"));
+    map.insert(
+        "1",
+        &User {
+            name: "value1".into(),
+        },
+    )
+    .await
+    .unwrap();
+    map.compute_if_present("1", |mut value| async move {
+        assert_eq!(value.name, "value1");
+        value.name = "value2".into();
+        Some(value)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        map.get("1").await.unwrap(),
+        Some(User {
+            name: "value2".into()
+        })
+    );
+}
+
+// Redisson: testComputeIfAbsent
+#[tokio::test]
+async fn redisson_compute_if_absent() {
+    let map = client().await.hash_map::<String, String>(unique("map"));
+    map.compute_if_absent("1", || async { Some("12".to_string()) })
+        .await
+        .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    map.compute_if_absent("1", || async { Some("13".to_string()) })
+        .await
+        .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+}
+
+// Redisson: testMerge
+#[tokio::test]
+async fn redisson_merge() {
+    let map = client().await.hash_map::<String, String>(unique("map"));
+    map.merge("1", "2".to_string(), |_, _| async {
+        Some("12".to_string())
+    })
+    .await
+    .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("2"));
+    map.merge("1", "2".to_string(), |_, _| async {
+        Some("12".to_string())
+    })
+    .await
+    .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    map.merge("1", "2".to_string(), |_, _| async { None })
+        .await
+        .unwrap();
+    assert_eq!(map.get("1").await.unwrap(), None);
+}
+
+// Redisson: testCompute, testComputeAsync
+#[tokio::test]
+async fn redisson_compute() {
+    let map = client().await.hash_map::<String, String>(unique("map"));
+    let first = map
+        .compute("1", |_| async { Some("12".to_string()) })
+        .await
+        .unwrap();
+    assert_eq!(first.as_deref(), Some("12"));
+    let second = map
+        .compute("1", |old| async move {
+            Some(old.map_or_else(|| "12".to_string(), |old| old + "34"))
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.as_deref(), Some("1234"));
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("1234"));
+    assert_eq!(map.compute("1", |_| async { None }).await.unwrap(), None);
+    assert_eq!(map.get("1").await.unwrap(), None);
+}
+
+// Redisson: testGetAll, testGetAllWithStringKeys
+#[tokio::test]
+async fn redisson_get_all() {
+    let map = client().await.hash_map::<i32, i32>(unique("map"));
+    for (k, v) in [(1, 100), (2, 200), (3, 300), (4, 400)] {
+        map.insert(&k, &v).await.unwrap();
+    }
+    let filtered = map.get_all(&[&2, &3, &5]).await.unwrap();
+    assert_eq!(filtered, HashMap::from([(2, 200), (3, 300)]));
+}
+
+// Redisson: testGetAllBig
+#[tokio::test]
+async fn redisson_get_all_big() {
+    let map = client().await.hash_map::<i32, String>(unique("map"));
+    let keys: Vec<i32> = (0..10_000).collect();
+    let values: Vec<String> = keys.iter().map(i32::to_string).collect();
+    map.extend(keys.iter().zip(values.iter())).await.unwrap();
+    let wanted: Vec<&i32> = keys.iter().collect();
+    let all = map.get_all(&wanted).await.unwrap();
+    assert_eq!(all.len(), 10_000);
+    assert_eq!(all.get(&9_999).map(String::as_str), Some("9999"));
+    assert_eq!(map.len().await.unwrap(), 10_000);
+}
+
+// Redisson: testPutAllBatched
+#[tokio::test]
+async fn redisson_put_all_batched() {
+    let map = client().await.hash_map::<i32, String>(unique("map"));
+    for k in 1..=3 {
+        map.insert(&k, &k.to_string()).await.unwrap();
+    }
+    for range in [4..=6, 7..=11, 12..=18] {
+        let keys: Vec<i32> = range.collect();
+        let values: Vec<String> = keys.iter().map(i32::to_string).collect();
+        map.extend(keys.iter().zip(values.iter()))
+            .batch_size(5)
+            .await
+            .unwrap();
+    }
+    let mut keys = map.read_all_keys().await.unwrap();
+    keys.sort_unstable();
+    assert_eq!(keys, (1..=18).collect::<Vec<_>>());
+}
+
+// Redisson: testKeySetByPattern, testValuesByPattern, testEntrySetByPattern
+#[tokio::test]
+async fn redisson_scans_by_pattern() {
+    let map = string_map("simple").await;
+    for (k, v) in [("10", "100"), ("20", "200"), ("30", "300")] {
+        map.insert(k, v).await.unwrap();
+    }
+    let keys = |pattern: &'static str| {
+        let map = map.clone();
+        async move {
+            let mut keys: Vec<String> = map
+                .keys_with(redissun::MapScan::new().pattern(pattern))
+                .try_collect()
+                .await
+                .unwrap();
+            keys.sort();
+            keys
+        }
+    };
+    assert_eq!(keys("?0").await, ["10", "20", "30"]);
+    assert!(keys("1").await.is_empty());
+    assert_eq!(keys("10").await, ["10"]);
+    let mut values: Vec<String> = map
+        .values_with(redissun::MapScan::new().pattern("?0"))
+        .try_collect()
+        .await
+        .unwrap();
+    values.sort();
+    assert_eq!(values, ["100", "200", "300"]);
+    let entries: Vec<(String, String)> = map
+        .iter_with(redissun::MapScan::new().pattern("10"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(entries, [("10".to_string(), "100".to_string())]);
+}
+
+// Redisson: testReadAllEntrySetWithPattern, testReadAllKeySetWithPattern, testReadAllValuesWithPattern
+#[tokio::test]
+async fn redisson_read_all_with_pattern() {
+    let map = string_map("simple12").await;
+    for (k, v) in [("10", "12"), ("12", "33"), ("21", "43")] {
+        map.insert(k, v).await.unwrap();
+    }
+    assert_eq!(map.read_all_entries_matching("1?").await.unwrap().len(), 2);
+    let mut keys = map.read_all_keys_matching("1?").await.unwrap();
+    keys.sort();
+    assert_eq!(keys, ["10", "12"]);
+    let mut values = map.read_all_values_matching("1?").await.unwrap();
+    values.sort();
+    assert_eq!(values, ["12", "33"]);
+}
+
+async fn pattern_count(url: &str) -> String {
+    crate::common::raw_command_at(url, &["PUBSUB", "NUMPAT"]).await
+}
+
+// Redisson: testIncrListener (notify-keyspace-events "Th": subkey events only)
+#[tokio::test]
+async fn redisson_incr_listener() {
+    let (_container, url) = crate::common::own_redis8().await;
+    let client = events_client(&url, "Th").await;
+    let map = client.hash_map::<String, f64>(unique("testIncrListener"));
+    let mut events = map
+        .events_of(&[redissun::MapEventKind::Incremented])
+        .await
+        .unwrap();
+    map.incr_by_float("1", 1.0).await.unwrap();
+    match next_event(&mut events).await {
+        redissun::MapEvent::Incremented { key } => assert_eq!(key.as_deref(), Some("1")),
+        other => panic!("expected an increment, got {other:?}"),
+    }
+    // Redisson's removeListener: dropping the handle unsubscribes.
+    drop(events);
+    for _ in 0..20 {
+        if pattern_count(&url).await == ":0\r\n" {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the patterns stayed subscribed after the events were dropped");
+}
+
+// Redisson: testPutRemoveListener
+#[tokio::test]
+async fn redisson_put_remove_listener() {
+    let (_container, url) = crate::common::own_redis8().await;
+    let client = events_client(&url, "Th").await;
+    let map = client
+        .with_codec(redissun::StringCodec)
+        .hash_map::<String, String>(unique("testPutRemoveListener"));
+    let mut events = map.events().await.unwrap();
+    map.insert("1", "2").await.unwrap();
+    map.remove("1").await.unwrap();
+    let mut seen = vec![];
+    for _ in 0..2 {
+        seen.push(
+            tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert!(seen.contains(&redissun::MapEvent::Put {
+        key: Some("1".into())
+    }));
+    assert!(seen.contains(&redissun::MapEvent::Removed {
+        key: Some("1".into())
+    }));
+}
+
+// Redisson: testPutListenerWithKeyevent
+#[tokio::test]
+async fn redisson_put_listener_with_keyevent() {
+    let (_container, url) = crate::common::own_redis().await;
+    let client = events_client(&url, "Eh").await;
+    let map = client.hash_map::<String, String>(unique("testPutListenerWithKeyevent"));
+    let mut events = map.events_of(&[redissun::MapEventKind::Put]).await.unwrap();
+    map.insert("1", "2").await.unwrap();
+    assert_eq!(
+        next_event(&mut events).await,
+        redissun::MapEvent::Put { key: None }
+    );
+}
+
+// Redisson: testPutListenerWithKeyeventAndSubkeyevent
+#[tokio::test]
+async fn redisson_put_listener_with_keyevent_and_subkeyevent() {
+    let (_container, url) = crate::common::own_redis8().await;
+    let client = events_client(&url, "TEh").await;
+    let map =
+        client.hash_map::<String, String>(unique("testPutListenerWithKeyeventAndSubkeyevent"));
+    let mut events = map.events_of(&[redissun::MapEventKind::Put]).await.unwrap();
+    map.insert("1", "2").await.unwrap();
+    assert_eq!(
+        next_event(&mut events).await,
+        redissun::MapEvent::Put {
+            key: Some("1".into())
+        }
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
+            .await
+            .is_err()
+    );
+}

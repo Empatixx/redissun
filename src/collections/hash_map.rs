@@ -455,6 +455,7 @@ where
     }
 
     /// Inserts the entry only when the key is missing (`HSETNX`); returns whether it was inserted. Like Redisson `fastPutIfAbsent`.
+    #[doc(alias = "fastPutIfAbsent")]
     pub async fn insert_nx<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
     where
         K: Borrow<Q>,
@@ -825,6 +826,7 @@ where
     C: Codec,
 {
     /// The whole map in one call (`HGETALL`), Redisson's `readAllMap`.
+    #[doc(alias = "readAllMap")]
     pub async fn read_all_map(&self) -> Result<std::collections::HashMap<K, V>> {
         Ok(self.read_all_entries().await?.into_iter().collect())
     }
@@ -861,6 +863,7 @@ where
     }
 
     /// Up to `count` distinct random entries (`HRANDFIELD … WITHVALUES`), Redisson's `randomEntries`.
+    #[doc(alias = "randomEntries")]
     pub async fn random_entries(&self, count: usize) -> Result<std::collections::HashMap<K, V>> {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
         let mut cmd = self.key.key_cmd("HRANDFIELD");

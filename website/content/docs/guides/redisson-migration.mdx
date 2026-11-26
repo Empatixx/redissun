@@ -127,7 +127,15 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `size()` | `len()` |
 | `valueSize(k)` | `value_size(&k)` |
 | `putAll(m)` | `extend(entries)` |
-| `getAll(keys)` | `get_many(&keys)`, values in the order of the keys |
+| `putAll(m, batchSize)` | `extend(entries).batch_size(n)` |
+| `getAll(keys)` | `get_all(&keys)`, a `HashMap` of the keys that exist; `get_many(&keys)` gives values in the order of the keys |
+| `readAllMap()` | `read_all_map()` |
+| `randomEntries(n)` | `random_entries(n)` |
+| `compute`, `computeIfAbsent`, `computeIfPresent`, `merge` | the same names in snake case, with an async closure, under the key's lock |
+| `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)`, under Redisson's names |
+| `keySet(pattern, count)`, `values(pattern, count)`, `entrySet(pattern, count)` | `keys_with`, `values_with`, `iter_with` with `MapScan::new().pattern(p).page_size(n)` |
+| `readAllKeySet(pattern)`, `readAllValues(pattern)`, `readAllEntrySet(pattern)` | `read_all_keys_matching(p)`, `read_all_values_matching(p)`, `read_all_entries_matching(p)` |
+| `addListener(MapPutListener / MapIncrListener / MapRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `events()` or `events_of(&kinds)`, a stream of `MapEvent`; dropping it is `removeListener` |
 | `putIfAbsent(k, v)` | `insert_if_absent(&k, &v)`, returns the existing value |
 | `fastPutIfAbsent(k, v)` | `insert_nx(&k, &v)` |
 | `putIfExists(k, v)` | `insert_if_exists(&k, &v)` |
