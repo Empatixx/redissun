@@ -106,6 +106,18 @@ pub async fn own_redis() -> (ContainerAsync<Redis>, String) {
     (container, format!("redis://127.0.0.1:{port}"))
 }
 
+/// A Redis 8 server of its own, for tests that change its configuration.
+pub async fn own_redis8() -> (ContainerAsync<Redis>, String) {
+    let container = Redis::default()
+        .with_tag("8.8-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    wait_until_ready(port).await;
+    (container, format!("redis://127.0.0.1:{port}"))
+}
+
 pub async fn connect_with(configure: impl Fn(ClientBuilder) -> ClientBuilder) -> Client {
     let url = redis_url().await;
     let mut last = None;
@@ -149,7 +161,11 @@ async fn ping(port: u16) -> bool {
 }
 
 pub async fn raw_command(parts: &[&str]) -> String {
-    let url = redis_url().await;
+    raw_command_at(&redis_url().await, parts).await
+}
+
+/// [`raw_command`] against the server at `url`.
+pub async fn raw_command_at(url: &str, parts: &[&str]) -> String {
     let address = url.trim_start_matches("redis://").to_string();
     let mut stream = TcpStream::connect(address).await.unwrap();
     let mut request = format!("*{}\r\n", parts.len());

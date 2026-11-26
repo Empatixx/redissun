@@ -1032,3 +1032,91 @@ async fn extend_batch_of_zero_is_one_call() {
         .unwrap();
     assert_eq!(map.len().await.unwrap(), 2);
 }
+
+async fn events_client(url: &str, flags: &str) -> redissun::Client {
+    crate::common::raw_command_at(url, &["CONFIG", "SET", "notify-keyspace-events", flags]).await;
+    redissun::Client::builder()
+        .url(url.to_string())
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn next_event(
+    events: &mut redissun::MapEvents<String, redissun::JsonCodec>,
+) -> redissun::MapEvent<String> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("no event within 2 s")
+        .unwrap()
+}
+
+// Redisson: MapPutListener, MapRemoveListener, DeletedObjectListener on a server without subkey notifications
+#[tokio::test]
+async fn events_without_subkey_notifications_have_no_key() {
+    let (_container, url) = crate::common::own_redis().await;
+    let client = events_client(&url, "Egxh").await;
+    let map = client.hash_map::<String, i64>(unique("map"));
+    let mut events = map.events().await.unwrap();
+    map.insert("a", &1).await.unwrap();
+    assert!(matches!(
+        next_event(&mut events).await,
+        redissun::MapEvent::Put { key: None }
+    ));
+    // Removing the last entry deletes the hash, so Redis also sends `del`; events of different kinds may come in either order.
+    map.remove("a").await.unwrap();
+    let both = [next_event(&mut events).await, next_event(&mut events).await];
+    assert!(both.contains(&redissun::MapEvent::Removed { key: None }));
+    assert!(both.contains(&redissun::MapEvent::Deleted));
+    map.insert("b", &1).await.unwrap();
+    assert!(matches!(
+        next_event(&mut events).await,
+        redissun::MapEvent::Put { key: None }
+    ));
+    map.del().await.unwrap();
+    assert!(matches!(
+        next_event(&mut events).await,
+        redissun::MapEvent::Deleted
+    ));
+}
+
+#[tokio::test]
+async fn events_with_subkey_notifications_name_the_key() {
+    let (_container, url) = crate::common::own_redis8().await;
+    let client = events_client(&url, "ETh").await;
+    let map = client.hash_map::<String, f64>(unique("map"));
+    let mut events = map.events().await.unwrap();
+    map.insert("a", &1.0).await.unwrap();
+    match next_event(&mut events).await {
+        redissun::MapEvent::Put { key } => assert_eq!(key.as_deref(), Some("a")),
+        other => panic!("expected a put, got {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), events.recv())
+            .await
+            .is_err(),
+        "the key event of the same write came through as a duplicate"
+    );
+    map.incr_by_float("a", 1.5).await.unwrap();
+    match next_event(&mut events).await {
+        redissun::MapEvent::Incremented { key } => assert_eq!(key.as_deref(), Some("a")),
+        other => panic!("expected an increment, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn events_of_filters_kinds() {
+    let (_container, url) = crate::common::own_redis().await;
+    let client = events_client(&url, "Egxh").await;
+    let map = client.hash_map::<String, i64>(unique("map"));
+    let mut events = map
+        .events_of(&[redissun::MapEventKind::Removed])
+        .await
+        .unwrap();
+    map.insert("a", &1).await.unwrap();
+    map.remove("a").await.unwrap();
+    assert!(matches!(
+        next_event(&mut events).await,
+        redissun::MapEvent::Removed { key: None }
+    ));
+}
