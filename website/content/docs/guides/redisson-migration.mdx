@@ -480,6 +480,9 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `fastRemoveValue(v...)` | `remove_from_all_keys(&[&v, ..])` → `usize` |
 | `containsValue(v)`, `containsEntry(k, v)` | `contains_value(&v)`, `contains_entry(&k, &v)` |
 | `readAllKeySet()` | `keys_to_vec()` → `Vec<K>` |
+| `entries()`, `entries(count)` | `iter()`, `iter_paged(n)` → `Stream<Item = Result<(K, V)>>` |
+| `keySet()`, `keySet(count)` (iterating) | `keys()`, `keys_paged(n)` |
+| `values()`, `values(count)` (iterating) | `values()`, `values_paged(n)` |
 | `clear()` | `clear()` |
 | `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |
 | `keySet().contains(k)`, `keySet().remove(k)`, `keySet().size()`, `keySet().clear()` | `contains_key(&k)`, `remove_many(&[&k])`, `key_len()`, `clear()` |

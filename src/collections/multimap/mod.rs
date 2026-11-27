@@ -3,6 +3,7 @@
 //! A multimap is a hash at the raw name that maps each codec-encoded key to Redisson's `Hash.hash128toBase64` of it, stored as a plain string. The values of a key live in a list or set at `suffix_name(name, hash)`. [`Shape`] picks the values type and [`Mode`] the TTL scheme; [`Ops`] runs Redisson's script or command for each pair, and [`multimap_type!`] generates the public types as thin calls into it.
 
 pub(crate) mod scripts;
+pub(crate) mod stream;
 
 use crate::codec::Codec;
 use crate::collections::map::key_hash::hash128_base64;
@@ -709,6 +710,61 @@ macro_rules! multimap_type {
             }
 
             $crate::collections::map::key_hash::per_key_objects!();
+
+            /// Streams every `(key, value)` pair, Redisson's `entries()`, in pages of 10 keys. Keys without values yield nothing. Changes made while the stream runs may be missed or seen twice, as with any scan.
+            #[doc(alias = "entries")]
+            pub fn iter(
+                &self,
+            ) -> impl ::futures::Stream<Item = $crate::error::Result<(K, V)>> + '_ {
+                self.iter_paged(0)
+            }
+
+            /// Like [`iter`](Self::iter), with `HSCAN … COUNT page_size` over the keys (and `SSCAN … COUNT page_size` over a set's values), Redisson's `entries(count)`. Zero means 10.
+            #[doc(alias = "entries")]
+            pub fn iter_paged(
+                &self,
+                page_size: usize,
+            ) -> impl ::futures::Stream<Item = $crate::error::Result<(K, V)>> + '_ {
+                $crate::collections::multimap::stream::entries(
+                    &self.key,
+                    &self.codec,
+                    $shape,
+                    page_size,
+                )
+            }
+
+            /// Streams every key, Redisson's `keySet()`, in pages of 10. A `ListMultimap` key whose list [`remove_from_all_keys`](Self::remove_from_all_keys) emptied still shows here until it is removed, as in Redisson.
+            #[doc(alias = "keySet")]
+            pub fn keys(&self) -> impl ::futures::Stream<Item = $crate::error::Result<K>> + '_ {
+                self.keys_paged(0)
+            }
+
+            /// Like [`keys`](Self::keys), with `HSCAN … COUNT page_size`, Redisson's `keySet(count)`. Zero means 10.
+            #[doc(alias = "keySet")]
+            pub fn keys_paged(
+                &self,
+                page_size: usize,
+            ) -> impl ::futures::Stream<Item = $crate::error::Result<K>> + '_ {
+                $crate::collections::multimap::stream::keys(&self.key, &self.codec, page_size)
+            }
+
+            /// Streams every value of every key, Redisson's `values()`, in pages of 10 keys. A value held by several keys comes once per key.
+            pub fn values(&self) -> impl ::futures::Stream<Item = $crate::error::Result<V>> + '_ {
+                self.values_paged(0)
+            }
+
+            /// Like [`values`](Self::values), with the page size of [`iter_paged`](Self::iter_paged), Redisson's `values(count)`. Zero means 10.
+            pub fn values_paged(
+                &self,
+                page_size: usize,
+            ) -> impl ::futures::Stream<Item = $crate::error::Result<V>> + '_ {
+                $crate::collections::multimap::stream::values(
+                    &self.key,
+                    &self.codec,
+                    $shape,
+                    page_size,
+                )
+            }
         }
     };
 }

@@ -1,6 +1,7 @@
 mod common;
 
 use common::{client, raw_command, unique};
+use futures::TryStreamExt;
 use redissun::{JsonCodec, Object, SetMultimap};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -331,4 +332,92 @@ async fn ttl_and_exists_read_the_hash() {
     map.expire(Duration::from_secs(10)).await.unwrap();
     let ttl = map.ttl().await.unwrap().unwrap();
     assert!(ttl <= Duration::from_secs(10) && ttl > Duration::from_secs(8));
+}
+
+// Redisson: testSetMultimapEntriesCount
+#[tokio::test]
+async fn streams_cover_every_entry() {
+    let map = set(&unique("smm")).await;
+    for i in 0..137 {
+        let k = format!("k{i}");
+        map.extend(
+            &k,
+            [format!("v{i}-a"), format!("v{i}-b"), format!("v{i}-c")]
+                .iter()
+                .map(String::as_str),
+        )
+        .await
+        .unwrap();
+    }
+    let seen: std::collections::HashSet<(String, String)> =
+        map.iter_paged(50).try_collect().await.unwrap();
+    assert_eq!(seen.len(), 411);
+    let keys: Vec<String> = map.keys_paged(50).try_collect().await.unwrap();
+    assert_eq!(keys.len(), 137);
+    let values: Vec<String> = map.values_paged(50).try_collect().await.unwrap();
+    assert_eq!(values.len(), 411);
+    let with_count: std::collections::HashSet<(String, String)> =
+        map.iter_paged(500).try_collect().await.unwrap();
+    assert_eq!(seen, with_count);
+    let default: std::collections::HashSet<(String, String)> =
+        map.iter().try_collect().await.unwrap();
+    assert_eq!(seen, default);
+    let zero: Vec<String> = map.values_paged(0).try_collect().await.unwrap();
+    assert_eq!(zero.len(), 411);
+}
+
+// Redisson: testKeySet
+#[tokio::test]
+async fn keys_stream() {
+    let map = set(&unique("smm")).await;
+    map.insert("0", "1").await.unwrap();
+    map.insert("3", "4").await.unwrap();
+    let mut keys: Vec<String> = map.keys().try_collect().await.unwrap();
+    keys.sort();
+    assert_eq!(keys, ["0", "3"]);
+    let empty = set(&unique("smm")).await;
+    let none: Vec<String> = empty.keys().try_collect().await.unwrap();
+    assert!(none.is_empty());
+}
+
+// Redisson: testValues
+#[tokio::test]
+async fn values_stream_keeps_duplicates() {
+    let map = set(&unique("smm")).await;
+    map.insert("0", "1").await.unwrap();
+    map.insert("0", "3").await.unwrap();
+    map.insert("2", "5").await.unwrap();
+    map.insert("3", "4").await.unwrap();
+    map.insert("4", "1").await.unwrap();
+    let mut values: Vec<String> = map.values().try_collect().await.unwrap();
+    values.sort();
+    assert_eq!(values, ["1", "1", "3", "4", "5"]);
+}
+
+// Redisson: testEntrySet
+#[tokio::test]
+async fn entries_stream() {
+    let map = set(&unique("smm")).await;
+    map.insert("0", "1").await.unwrap();
+    map.insert("3", "4").await.unwrap();
+    let mut entries: Vec<(String, String)> = map.iter().try_collect().await.unwrap();
+    entries.sort();
+    assert_eq!(
+        entries,
+        [
+            ("0".to_string(), "1".to_string()),
+            ("3".to_string(), "4".to_string())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streams_read_big_sets_with_sscan() {
+    let map = set(&unique("smm")).await;
+    let values: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+    map.extend("k", values.iter().map(String::as_str))
+        .await
+        .unwrap();
+    let read: std::collections::HashSet<String> = map.values_paged(7).try_collect().await.unwrap();
+    assert_eq!(read.len(), 300);
 }

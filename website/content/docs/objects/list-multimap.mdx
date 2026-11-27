@@ -39,6 +39,22 @@ let all = tags.get_all("post-1").await?; // ["rust", "redis"]
 
 `extend(&k, [])` sends nothing and returns `false`, so no key is left without values (Redisson's script would add the key to the hash). `replace_values(&k, [])` and `set_values(&k, [])` remove the key, the first returning its old values. `remove_many(&[])` and `remove_from_all_keys(&[])` send nothing and return `0`.
 
+## Streams
+
+| Method | Redisson | Yields |
+|---|---|---|
+| `iter()`, `iter_paged(n)` | `entries()`, `entries(count)` | every `(key, value)` pair |
+| `keys()`, `keys_paged(n)` | `keySet()`, `keySet(count)` | every key |
+| `values()`, `values_paged(n)` | `values()`, `values(count)` | every value of every key |
+
+```rust
+use futures::TryStreamExt;
+
+let pairs: Vec<(String, String)> = tags.iter().try_collect().await?;
+```
+
+The keys are read with `HSCAN … COUNT n`, `n` being the page size (10 by default, as in Redisson; `0` means 10). The values of each key are read with `LRANGE` in pages of 100. Keys without values yield nothing in `iter` and `values`. Like every scan, a stream may miss or repeat entries that change while it runs.
+
 ## Object methods
 
 The `Object` methods cover the hash and the list of every key, with Redisson's scripts:
