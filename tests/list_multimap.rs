@@ -2,7 +2,7 @@ mod common;
 
 use common::{client, raw_command, unique};
 use futures::TryStreamExt;
-use redissun::{JsonCodec, ListMultimap, Object};
+use redissun::{JsonCodec, ListMultimap, MultimapEvent, MultimapEventKind, Object};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -561,4 +561,104 @@ async fn as_vec_reaches_the_raw_list() {
     assert_eq!(values.name(), values_key(&name, "IKm9EBQhlzpVIBxUXDHBWw"));
     assert_eq!(values.as_vec().to_vec().await.unwrap(), ["a", "b"]);
     assert_eq!(values.as_vec().name(), values.name());
+}
+
+/// A client on its own server with `notify-keyspace-events` set to `flags`.
+async fn keyspace_client(url: &str, flags: &str) -> redissun::Client {
+    common::raw_command_at(url, &["CONFIG", "SET", "notify-keyspace-events", flags]).await;
+    redissun::Client::builder()
+        .url(url.to_string())
+        .build()
+        .await
+        .unwrap()
+}
+
+/// The events that arrive within `window`, stopping early after `count`.
+async fn events_within(
+    events: &mut redissun::multimap::MultimapEvents<String, JsonCodec>,
+    count: usize,
+    window: Duration,
+) -> Vec<MultimapEvent<String>> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut seen = Vec::new();
+    while seen.len() < count {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(event) => seen.push(event.unwrap()),
+            Err(_) => break,
+        }
+    }
+    seen
+}
+
+// Redisson: testListener
+#[tokio::test]
+async fn events_report_puts_removes_and_value_changes() {
+    let (_redis, url) = common::own_redis().await;
+    let client = keyspace_client(&url, "Ehlg").await;
+    let name = unique("lmm");
+    let map: ListMultimap<String, String, JsonCodec> = client.list_multimap(name.clone());
+    let mut events = map.events().await.unwrap();
+    map.insert("1", "5").await.unwrap();
+    map.insert("1", "8").await.unwrap();
+    map.remove("1", "5").await.unwrap();
+    map.remove("1", "8").await.unwrap();
+    let seen = events_within(&mut events, 6, Duration::from_secs(1)).await;
+    let values = map.get("1").unwrap().name().to_string();
+    let count = |wanted: &MultimapEvent<String>| seen.iter().filter(|e| *e == wanted).count();
+    assert_eq!(count(&MultimapEvent::Put { key: None }), 1, "{seen:?}");
+    assert_eq!(count(&MultimapEvent::Removed { key: None }), 1, "{seen:?}");
+    assert_eq!(
+        count(&MultimapEvent::ValueAdded {
+            name: values.clone()
+        }),
+        2,
+        "{seen:?}"
+    );
+    assert_eq!(
+        count(&MultimapEvent::ValueRemoved { name: values }),
+        2,
+        "{seen:?}"
+    );
+    assert_eq!(seen.len(), 6, "{seen:?}");
+}
+
+#[tokio::test]
+async fn value_events_of_other_objects_are_ignored() {
+    let (_redis, url) = common::own_redis().await;
+    let client = keyspace_client(&url, "Ehlg").await;
+    let map: ListMultimap<String, String, JsonCodec> = client.list_multimap(unique("lmm"));
+    let mut events = map
+        .events_of(&[
+            MultimapEventKind::ValueAdded,
+            MultimapEventKind::ValueRemoved,
+        ])
+        .await
+        .unwrap();
+    let other = unique("other");
+    common::raw_command_at(&url, &["RPUSH", &other, "x"]).await;
+    common::raw_command_at(&url, &["SADD", &format!("{other}:s"), "x"]).await;
+    common::raw_command_at(&url, &["LREM", &other, "0", "x"]).await;
+    let seen = events_within(&mut events, 1, Duration::from_millis(300)).await;
+    assert!(seen.is_empty(), "{seen:?}");
+}
+
+#[tokio::test]
+async fn deleted_event() {
+    let (_redis, url) = common::own_redis().await;
+    let client = keyspace_client(&url, "Ehlg").await;
+    let map: ListMultimap<String, String, JsonCodec> = client.list_multimap(unique("lmm"));
+    map.insert("1", "5").await.unwrap();
+    let mut events = map.events_of(&[MultimapEventKind::Deleted]).await.unwrap();
+    assert!(map.del().await.unwrap());
+    let seen = events_within(&mut events, 2, Duration::from_millis(500)).await;
+    assert_eq!(seen, [MultimapEvent::Deleted]);
+}
+
+#[tokio::test]
+async fn events_of_nothing_is_a_config_error() {
+    let map = list(&unique("lmm")).await;
+    assert!(matches!(
+        map.events_of(&[]).await,
+        Err(redissun::Error::Config(_))
+    ));
 }

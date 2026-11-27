@@ -77,6 +77,27 @@ let has_both = post.contains_all(&["rust", "tokio"]).await?;
 
 `retain` and writes through `as_set()` do not touch the hash, as in Redisson. When one empties the set, `contains_key` is `false`, `get_all` is empty and the streams skip the key, but `key_len` and `keys` count it until `remove_all` or `remove_many`.
 
+## Events
+
+`events()` listens to every change, `events_of(&[MultimapEventKind::ValueAdded, ..])` to some. Both return a `MultimapEvents`; `recv()` waits for the next `MultimapEvent`, `into_stream()` turns it into a stream, and dropping it stops listening (Redisson's `removeListener`).
+
+| Event | Redis event | Redisson listener |
+|---|---|---|
+| `Put { key }` | `hset` on the hash (a new key) | `MapPutListener` |
+| `Removed { key }` | `hdel` on the hash (a key went) | `MapRemoveListener` |
+| `ValueAdded { name }` | `sadd` on a set of the multimap | `SetAddListener` |
+| `ValueRemoved { name }` | `srem` on a set of the multimap | `SetRemoveListener` |
+| `Deleted` | `del` of the hash | `DeletedObjectListener` |
+| `Expired` | `expired` of the hash | `ExpiredObjectListener` |
+
+```rust
+let mut events = tags.events().await?;
+tags.insert("post-1", "rust").await?;
+let event = events.recv().await?; // Put or ValueAdded, in either order
+```
+
+Redis sends these only when `notify-keyspace-events` enables them, as for Redisson: `E` with `h` for `Put` and `Removed`, `s` for the value events, `g` for `Deleted`, `x` for `Expired`. `key` is `Some` only with `T` (Redis 8.8 or newer), otherwise `None`, as Redisson's listeners get `null`. `name` is the set's name, `{name}:<hash>`; value events of other keys are dropped by that prefix, as in Redisson. Events of different kinds come from different subscriptions and may arrive in another order than the writes. In a cluster the listener hears the node of the client's pub/sub connection.
+
 ## Object methods
 
 The `Object` methods cover the hash and the set of every key, with Redisson's scripts:

@@ -2,6 +2,7 @@
 //!
 //! A multimap is a hash at the raw name that maps each codec-encoded key to Redisson's `Hash.hash128toBase64` of it, stored as a plain string. The values of a key live in a list or set at `suffix_name(name, hash)`. [`Shape`] picks the values type and [`Mode`] the TTL scheme; [`Ops`] runs Redisson's script or command for each pair, and [`multimap_type!`] generates the public types as thin calls into it.
 
+pub(crate) mod events;
 pub(crate) mod scripts;
 pub(crate) mod stream;
 pub(crate) mod values;
@@ -731,6 +732,28 @@ macro_rules! multimap_type {
             }
 
             $crate::collections::map::key_hash::per_key_objects!();
+
+            /// Starts listening to every kind of change, Redisson's `addListener` with each multimap listener. Dropping the returned [`MultimapEvents`](crate::multimap::MultimapEvents) is `removeListener`.
+            #[doc(alias = "addListener")]
+            pub async fn events(
+                &self,
+            ) -> $crate::error::Result<$crate::multimap::MultimapEvents<K, C>> {
+                self.events_of(&$crate::MultimapEventKind::ALL).await
+            }
+
+            /// Starts listening to the given kinds of change. No kinds are an [`Error::Config`]($crate::Error::Config).
+            pub async fn events_of(
+                &self,
+                kinds: &[$crate::MultimapEventKind],
+            ) -> $crate::error::Result<$crate::multimap::MultimapEvents<K, C>> {
+                $crate::collections::multimap::events::subscribe(
+                    &self.key,
+                    self.codec.clone(),
+                    $shape,
+                    kinds,
+                )
+                .await
+            }
 
             /// Streams every `(key, value)` pair, Redisson's `entries()`, in pages of 10 keys. Keys without values yield nothing. Changes made while the stream runs may be missed or seen twice, as with any scan.
             #[doc(alias = "entries")]

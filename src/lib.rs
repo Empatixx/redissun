@@ -73,8 +73,9 @@ pub mod map_cache_native {
     };
 }
 
-/// The value handles [`ListMultimap::get`] and [`SetMultimap::get`] return.
+/// The value handles and the event listener of the multimaps.
 pub mod multimap {
+    pub use crate::collections::multimap::events::MultimapEvents;
     pub use crate::collections::multimap::values::{ListMultimapValues, SetMultimapValues};
 }
 
@@ -141,6 +142,7 @@ pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
 pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
 pub use collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
+pub use collections::multimap::events::{MultimapEvent, MultimapEventKind};
 pub use collections::multimap::{ListMultimap, SetMultimap};
 pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;

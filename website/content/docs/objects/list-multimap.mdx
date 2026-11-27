@@ -77,6 +77,27 @@ let first_two = post.range(..2).await?;
 
 The index writes (`pop`, `remove(i)`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values`) do not touch the hash, as in Redisson. When one empties the list, `contains_key` is `false`, `get_all` is empty and the streams skip the key, but `key_len` and `keys` count it until `remove_all` or `remove_many`. Redisson's `removeAll` script counts a value as removed only when it occurred exactly once, and redissun keeps that.
 
+## Events
+
+`events()` listens to every change, `events_of(&[MultimapEventKind::ValueAdded, ..])` to some. Both return a `MultimapEvents`; `recv()` waits for the next `MultimapEvent`, `into_stream()` turns it into a stream, and dropping it stops listening (Redisson's `removeListener`).
+
+| Event | Redis event | Redisson listener |
+|---|---|---|
+| `Put { key }` | `hset` on the hash (a new key) | `MapPutListener` |
+| `Removed { key }` | `hdel` on the hash (a key went) | `MapRemoveListener` |
+| `ValueAdded { name }` | `rpush` on a list of the multimap | `ListAddListener` |
+| `ValueRemoved { name }` | `lrem` on a list of the multimap | `ListRemoveListener` |
+| `Deleted` | `del` of the hash | `DeletedObjectListener` |
+| `Expired` | `expired` of the hash | `ExpiredObjectListener` |
+
+```rust
+let mut events = tags.events().await?;
+tags.insert("post-1", "rust").await?;
+let event = events.recv().await?; // Put or ValueAdded, in either order
+```
+
+Redis sends these only when `notify-keyspace-events` enables them, as for Redisson: `E` with `h` for `Put` and `Removed`, `l` for the value events, `g` for `Deleted`, `x` for `Expired`. `key` is `Some` only with `T` (Redis 8.8 or newer), otherwise `None`, as Redisson's listeners get `null`. `name` is the list's name, `{name}:<hash>`; value events of other keys are dropped by that prefix, as in Redisson. Events of different kinds come from different subscriptions and may arrive in another order than the writes. In a cluster the listener hears the node of the client's pub/sub connection.
+
 ## Object methods
 
 The `Object` methods cover the hash and the list of every key, with Redisson's scripts:
