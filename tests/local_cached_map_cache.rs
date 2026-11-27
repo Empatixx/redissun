@@ -247,7 +247,8 @@ async fn removing_a_missing_key_or_clearing_an_empty_cache_sends_nothing() {
     let plain = plain(&first, &name);
     plain.insert("k", "v").await.unwrap();
     reader.get("k").await.unwrap();
-    plain.remove("k").await.unwrap();
+    // HDEL publishes no entry event, so only a message from `writer` could drop the reader's copy.
+    raw_command(&["HDEL", &name, "\"k\""]).await;
     assert_eq!(writer.remove("k").await.unwrap(), None);
     writer.clear_local();
     writer.clear().await.unwrap();
@@ -917,8 +918,9 @@ async fn the_map_expiring_clears_every_local_cache() {
         .await
         .unwrap();
     a.insert("k", "v").await.unwrap();
-    eventually("b never read k", || async {
-        b.get("k").await.unwrap().as_deref() == Some("v")
+    // A read that overlaps the invalidation of the insert is not cached, so wait for a cached copy.
+    eventually("b never cached k", || async {
+        b.get("k").await.unwrap().as_deref() == Some("v") && b.local_len() == 1
     })
     .await;
     assert!(a.expire(200 * MS).await.unwrap());
