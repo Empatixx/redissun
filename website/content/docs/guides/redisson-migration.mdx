@@ -392,6 +392,9 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 | `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)` |
 | `putAll(map[, ttl, unit[, maxIdle, unit]])`, `putAll(map, batchSize)` | `extend(entries)[.ttl(ttl)][.max_idle(idle)][.batch_size(n)]`; clears the TTL without `.ttl()`, unlike Redisson's `putAll(map)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
+| `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `hash_map::Entry`; a write clears the entry's TTL and max idle, unlike Redisson's `compute`, which keeps them |
+| `compute(k, ttl, f)`, `computeIfAbsent(k, ttl, f)` | `entry(&k).ttl(ttl)` |
+| `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |
 | `getAll(keys)` | `get_many(&[&k, ..])` → `Vec<Option<V>>` in key order |
 | `containsValue(v)` | `contains_value(&v)` |
 | `valueSize(k)` | `value_len(&k)`: the encoded value without Redisson's 16-byte header |

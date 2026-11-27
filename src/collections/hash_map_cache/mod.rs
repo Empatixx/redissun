@@ -6,6 +6,7 @@ mod scripts;
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::map::events::{self as map_events, MapEventKind, MapEvents};
+use crate::collections::map::key_hash::per_key_objects;
 use crate::collections::map::scan::{decode_pairs, MapScan};
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
@@ -14,9 +15,9 @@ use crate::object::{millis, now_millis, HasKey, Key};
 use bytes::Bytes;
 use futures::{stream, Stream, TryStreamExt};
 use scripts::{
-    ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, CONTAINS_VALUE, EVICT, EXPIRE, FAST_REMOVE, GET,
-    GET_ALL, RANDOM_ENTRIES, RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE, REMOVE_IF, REPLACE,
-    REPLACE_IF, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
+    ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, CONTAINS_VALUE, EVICT, EXPIRE, FAST_PUT_WITH_LIMITS,
+    FAST_REMOVE, GET, GET_ALL, PUT, RANDOM_ENTRIES, RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE,
+    REMOVE_IF, REPLACE, REPLACE_IF, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -26,7 +27,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-pub use builders::{Extend, Insert, Set, TryInsert};
+pub use builders::{EntryRequest, Extend, Insert, Set, TryInsert};
 pub(crate) use entry_events::LengthPrefix;
 
 /// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
@@ -1010,6 +1011,160 @@ where
             )
             .await?;
         Ok(decode_pairs(&self.codec, raw)?.into_iter().collect())
+    }
+}
+
+impl<K, V, C> HashMapCache<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    /// The value of `k`, taken under the key's lock to read and change it, like [`std::collections::hash_map::Entry`]: Redisson's `compute`, `computeIfAbsent`, `computeIfPresent` and `merge`. Await it, optionally after [`EntryRequest::ttl`].
+    ///
+    /// An expired entry is vacant. A write through a plain `entry(&k)` replaces the entry like [`insert`](HashMapCache::insert) and clears its time to live and max idle, unlike Redisson's `compute(key, f)`, which keeps them; `entry(&k).ttl(d)` writes with that time to live, Redisson's `compute(key, ttl, f)`. The lock is the one [`lock`](HashMapCache::lock) returns, the lock Redisson's compute family takes. Calls for the same key from this client wait for each other, also futures joined in one task: while you hold an entry, taking another one for the same key in the same task waits forever.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// # use std::time::Duration;
+    /// let visits = client.hash_map_cache::<String, i64>("visits");
+    /// visits
+    ///     .entry("home")
+    ///     .ttl(Duration::from_secs(60))
+    ///     .await?
+    ///     .and_modify(|n| *n += 1)
+    ///     .or_insert(1)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(
+        alias = "compute",
+        alias = "computeIfAbsent",
+        alias = "computeIfPresent",
+        alias = "merge"
+    )]
+    pub fn entry<Q>(&self, k: &Q) -> EntryRequest<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        EntryRequest::new(self, self.codec.encode(k))
+    }
+
+    per_key_objects!();
+
+    /// The `GET` script for an encoded key: the live value, as [`get`](HashMapCache::get) reads it.
+    pub(crate) async fn read_encoded(&self, k: &Bytes) -> Result<Option<V>> {
+        let raw: Option<Bytes> = self
+            .key
+            .core
+            .eval(
+                &GET,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                vec![now(), k.clone()],
+            )
+            .await?;
+        self.decode_value(raw)
+    }
+
+    /// Writes an encoded key for an entry: like `insert` (`PUT`) without a time to live or with a zero one, else `FAST_PUT_WITH_LIMITS` with the time to live only, Redisson's `compute(key, ttl, f)` → `fastPut(key, value, ttl)`.
+    pub(crate) async fn write_encoded(
+        &self,
+        k: &Bytes,
+        v: &V,
+        ttl: Option<Duration>,
+    ) -> Result<()> {
+        let limits = limits(ttl, None)?;
+        let value = self.codec.encode(v)?;
+        if limits.any() {
+            self.fast_put_with_limits(&limits, k.clone(), value, Bytes::new())
+                .await?;
+        } else {
+            self.put(&limits, k.clone(), value).await?;
+        }
+        Ok(())
+    }
+
+    /// Removes an encoded key with `FAST_REMOVE`, publishing `Removed` like [`remove_many`](HashMapCache::remove_many).
+    pub(crate) async fn delete_encoded(&self, k: &Bytes) -> Result<()> {
+        let _: i64 = self
+            .key
+            .core
+            .eval(
+                &FAST_REMOVE,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Removed,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                vec![Bytes::from(PUBLISH), k.clone()],
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl<K, V, C: Codec> HashMapCache<K, V, C> {
+    /// Redisson's `PUT`: replaces the entry, clears its limits and frees a lease on the key. Returns the encoded live value it replaced.
+    async fn put(&self, limits: &Limits, k: Bytes, v: Bytes) -> Result<Option<Bytes>> {
+        self.key
+            .core
+            .eval(
+                &PUT,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Created,
+                    Name::Updated,
+                    Name::LastAccess,
+                    Name::Removed,
+                    Name::Options,
+                    Name::Lease,
+                ]),
+                vec![limits.now(), k, v, Bytes::from(PUBLISH)],
+            )
+            .await
+    }
+
+    /// Redisson's `FAST_PUT_WITH_LIMITS` with the lease `token`, empty for none. Returns whether there was no live entry.
+    async fn fast_put_with_limits(
+        &self,
+        limits: &Limits,
+        k: Bytes,
+        v: Bytes,
+        token: Bytes,
+    ) -> Result<bool> {
+        let inserted: i64 = self
+            .key
+            .core
+            .eval(
+                &FAST_PUT_WITH_LIMITS,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Created,
+                    Name::Updated,
+                    Name::LastAccess,
+                    Name::Removed,
+                    Name::Options,
+                    Name::Lease,
+                ]),
+                limits.arguments(vec![k, v, Bytes::from(PUBLISH), token]),
+            )
+            .await?;
+        Ok(inserted == 1)
     }
 }
 

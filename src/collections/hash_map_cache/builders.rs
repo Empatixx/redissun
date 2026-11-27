@@ -1,10 +1,9 @@
 //! The builders [`HashMapCache`] write methods return: await them, optionally after setting a time limit.
 
-use super::scripts::{
-    FAST_PUT_WITH_LIMITS, PUT, PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS,
-};
+use super::scripts::{PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS};
 use super::{limits, HashMapCache, Name, PUBLISH};
 use crate::codec::Codec;
+use crate::collections::map::entry::{Entry, Target};
 use crate::error::Result;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -86,25 +85,7 @@ where
                     )
                     .await?
             } else {
-                cache
-                    .key
-                    .core
-                    .eval(
-                        &PUT,
-                        cache.redis_keys(&[
-                            Name::Main,
-                            Name::Timeout,
-                            Name::Idle,
-                            Name::Created,
-                            Name::Updated,
-                            Name::LastAccess,
-                            Name::Removed,
-                            Name::Options,
-                            Name::Lease,
-                        ]),
-                        vec![limits.now(), key, value, Bytes::from(PUBLISH)],
-                    )
-                    .await?
+                cache.put(&limits, key, value).await?
             };
             cache.decode_value(previous)
         })
@@ -239,48 +220,12 @@ where
             let value = cache.codec.encode(self.v)?;
             if limits.any() {
                 // An empty lease token: the script then behaves exactly as `PUT_WITH_LIMITS`.
-                let inserted: i64 = cache
-                    .key
-                    .core
-                    .eval(
-                        &FAST_PUT_WITH_LIMITS,
-                        cache.redis_keys(&[
-                            Name::Main,
-                            Name::Timeout,
-                            Name::Idle,
-                            Name::Created,
-                            Name::Updated,
-                            Name::LastAccess,
-                            Name::Removed,
-                            Name::Options,
-                            Name::Lease,
-                        ]),
-                        limits.arguments(vec![key, value, Bytes::from(PUBLISH), Bytes::new()]),
-                    )
-                    .await?;
-                Ok(inserted == 1)
+                cache
+                    .fast_put_with_limits(&limits, key, value, Bytes::new())
+                    .await
             } else {
                 // The script of `insert`; the previous value comes back but is not decoded.
-                let previous: Option<Bytes> = cache
-                    .key
-                    .core
-                    .eval(
-                        &PUT,
-                        cache.redis_keys(&[
-                            Name::Main,
-                            Name::Timeout,
-                            Name::Idle,
-                            Name::Created,
-                            Name::Updated,
-                            Name::LastAccess,
-                            Name::Removed,
-                            Name::Options,
-                            Name::Lease,
-                        ]),
-                        vec![limits.now(), key, value, Bytes::from(PUBLISH)],
-                    )
-                    .await?;
-                Ok(previous.is_none())
+                Ok(cache.put(&limits, key, value).await?.is_none())
             }
         })
     }
@@ -388,6 +333,57 @@ where
                     .await?;
             }
             Ok(())
+        })
+    }
+}
+
+/// A pending [`HashMapCache::entry`]. Await it, optionally after setting [`EntryRequest::ttl`], to take the key's lock and read its value.
+#[must_use = "an entry request does nothing until it is awaited"]
+pub struct EntryRequest<'a, K, V, C: Codec> {
+    cache: &'a HashMapCache<K, V, C>,
+    key: Result<Bytes>,
+    ttl: Option<Duration>,
+}
+
+impl<K, V, C: Codec> fmt::Debug for EntryRequest<'_, K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EntryRequest")
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, K, V, C: Codec> EntryRequest<'a, K, V, C> {
+    pub(super) fn new(cache: &'a HashMapCache<K, V, C>, key: Result<Bytes>) -> Self {
+        Self {
+            cache,
+            key,
+            ttl: None,
+        }
+    }
+
+    /// Makes a write through the entry expire after `ttl`, Redisson's `compute(key, ttl, f)`. Zero means no time to live, and the write clears the entry's limits as without this call.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, K, V, C> IntoFuture for EntryRequest<'a, K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<Entry<'a, K, V, C>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let key = self.key?;
+            // Checked before the lock is taken, so a bad duration fails at once.
+            limits(self.ttl, None)?;
+            Entry::acquire(Target::Cache(self.cache, self.ttl), key).await
         })
     }
 }

@@ -2802,3 +2802,184 @@ async fn keys_with_uses_the_pattern_and_skips_expired() {
         HashMap::from([("a1".to_string(), 1), ("a2".to_string(), 2)])
     );
 }
+
+#[tokio::test]
+async fn per_key_lock_lives_under_the_redisson_name() {
+    let name = unique("cache");
+    let cache = client().await.hash_map_cache::<String, i64>(name.clone());
+    let lock_key = format!("{{{name}}}:IKm9EBQhlzpVIBxUXDHBWw:lock");
+    let guard = cache.lock("key").unwrap().lock().await.unwrap();
+    assert_eq!(raw_command(&["EXISTS", &lock_key]).await, ":1\r\n");
+    guard.unlock().await.unwrap();
+    assert_eq!(raw_command(&["EXISTS", &lock_key]).await, ":0\r\n");
+}
+
+#[tokio::test]
+async fn per_key_semaphore_and_latch_work_on_a_cache() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let semaphore = cache.semaphore("k").unwrap();
+    assert!(semaphore.init_permits(2).await.unwrap());
+    let permits = semaphore.acquire().await.unwrap();
+    assert_eq!(semaphore.available_permits().await.unwrap(), 1);
+    permits.release().await.unwrap();
+    let latch = cache.count_down_latch("k").unwrap();
+    assert!(latch.init_count(1).await.unwrap());
+    latch.count_down().await.unwrap();
+    assert_eq!(latch.count().await.unwrap(), 0);
+    let _ = cache.fair_lock("k").unwrap();
+    let _ = cache.rw_lock("k").unwrap();
+    let _ = cache.permit_expirable_semaphore("k").unwrap();
+}
+
+#[tokio::test]
+async fn entry_with_ttl_inserts_an_expiring_value() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let value = cache
+        .entry("a")
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap()
+        .or_insert(1)
+        .await
+        .unwrap();
+    assert_eq!(value, 1);
+    let left = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left <= Duration::from_millis(300), "{left:?}");
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn entry_without_ttl_clears_the_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache
+        .insert("a", &1)
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    let value = cache
+        .entry("a")
+        .await
+        .unwrap()
+        .and_modify(|v| *v += 1)
+        .or_insert(0)
+        .await
+        .unwrap();
+    assert_eq!(value, 2);
+    assert_eq!(cache.entry_ttl("a").await.unwrap(), None);
+    assert_eq!(cache.get("a").await.unwrap(), Some(2));
+}
+
+#[tokio::test]
+async fn entry_with_ttl_replaces_the_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache
+        .insert("a", &1)
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    let value = cache
+        .entry("a")
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap()
+        .and_modify(|v| *v += 1)
+        .or_insert(0)
+        .await
+        .unwrap();
+    assert_eq!(value, 2);
+    let left = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left <= Duration::from_millis(300), "{left:?}");
+}
+
+#[tokio::test]
+async fn entry_sees_an_expired_entry_as_vacant() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache
+        .insert("a", &1)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(250)).await;
+    let entry = cache.entry("a").await.unwrap();
+    assert!(matches!(entry, redissun::hash_map::Entry::Vacant(_)));
+    assert_eq!(entry.or_insert(7).await.unwrap(), 7);
+    assert_eq!(cache.get("a").await.unwrap(), Some(7));
+}
+
+#[tokio::test]
+async fn entry_remove_publishes_removed() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let mut events = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
+    cache.insert("a", &5).await.unwrap();
+    let redissun::hash_map::Entry::Occupied(entry) = cache.entry("a").await.unwrap() else {
+        panic!("the entry should be occupied");
+    };
+    assert_eq!(entry.remove().await.unwrap(), 5);
+    assert_eq!(
+        next(&mut events).await,
+        EntryEvent::Removed {
+            key: "a".into(),
+            value: 5
+        }
+    );
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn cache_entry_is_atomic_across_tasks() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let tasks: Vec<_> = (0..20)
+        .map(|_| {
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                let entry = cache.entry("k").await.unwrap();
+                tokio::task::yield_now().await;
+                entry.and_modify(|v| *v += 1).or_insert(1).await.unwrap();
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(cache.get("k").await.unwrap(), Some(20));
+}
+
+#[tokio::test]
+async fn a_dropped_cache_entry_releases_the_lock() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    drop(cache.entry("k").await.unwrap());
+    let lock = cache.lock("k").unwrap();
+    for _ in 0..40 {
+        if !lock.is_locked().await.unwrap() {
+            return;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the per-key lock stayed held after the entry was dropped");
+}
+
+#[tokio::test]
+async fn entry_with_a_huge_ttl_is_a_config_error() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let outcome = cache.entry("a").ttl(Duration::MAX).await;
+    assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
+}
