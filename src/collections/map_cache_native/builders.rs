@@ -1,14 +1,15 @@
 //! The builders [`MapCacheNative`] write methods return: await them, optionally after setting a time with `.ttl(d)` or `.expire_at(t)`.
 
 use super::scripts::{
-    EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF, EXPIRE_ENTRY, EXPIRE_ENTRY_IF, FAST_PUT, PUT, PUT_IF_ABSENT,
-    PUT_IF_EXIST,
+    EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF, EXPIRE_ENTRY, EXPIRE_ENTRY_IF, FAST_PUT, PUT, PUT_ALL_TTL,
+    PUT_IF_ABSENT, PUT_IF_EXIST,
 };
 use super::support::{require, Needs};
 use super::ttl::FieldTtl;
 use super::MapCacheNative;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
+use crate::expiry::{expiry_args, Expiry};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -487,3 +488,253 @@ where
         })
     }
 }
+
+/// The time options of the builders for many entries: `ttl`, `expire_at` and `keep_ttl`, the last one set wins.
+macro_rules! many_expiry_options {
+    () => {
+        /// Makes the entries expire `ttl` after the write, on the server's clock. Zero means no time to live. The last of `ttl`, `expire_at` and `keep_ttl` wins.
+        #[doc(alias = "timeToLive")]
+        pub fn ttl(mut self, ttl: Duration) -> Self {
+            self.expiry = if ttl.is_zero() {
+                Expiry::None
+            } else {
+                Expiry::After(ttl)
+            };
+            self
+        }
+
+        /// Makes the entries expire at `time`, on the caller's clock (`HSETEX … PXAT`, Redis 8.0). A time in the past deletes them at once; a time before 1970 is an [`Error::Config`](crate::Error::Config). The last of `ttl`, `expire_at` and `keep_ttl` wins.
+        #[doc(alias = "expireAt")]
+        pub fn expire_at(mut self, time: SystemTime) -> Self {
+            self.expiry = Expiry::At(time);
+            self
+        }
+
+        /// Keeps the time to live of the entries that are overwritten (`HSETEX … KEEPTTL`, Redis 8.0); new entries get none. The last of `ttl`, `expire_at` and `keep_ttl` wins.
+        #[doc(alias = "keepTTL")]
+        pub fn keep_ttl(mut self) -> Self {
+            self.expiry = Expiry::KeepTtl;
+            self
+        }
+    };
+}
+
+/// `HSETEX key [FNX|FXX] [PX ms|PXAT ms|KEEPTTL] FIELDS n k v …`, Redisson's `putAllOperationAsync(PutParams)` and `putAllKeysOperationAsync`.
+fn hsetex<K, V, C: Codec>(
+    map: &MapCacheNative<K, V, C>,
+    condition: Option<&str>,
+    expiry: Option<(&'static str, Option<i64>)>,
+    entries: &[(Bytes, Bytes)],
+) -> redis::Cmd {
+    let mut cmd = map.key.key_cmd("HSETEX");
+    if let Some(condition) = condition {
+        cmd.arg(condition);
+    }
+    if let Some((option, value)) = expiry {
+        cmd.arg(option);
+        if let Some(value) = value {
+            cmd.arg(value);
+        }
+    }
+    cmd.arg("FIELDS")
+        .arg(entries.len())
+        .arg(crate::client::request::binary_pairs(entries));
+    cmd
+}
+
+/// A pending [`MapCacheNative::extend`]. Await it, optionally after [`Extend::batch_size`] and a time.
+#[must_use = "an extend does nothing until it is awaited"]
+pub struct Extend<'a, K, V, C: Codec> {
+    map: &'a MapCacheNative<K, V, C>,
+    encoded: Result<Vec<(Bytes, Bytes)>>,
+    batch_size: usize,
+    expiry: Expiry,
+}
+
+impl<'a, K, V, C: Codec> Extend<'a, K, V, C> {
+    pub(super) fn new(
+        map: &'a MapCacheNative<K, V, C>,
+        encoded: Result<Vec<(Bytes, Bytes)>>,
+    ) -> Self {
+        Self {
+            map,
+            encoded,
+            batch_size: 0,
+            expiry: Expiry::None,
+        }
+    }
+
+    /// Sends one call per `batch_size` entries, in order, Redisson's `putAll(map, batchSize)`. Zero, the default, sends everything at once. The writer gets each batch after Redis stored it.
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    many_expiry_options!();
+}
+
+impl<K, V, C: Codec> fmt::Debug for Extend<'_, K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extend")
+            .field("map", &self.map)
+            .field("batch_size", &self.batch_size)
+            .field("expiry", &self.expiry)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, K, V, C> IntoFuture for Extend<'a, K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<()>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let map = self.map;
+            let entries = self.encoded?;
+            let option = expiry_args(self.expiry)?;
+            if entries.is_empty() {
+                return Ok(());
+            }
+            match self.expiry {
+                Expiry::None => {}
+                Expiry::After(_) => require(&map.key, Needs::FieldTtl).await?,
+                Expiry::At(_) | Expiry::KeepTtl => require(&map.key, Needs::Hsetex).await?,
+            }
+            let size = if self.batch_size == 0 {
+                entries.len()
+            } else {
+                self.batch_size
+            };
+            for batch in entries.chunks(size) {
+                match (self.expiry, option) {
+                    (Expiry::None, _) => {
+                        let mut cmd = map.key.key_cmd("HSET");
+                        cmd.arg(crate::client::request::binary_pairs(batch));
+                        map.key.query::<()>(cmd).await?;
+                    }
+                    (Expiry::After(_), Some((_, Some(ms)))) => {
+                        let mut args = Vec::with_capacity(batch.len() * 2 + 1);
+                        args.push(Bytes::from(ms.to_string()));
+                        for (k, v) in batch {
+                            args.push(k.clone());
+                            args.push(v.clone());
+                        }
+                        map.key
+                            .core
+                            .eval::<()>(&PUT_ALL_TTL, vec![map.key.redis_key()], args)
+                            .await?;
+                    }
+                    (_, option) => {
+                        map.key
+                            .query::<()>(hsetex(map, None, option, batch))
+                            .await?;
+                    }
+                }
+                if let Some(store) = map.map.writer() {
+                    store.written(batch).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `HSETEX key FNX|FXX …` for all entries in one call; the writer gets them all when Redis stored them.
+async fn set_all<K, V, C>(
+    map: &MapCacheNative<K, V, C>,
+    condition: &str,
+    encoded: Result<Vec<(Bytes, Bytes)>>,
+    expiry: Expiry,
+) -> Result<bool>
+where
+    K: Serialize + DeserializeOwned + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    let entries = encoded?;
+    let option = expiry_args(expiry)?;
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    require(&map.key, Needs::Hsetex).await?;
+    let cmd = hsetex(map, Some(condition), option, &entries);
+    let Some(store) = map.map.writer() else {
+        let stored: i64 = map.key.query(cmd).await?;
+        return Ok(stored == 1);
+    };
+    // At most once when a writer waits for the entries: sent again after a lost reply, it would answer 0 and the writer would miss them.
+    let stored: i64 = map.key.query_once(cmd).await?;
+    if stored == 1 {
+        store.written(&entries).await?;
+    }
+    Ok(stored == 1)
+}
+
+/// The all-or-nothing builders for many entries: the struct, `new`, `Debug`, the time options and `IntoFuture` over `HSETEX` with `$condition`.
+macro_rules! all_or_nothing {
+    ($(#[$doc:meta])* $name:ident, $what:literal, $condition:literal) => {
+        $(#[$doc])*
+        #[must_use = concat!("a ", $what, " does nothing until it is awaited")]
+        pub struct $name<'a, K, V, C: Codec> {
+            map: &'a MapCacheNative<K, V, C>,
+            encoded: Result<Vec<(Bytes, Bytes)>>,
+            expiry: Expiry,
+        }
+
+        impl<'a, K, V, C: Codec> $name<'a, K, V, C> {
+            pub(super) fn new(
+                map: &'a MapCacheNative<K, V, C>,
+                encoded: Result<Vec<(Bytes, Bytes)>>,
+            ) -> Self {
+                Self {
+                    map,
+                    encoded,
+                    expiry: Expiry::None,
+                }
+            }
+
+            many_expiry_options!();
+        }
+
+        impl<K, V, C: Codec> fmt::Debug for $name<'_, K, V, C> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("map", &self.map)
+                    .field("expiry", &self.expiry)
+                    .finish_non_exhaustive()
+            }
+        }
+
+        impl<'a, K, V, C> IntoFuture for $name<'a, K, V, C>
+        where
+            K: Serialize + DeserializeOwned + Send + Sync + 'a,
+            V: Serialize + DeserializeOwned + Send + Sync + 'a,
+            C: Codec,
+        {
+            type Output = Result<bool>;
+            type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+            fn into_future(self) -> Self::IntoFuture {
+                Box::pin(set_all(self.map, $condition, self.encoded, self.expiry))
+            }
+        }
+    };
+}
+
+all_or_nothing!(
+    /// A pending [`MapCacheNative::try_extend`]. Await it, optionally after [`TryExtend::ttl`], [`TryExtend::expire_at`] or [`TryExtend::keep_ttl`].
+    TryExtend,
+    "try_extend",
+    "FNX"
+);
+all_or_nothing!(
+    /// A pending [`MapCacheNative::update_many`]. Await it, optionally after [`UpdateMany::ttl`], [`UpdateMany::expire_at`] or [`UpdateMany::keep_ttl`].
+    UpdateMany,
+    "update_many",
+    "FXX"
+);

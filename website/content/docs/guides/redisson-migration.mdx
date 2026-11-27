@@ -446,6 +446,10 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `expireEntriesIfNotSet(keys, ..)`, `expireEntriesIfGreater(keys, ..)`, `expireEntriesIfLess(keys, ..)` | `expire_entries(&[&k, ..])…` with `.if_not_set()`, `.if_greater()`, `.if_less()` |
 | `clearExpire(k)` | `persist_entry(&k)` → `bool` |
 | `clearExpire(Set)` | `persist_entries(&[&k, ..])` → `Vec<bool>` in key order |
+| `putAll(map, Duration)` | `extend(entries).ttl(d)` |
+| `putAll(PutArgs)` with `timeToLive`, `expireAt`, `keepTTL` | `extend(entries).ttl(d)`, `.expire_at(t)`, `.keep_ttl()` (`expire_at` and `keep_ttl` need Redis 8.0) |
+| `putIfAllKeysAbsent(PutArgs)` | `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
+| `putIfAllKeysExist(PutArgs)` | `update_many(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
 
 ## LocalCachedMap
 

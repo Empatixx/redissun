@@ -24,7 +24,9 @@ use std::hash::Hash;
 use std::time::Duration;
 use support::{has_field_ttl, require, Needs};
 
-pub use builders::{ExpireEntries, ExpireEntry, Insert, Replace, Set, TryInsert};
+pub use builders::{
+    ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend, TryInsert, UpdateMany,
+};
 pub(crate) use support::HashFieldSupport;
 
 /// **Experimental.** A distributed map in one Redis hash whose entries can expire on their own, Redisson's `RMapCacheNative`.
@@ -198,6 +200,68 @@ where
         W: Serialize + ?Sized + Sync,
     {
         Replace::new(self, k, v)
+    }
+
+    /// Inserts all entries, in one call unless [`batch_size`](Extend::batch_size) splits them, like [`HashMap::extend`](crate::HashMap::extend), Redisson's `putAll`. Entries are `(&key, &value)` pairs. An empty list sends nothing.
+    ///
+    /// Without a time, the entries are stored without one and lose any TTL they had (`HSET`). With [`ttl`](Extend::ttl) each entry gets that time (Redisson's `putAll(map, ttl)` script, Redis 7.4); [`expire_at`](Extend::expire_at) and [`keep_ttl`](Extend::keep_ttl) send `HSETEX`, which needs Redis 8.0 (Redisson's `putAll(PutArgs)`). With a writer, each batch is written after Redis stored it.
+    #[doc(alias = "putAll")]
+    pub fn extend<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> Extend<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        Extend::new(self, self.encode_entries(entries))
+    }
+
+    /// Stores all entries only when none of the keys is present, in one `HSETEX … FNX`, Redisson's `putIfAllKeysAbsent(PutArgs)`. Returns whether it stored them; when one key is present, nothing changes. An empty list gives `false` without a call. A time is set with [`ttl`](TryExtend::ttl), [`expire_at`](TryExtend::expire_at) or [`keep_ttl`](TryExtend::keep_ttl). With a writer, every entry is written when they were stored. Needs Redis 8.0.
+    #[doc(alias = "putIfAllKeysAbsent")]
+    pub fn try_extend<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> TryExtend<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        TryExtend::new(self, self.encode_entries(entries))
+    }
+
+    /// Overwrites all entries only when every key is present, in one `HSETEX … FXX`, Redisson's `putIfAllKeysExist(PutArgs)`. Returns whether it stored them; when one key is missing, nothing changes. An empty list gives `false` without a call. Without a time the entries lose their TTL; [`keep_ttl`](UpdateMany::keep_ttl) keeps it. With a writer, every entry is written when they were stored. Needs Redis 8.0.
+    #[doc(alias = "putIfAllKeysExist")]
+    pub fn update_many<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> UpdateMany<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        UpdateMany::new(self, self.encode_entries(entries))
+    }
+
+    /// Encodes `(&key, &value)` pairs at once; an error comes back when the builder is awaited.
+    fn encode_entries<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> Result<Vec<(Bytes, Bytes)>>
+    where
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        entries
+            .into_iter()
+            .map(|(k, v)| Ok((self.codec.encode(k)?, self.codec.encode(v)?)))
+            .collect()
     }
 
     /// The time each entry has left, in the order of the keys, Redisson's `remainTimeToLive(keys)`. `None` for an entry without a TTL or a missing one. A key listed twice gives two items. Needs Redis 7.4.

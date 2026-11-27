@@ -33,6 +33,7 @@ mod collections;
 mod coordination;
 mod error;
 mod eviction;
+mod expiry;
 mod keys;
 mod locks;
 mod lua;
@@ -67,7 +68,7 @@ pub mod map_cache_native {
     pub use crate::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};
     pub use crate::collections::map::load::LoadAll;
     pub use crate::collections::map_cache_native::{
-        ExpireEntries, ExpireEntry, Insert, Replace, Set, TryInsert,
+        ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend, TryInsert, UpdateMany,
     };
 }
 
@@ -138,6 +139,7 @@ pub use coordination::permit_semaphore::{PermitExpirableSemaphore, PermitRequest
 pub use coordination::rate_limiter::{RateLimiter, RateLimiterConfig, RateType};
 pub use coordination::semaphore::{Permits, Semaphore};
 pub use error::{Error, Result};
+pub use expiry::Expiry;
 pub use keys::{KeyEvent, KeyEvents, KeyType, Keys, KeysScan, Migrate};
 pub use locks::fair_lock::FairLock;
 pub use locks::fenced_lock::FencedLock;
@@ -161,7 +163,7 @@ pub use values::atomic_i64::{AtomicI64, Comparison};
 pub use values::bit_set::BitSet;
 pub use values::bloom_filter::BloomFilter;
 pub use values::bucket::Bucket;
-pub use values::buckets::{Buckets, Expiry};
+pub use values::buckets::Buckets;
 pub use values::geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
 pub use values::hyper_log_log::HyperLogLog;
 pub use values::id_generator::IdGenerator;

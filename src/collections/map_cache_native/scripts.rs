@@ -48,6 +48,16 @@ pub(super) static PUT_IF_EXIST: LazyLock<Lua> = LazyLock::new(|| {
     )
 });
 
+/// RedissonMapCacheNative.putAllOperationAsync(map, ms): `ARGV` = `[ms, key1, value1, key2, value2, …]`; returns nothing.
+pub(super) static PUT_ALL_TTL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "for i = 2, #ARGV, 2 do \
+         redis.call('hset', KEYS[1], ARGV[i], ARGV[i + 1]); \
+         redis.call('hpexpire', KEYS[1], ARGV[1], 'fields', 1, ARGV[i]); \
+         end; ",
+    )
+});
+
 /// RedissonMap.replaceOperationAsync(key, value), the script of `HashMap::replace`: `ARGV` = `[key, value]`; returns the old value, or nil when the key is missing.
 ///
 /// Deviation from Redisson: it reads the field's `HPTTL` before the `hset` and puts it back with `HPEXPIRE` after, so `replace` keeps the entry's time to live, as `HashMapCache::replace` does. Redisson's `replace` clears it.

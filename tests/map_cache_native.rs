@@ -1197,3 +1197,240 @@ async fn redisson_entry_entry_if_not_set() {
     sleep(ms(1300)).await;
     assert!(!cache.contains_key(&2).await.unwrap());
 }
+
+// --- Task 4: many entries: extend with a time, try_extend, update_many ---
+
+async fn native8(name: &str) -> Native<String, String> {
+    common::redis8_client()
+        .await
+        .map_cache_native(name.to_string())
+}
+
+fn pairs(n: usize) -> Vec<(String, String)> {
+    (0..n).map(|i| (format!("k{i}"), format!("v{i}"))).collect()
+}
+
+#[tokio::test]
+async fn extend_with_ttl_and_batches() {
+    let map = native(&unique("mcn-extend-ttl")).await;
+    let entries = pairs(250);
+    map.extend(entries.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .batch_size(100)
+        .ttl(ms(300))
+        .await
+        .unwrap();
+    assert_eq!(map.len().await.unwrap(), 250);
+    between(map.entry_ttl("k249").await.unwrap(), ms(1), ms(300));
+    sleep(ms(500)).await;
+    for (k, _) in &entries {
+        assert_eq!(map.get(k.as_str()).await.unwrap(), None, "{k}");
+    }
+}
+
+// Review Focus 1: a plain extend makes the entries permanent.
+#[tokio::test]
+async fn extend_without_ttl_clears_it() {
+    let map = native(&unique("mcn-extend-plain")).await;
+    map.insert("a", "1").ttl(secs(60)).await.unwrap();
+    map.extend([("a", "2"), ("b", "3")]).await.unwrap();
+    assert_eq!(map.entry_ttl("a").await.unwrap(), None);
+    assert_eq!(map.get("a").await.unwrap(), s("2"));
+    assert_eq!(map.get("b").await.unwrap(), s("3"));
+}
+
+#[tokio::test]
+async fn extend_with_a_zero_ttl_stores_permanent_entries() {
+    let map = native(&unique("mcn-extend-zero")).await;
+    map.insert("a", "1").ttl(secs(60)).await.unwrap();
+    map.extend([("a", "2"), ("b", "3")])
+        .ttl(Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(map.entry_ttls(&["a", "b"]).await.unwrap(), vec![None, None]);
+    assert_eq!(map.len().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn extend_with_expire_at_and_keep_ttl() {
+    let map = native8(&unique("mcn-extend-at")).await;
+    map.extend([("a", "1"), ("b", "2")])
+        .expire_at(SystemTime::now() + ms(300))
+        .await
+        .unwrap();
+    assert_eq!(map.get("a").await.unwrap(), s("1"));
+    between(map.entry_ttl("b").await.unwrap(), ms(1), ms(300));
+    sleep(ms(500)).await;
+    assert_eq!(map.get("a").await.unwrap(), None);
+    assert_eq!(map.get("b").await.unwrap(), None);
+
+    // Redisson testPutIfAllKeysExistWithKeepTTL's pattern on putAll(PutArgs.keepTTL()).
+    map.insert("c", "old").ttl(secs(30)).await.unwrap();
+    let before = map.entry_ttl("c").await.unwrap().unwrap();
+    map.extend([("c", "new")]).keep_ttl().await.unwrap();
+    assert_eq!(map.get("c").await.unwrap(), s("new"));
+    between(map.entry_ttl("c").await.unwrap(), ms(1), before);
+    // The last setting wins.
+    map.extend([("c", "newer")])
+        .keep_ttl()
+        .ttl(Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(map.entry_ttl("c").await.unwrap(), None);
+}
+
+// Redisson testPutIfAllKeysAbsentWithTimeToLive, testPutIfAllKeysAbsentWithExpireAt, testPutIfAllKeysAbsentExpiration.
+#[tokio::test]
+async fn try_extend_is_all_or_nothing() {
+    let map = native8(&unique("mcn-try-extend")).await;
+    let entries = [("key1", "value1"), ("key2", "value2")];
+    assert!(map.try_extend(entries).ttl(secs(10)).await.unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("value1"));
+    assert_eq!(map.get("key2").await.unwrap(), s("value2"));
+    between(map.entry_ttl("key1").await.unwrap(), secs(9), secs(10));
+
+    let newer = [("key1", "newValue1"), ("key2", "newValue2")];
+    assert!(!map.try_extend(newer).ttl(secs(10)).await.unwrap());
+    assert!(!map
+        .try_extend(newer)
+        .expire_at(SystemTime::now() + secs(10))
+        .await
+        .unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("value1"));
+    assert_eq!(map.get("key2").await.unwrap(), s("value2"));
+
+    map.del().await.unwrap();
+    map.insert("key1", "existingValue1")
+        .ttl(secs(30))
+        .await
+        .unwrap();
+    assert!(!map.try_extend(entries).ttl(secs(10)).await.unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("existingValue1"));
+    assert_eq!(map.get("key2").await.unwrap(), None);
+
+    map.del().await.unwrap();
+    assert!(map
+        .try_extend(entries)
+        .expire_at(SystemTime::now() + secs(10))
+        .await
+        .unwrap());
+    between(map.entry_ttl("key2").await.unwrap(), secs(9), secs(10));
+
+    map.del().await.unwrap();
+    assert!(map.try_extend(entries).ttl(secs(1)).await.unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("value1"));
+    sleep(ms(1100)).await;
+    assert_eq!(map.get("key1").await.unwrap(), None);
+    assert_eq!(map.get("key2").await.unwrap(), None);
+
+    // Without a time the entries are permanent.
+    assert!(map.try_extend(entries).await.unwrap());
+    assert_eq!(map.entry_ttl("key1").await.unwrap(), None);
+}
+
+// Redisson testPutIfAllKeysExistWithTimeToLive, testPutIfAllKeysExistWithExpireAt, testPutIfAllKeysExistWithKeepTTL.
+#[tokio::test]
+async fn update_many_is_all_or_nothing() {
+    let map = native8(&unique("mcn-update-many")).await;
+    let entries = [("key1", "value1"), ("key2", "value2")];
+    assert!(!map.update_many(entries).ttl(secs(10)).await.unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), None);
+    assert_eq!(map.get("key2").await.unwrap(), None);
+
+    map.insert("key1", "oldValue1").ttl(secs(30)).await.unwrap();
+    map.insert("key2", "oldValue2").ttl(secs(30)).await.unwrap();
+    assert!(map.update_many(entries).ttl(secs(10)).await.unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("value1"));
+    assert_eq!(map.get("key2").await.unwrap(), s("value2"));
+    between(map.entry_ttl("key1").await.unwrap(), secs(9), secs(10));
+
+    assert!(map
+        .update_many(entries)
+        .expire_at(SystemTime::now() + secs(20))
+        .await
+        .unwrap());
+    between(map.entry_ttl("key2").await.unwrap(), secs(19), secs(20));
+
+    let before = map.entry_ttl("key1").await.unwrap().unwrap();
+    assert!(map
+        .update_many([("key1", "kept1"), ("key2", "kept2")])
+        .keep_ttl()
+        .await
+        .unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("kept1"));
+    between(map.entry_ttl("key1").await.unwrap(), ms(1), before);
+
+    map.del().await.unwrap();
+    map.insert("key1", "oldValue1").ttl(secs(30)).await.unwrap();
+    assert!(!map.update_many(entries).ttl(secs(10)).await.unwrap());
+    assert!(!map
+        .update_many(entries)
+        .expire_at(SystemTime::now() + secs(10))
+        .await
+        .unwrap());
+    assert_eq!(map.get("key1").await.unwrap(), s("oldValue1"));
+    assert_eq!(map.get("key2").await.unwrap(), None);
+}
+
+// Redisson testPutIfAllKeysAbsentWithEmptyMap.
+#[tokio::test]
+async fn empty_input_sends_nothing() {
+    let map = native8(&unique("mcn-empty")).await;
+    let none: [(&str, &str); 0] = [];
+    assert!(!map.try_extend(none).ttl(secs(10)).await.unwrap());
+    assert!(!map
+        .try_extend(none)
+        .expire_at(SystemTime::now() + secs(10))
+        .await
+        .unwrap());
+    assert!(!map.update_many(none).ttl(secs(10)).await.unwrap());
+    map.extend(none).await.unwrap();
+    map.extend(none).ttl(secs(10)).await.unwrap();
+    map.extend(none).keep_ttl().await.unwrap();
+    assert!(!map.exists().await.unwrap());
+}
+
+// Review Focus 3: on Redis 7.4 the HSETEX methods refuse before they write.
+#[tokio::test]
+async fn hsetex_methods_need_redis_8() {
+    let name = unique("mcn-hsetex-74");
+    let map = native(&name).await;
+    map.insert("a", "1").await.unwrap();
+    for outcome in [
+        map.try_extend([("b", "1")]).await.map(|_| ()),
+        map.try_extend([("b", "1")]).ttl(secs(1)).await.map(|_| ()),
+        map.update_many([("a", "2")]).ttl(secs(1)).await.map(|_| ()),
+        map.extend([("b", "1")]).keep_ttl().await,
+        map.extend([("b", "1")])
+            .expire_at(SystemTime::now() + secs(10))
+            .await,
+    ] {
+        match outcome {
+            Err(Error::Unsupported(message)) => assert!(message.contains("8.0"), "{message}"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+    assert_eq!(raw_command(&["HLEN", &name]).await, ":1\r\n");
+    assert_eq!(map.get("a").await.unwrap(), s("1"));
+    map.extend([("b", "1")]).ttl(secs(1)).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn redisson_put_all_get_ttl() {
+    let map = native(&unique("mcn-simple06")).await;
+    assert_eq!(map.get("33").await.unwrap(), None);
+    assert_eq!(map.get("55").await.unwrap(), None);
+    map.extend([("33", "44"), ("55", "66")])
+        .ttl(secs(2))
+        .await
+        .unwrap();
+    assert_eq!(map.get("33").await.unwrap(), s("44"));
+    assert_eq!(map.get("55").await.unwrap(), s("66"));
+    sleep(secs(1)).await;
+    assert_eq!(map.len().await.unwrap(), 2);
+    assert_eq!(map.get("33").await.unwrap(), s("44"));
+    assert_eq!(map.get("55").await.unwrap(), s("66"));
+    sleep(ms(1050)).await;
+    assert_eq!(map.get("33").await.unwrap(), None);
+    assert_eq!(map.get("55").await.unwrap(), None);
+}
