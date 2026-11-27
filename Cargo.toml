@@ -13,7 +13,6 @@ keywords = ["redis", "redisson", "distributed-lock", "redis-client", "cache"]
 categories = ["asynchronous", "concurrency", "database"]
 
 [dependencies]
-async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
 highway = "1.3"
