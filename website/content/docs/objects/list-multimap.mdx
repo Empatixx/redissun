@@ -1,0 +1,145 @@
+---
+title: ListMultimap
+description: A map whose keys each hold a list of values, Redisson's RListMultimap and RListMultimapCacheNative. Experimental.
+---
+
+**Experimental.** A `ListMultimap` maps each key to a list of values. Values keep the order they were added in, and a key can hold the same value more than once. It is Redisson's `RListMultimap`, with the same data in Redis, so Java and Rust clients share it.
+
+```rust
+let tags = client.list_multimap::<String, String>("tags");
+
+tags.insert("post-1", "rust").await?;
+tags.insert("post-1", "redis").await?;
+let all = tags.get_all("post-1").await?; // ["rust", "redis"]
+```
+
+## Methods
+
+| Method | Redisson | Notes |
+|---|---|---|
+| `insert(&k, &v)` | `put` | appends the value; always `true` |
+| `get_all(&k)` | `getAll` | the values in order, empty for a missing key |
+| `contains_key(&k)` | `containsKey` | whether the key has any values |
+| `len()` | `size` | the values under all keys |
+| `key_len()` | `keySize` | the keys (`HLEN`) |
+| `is_empty()` | `isEmpty` | `len() == 0` |
+| `extend(&k, values)` | `putAll(key, values)` | appends in order; `true` unless there were no values |
+| `remove(&k, &v)` | `remove(key, value)` | removes one occurrence; the key goes with its last value |
+| `remove_all(&k)` | `removeAll` | removes the key and returns its values |
+| `replace_values(&k, values)` | `replaceValues` | returns the old values |
+| `set_values(&k, values)` | `fastReplaceValues` | replaces without reading the old values |
+| `remove_many(&[&k, ..])` | `fastRemove` | how many of the keys were there |
+| `remove_from_all_keys(&[&v, ..])` | `fastRemoveValue` | removes one occurrence of each value per key; how many were removed |
+| `contains_value(&v)`, `contains_entry(&k, &v)` | `containsValue`, `containsEntry` | |
+| `keys_to_vec()` | `readAllKeySet` | every key (`HKEYS`) |
+| `clear()` | `clear`, `delete` | deletes the hash and every list |
+| `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` | `getLock(key)`, … | the objects Redisson keeps per key, under the same names |
+
+## Empty inputs
+
+`extend(&k, [])` sends nothing and returns `false`, so no key is left without values (Redisson's script would add the key to the hash). `replace_values(&k, [])` and `set_values(&k, [])` remove the key, the first returning its old values. `remove_many(&[])` and `remove_from_all_keys(&[])` send nothing and return `0`.
+
+## Streams
+
+| Method | Redisson | Yields |
+|---|---|---|
+| `iter()`, `iter_paged(n)` | `entries()`, `entries(count)` | every `(key, value)` pair |
+| `keys()`, `keys_paged(n)` | `keySet()`, `keySet(count)` | every key |
+| `values()`, `values_paged(n)` | `values()`, `values(count)` | every value of every key |
+
+```rust
+use futures::TryStreamExt;
+
+let pairs: Vec<(String, String)> = tags.iter().try_collect().await?;
+```
+
+The keys are read with `HSCAN … COUNT n`, `n` being the page size (10 by default, as in Redisson; `0` means 10). The values of each key are read with `LRANGE` in pages of 100. Keys without values yield nothing in `iter` and `values`. Like every scan, a stream may miss or repeat entries that change while it runs.
+
+## Values of one key
+
+`get(&k)` returns a `ListMultimapValues` handle on the list of the key, Redisson's `get(key)`. It is lazy: building it sends nothing, and each method is one request.
+
+```rust
+let post = tags.get("post-1")?;
+post.push("tokio").await?;
+let first_two = post.range(..2).await?;
+```
+
+| Method | Redisson | Through |
+|---|---|---|
+| `push(&v)`, `extend(values)` | `add`, `addAll` | the multimap's `insert`/`extend`, so a new key joins the hash |
+| `remove_value(&v)`, `remove_values(values)` | `remove`, `removeAll` | the multimap scripts; the key goes with its last value |
+| `clear()` | `delete` | `remove_many` of the key |
+| `get(i)`, `range(r)`, `to_vec()`, `len()`, `is_empty()`, `contains(&v)`, `position(&v)`, `rposition(&v)`, `contains_all(values)`, `iter()` | `get`, `range`, `readAll`, `size`, `isEmpty`, `contains`, `indexOf`, `lastIndexOf`, `containsAll`, `iterator` | reads of the list |
+| `set`, `replace`, `insert`, `insert_many`, `insert_before`, `insert_after`, `remove(i)`, `pop`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values` | as on [`Vec`](./vec) | writes to the list only |
+
+`as_vec()` returns the raw [`Vec`](./vec) on the values key for the rest of `RList` (`sort`, moves, …). Writes through it do not add the key to the multimap, as with Redisson's inherited `RList` methods. `name()` is the name of the list.
+
+The index writes (`pop`, `remove(i)`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values`) do not touch the hash, as in Redisson. When one empties the list, `contains_key` is `false`, `get_all` is empty and the streams skip the key, but `key_len` and `keys` count it until `remove_all` or `remove_many`. `remove_values` reports `true` and drops the key when it empties the list, also for a value that occurred several times. Redisson's `removeAll` script counts a value only when it occurred exactly once, so it reports `false` there and keeps the key in the hash; redissun fixes that.
+
+## Events
+
+`events()` listens to every change, `events_of(&[MultimapEventKind::ValueAdded, ..])` to some. Both return a `MultimapEvents`; `recv()` waits for the next `MultimapEvent`, `into_stream()` turns it into a stream, and dropping it stops listening (Redisson's `removeListener`).
+
+| Event | Redis event | Redisson listener |
+|---|---|---|
+| `Put { key }` | `hset` on the hash: a write of the key's field, for a new key and for an existing one | `MapPutListener` |
+| `Removed { key }` | `hdel` on the hash (a key went) | `MapRemoveListener` |
+| `ValueAdded { name }` | `rpush` on a list of the multimap | `ListAddListener` |
+| `ValueRemoved { name }` | `lrem` on a list of the multimap | `ListRemoveListener` |
+| `Deleted` | `del` of the hash | `DeletedObjectListener` |
+| `Expired` | `expired` of the hash | `ExpiredObjectListener` |
+
+```rust
+let mut events = tags.events().await?;
+tags.insert("post-1", "rust").await?;
+let event = events.recv().await?; // Put or ValueAdded, in either order
+```
+
+Redis sends these only when `notify-keyspace-events` enables them, as for Redisson: `E` with `h` for `Put` and `Removed`, `l` for the value events, `g` for `Deleted`, `x` for `Expired`. `key` is `Some` only with `T` (Redis 8.8 or newer), otherwise `None`, as Redisson's listeners get `null`. `name` is the list's name, `{name}:<hash>`; value events of other keys are dropped by that prefix, as in Redisson. The prefix test is Redisson's `startsWith`, so listening on `m` also hears the values keys of a multimap named `{m}:x`. `Put` fires whenever a put writes the key's field, so it comes for an existing key too, not only when a key is added. Events of different kinds come from different subscriptions and may arrive in another order than the writes. In a cluster the listener hears the node of the client's pub/sub connection.
+
+## Object methods
+
+The `Object` methods cover the hash and the list of every key, with Redisson's scripts:
+
+| Method | Redisson | Notes |
+|---|---|---|
+| `del()` | `delete` | deletes the hash and every list; `true` when anything was deleted |
+| `expire(ttl)` | `expire` | sets the TTL on the hash and every list |
+| `persist()` | `clearExpire` | clears the TTL of every list; returns whether the hash had one |
+| `rename(new)` | `rename` | renames the hash and every list; fails when the multimap does not exist |
+| `exists()`, `ttl()` | `isExists`, `remainTimeToLive` | read the hash |
+
+The scripts name the lists from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`, or `a` to `{a}2`. Every other method runs on a cluster: the values keys share the slot of the name.
+
+## CacheNative
+
+**Experimental.** `client.list_multimap_cache_native(name)` returns a `ListMultimapCacheNative`, Redisson's `RListMultimapCacheNative`. It is a `ListMultimap` with the same data and methods, plus `expire_key`, which gives one key a time to live with Redis 7.4 hash field expiry:
+
+```rust
+use std::time::Duration;
+
+let sessions = client.list_multimap_cache_native::<String, String>("sessions");
+sessions.insert("user-1", "tab-a").await?;
+sessions.expire_key("user-1", Duration::from_secs(60)).await?; // true: the key exists
+```
+
+| Method | Redisson | Notes |
+|---|---|---|
+| `expire_key(&k, ttl)` | `expireKey(key, ttl, unit)` | `HPEXPIRE` on the key's hash field and `PEXPIRE` on its list, so both expire together; `false` for a missing key |
+| `expire_key(&k, Duration::ZERO)` | — | clears both TTLs (`HPERSIST` + `PERSIST`); Redisson's `hpexpire 0` would delete the field and leave the list behind |
+
+- Only `expire_key` needs Redis 7.4 or newer (or Valkey 9). On an older server it fails with `Error::Unsupported` before writing anything; every other method runs on Redis 6.2.
+- When a key expires, the server removes its field and its list, so `len`, `key_len`, `contains_key` and `get_all` all show it gone.
+- `extend`, `insert` and the handle's writes keep a key's TTL. redissun's `extend` uses `hsetnx` where Redisson's script uses `hset`, which would clear the field's TTL while the list kept its own.
+- `replace_values` and `set_values` make the key permanent, as in Redisson: their scripts rewrite the field and recreate the list.
+- `Object::expire` and `persist` work on the whole multimap, as on the plain type.
+
+## How it is stored
+
+Redisson's layout:
+
+- A hash at the name maps each encoded key to `Hash.hash128toBase64` of the encoded key (a 22-character string, stored as is, not encoded). With `JsonCodec` the key `"key"` maps to `IKm9EBQhlzpVIBxUXDHBWw`.
+- The values of a key live in the list `{name}:<hash>`, or `name:<hash>` when the name already has a `{`. So every key of the multimap is in the slot of the name, also in a cluster, as long as a name with `{` has a valid hash tag. A name like `a{b` or `{}x` has no tag: the hash's slot comes from the whole name and the values keys' slot from another string, so in a cluster the scripts fail with `CROSSSLOT`, as in Redisson.
+
+`remove_from_all_keys` and the index writes of the handle never remove a key from the hash, as in Redisson, so a key whose list they emptied still counts in `key_len` and `keys_to_vec` until `remove_all` or `remove_many`; `contains_key` is `false` and `get_all` is empty for it.

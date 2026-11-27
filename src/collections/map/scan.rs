@@ -98,6 +98,14 @@ where
     V: DeserializeOwned,
     C: Codec,
 {
+    raw_pairs(raw)?
+        .iter()
+        .map(|(field, value)| Ok((codec.decode(field)?, codec.decode(value)?)))
+        .collect()
+}
+
+/// The fields and values of a reply that [`decode_pairs`] reads, as they came.
+pub(crate) fn raw_pairs(raw: redis::Value) -> Result<std::vec::Vec<(Bytes, Bytes)>> {
     let flat: std::vec::Vec<Bytes> = match raw {
         redis::Value::Map(map) => map
             .into_iter()
@@ -119,9 +127,10 @@ where
         }
         other => redis::FromRedisValue::from_redis_value(other)?,
     };
-    flat.as_chunks::<2>()
+    Ok(flat
+        .as_chunks::<2>()
         .0
         .iter()
-        .map(|[field, value]| Ok((codec.decode(field)?, codec.decode(value)?)))
-        .collect()
+        .map(|[field, value]| (field.clone(), value.clone()))
+        .collect())
 }

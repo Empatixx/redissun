@@ -30,6 +30,10 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RMapCache` | `HashMapCache` |
 | `RMapCacheNative` | `MapCacheNative` |
 | `RSetCache` | `HashSetCache` |
+| `RListMultimap` | `ListMultimap` |
+| `RSetMultimap` | `SetMultimap` |
+| `RListMultimapCacheNative` | `ListMultimapCacheNative` |
+| `RSetMultimapCacheNative` | `SetMultimapCacheNative` |
 | `RTopic` | `Topic` |
 | `RPatternTopic` | `PatternTopic` |
 | `RReliableTopic` | `ReliableTopic` |
@@ -455,6 +459,49 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `putAll(PutArgs)` with `timeToLive`, `expireAt`, `keepTTL` | `extend(entries).ttl(d)`, `.expire_at(t)`, `.keep_ttl()` (`expire_at` and `keep_ttl` need Redis 8.0) |
 | `putIfAllKeysAbsent(PutArgs)` | `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
 | `putIfAllKeysExist(PutArgs)` | `update_many(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
+
+## Multimaps
+
+`ListMultimap`, `SetMultimap`, `ListMultimapCacheNative` and `SetMultimapCacheNative` use Redisson's layout and scripts, so Redisson and redissun clients share the data.
+
+| Redisson | redissun |
+|---|---|
+| `redisson.getListMultimap("x")`, `redisson.getSetMultimap("x")` | `client.list_multimap("x")`, `client.set_multimap("x")` |
+| `redisson.getListMultimapCacheNative("x")`, `redisson.getSetMultimapCacheNative("x")` | `client.list_multimap_cache_native("x")`, `client.set_multimap_cache_native("x")` |
+| `expireKey(k, ttl, unit)` (CacheNative) | `expire_key(&k, ttl)` → `bool`; `Duration::ZERO` clears the key's TTL (Redisson's `hpexpire 0` deletes the field instead); Redis 7.4 |
+| `put(k, v)` | `insert(&k, &v)` → `bool` |
+| `getAll(k)` | `get_all(&k)` → `Vec<V>` (also for the set) |
+| `containsKey(k)` | `contains_key(&k)` |
+| `size()` | `len()` |
+| `keySize()` | `key_len()` |
+| `isEmpty()` | `is_empty()` |
+| `putAll(k, values)` | `extend(&k, values)` → `bool`; no values send nothing |
+| `remove(k, v)` | `remove(&k, &v)` |
+| `removeAll(k)` | `remove_all(&k)` → `Vec<V>` |
+| `replaceValues(k, values)` | `replace_values(&k, values)` → `Vec<V>` |
+| `fastReplaceValues(k, values)` | `set_values(&k, values)` |
+| `fastRemove(k...)` | `remove_many(&[&k, ..])` → `usize` |
+| `fastRemoveValue(v...)` | `remove_from_all_keys(&[&v, ..])` → `usize` |
+| `containsValue(v)`, `containsEntry(k, v)` | `contains_value(&v)`, `contains_entry(&k, &v)` |
+| `readAllKeySet()` | `keys_to_vec()` → `Vec<K>` |
+| `entries()`, `entries(count)` | `iter()`, `iter_paged(n)` → `Stream<Item = Result<(K, V)>>` |
+| `keySet()`, `keySet(count)` (iterating) | `keys()`, `keys_paged(n)` |
+| `values()`, `values(count)` (iterating) | `values()`, `values_paged(n)` |
+| `clear()` | `clear()` |
+| `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |
+| `keySet().contains(k)`, `keySet().remove(k)`, `keySet().size()`, `keySet().clear()` | `contains_key(&k)`, `remove_many(&[&k])`, `key_len()`, `clear()` |
+| `entries().contains(e)`, `entries().remove(e)` | `contains_entry(&k, &v)`, `remove(&k, &v)` |
+| `values().contains(v)`, `values().size()` | `contains_value(&v)`, `len()` |
+| `delete()`, `expire(..)`, `clearExpire()`, `rename(n)`, `isExists()`, `remainTimeToLive()` | `Object::del`, `expire`, `persist`, `rename`, `exists`, `ttl`, over the hash and every values key |
+| `get(k)` → `RList` / `RSet` | `get(&k)?` → `ListMultimapValues` / `SetMultimapValues`, lazy |
+| `get(k).add(v)`, `addAll(c)` | `push(&v)`, `extend(values)` (list); `insert(&v)`, `extend(values)` → `usize` (set) |
+| `get(k).remove(v)`, `removeAll(c)`, `retainAll(c)` | `remove_value(&v)`, `remove_values(values)`, `retain_values(values)` (list); `remove(&v)`, `remove_values(&[&v, ..])`, `retain(&[&v, ..])` (set) |
+| `get(k).delete()` | `clear()` |
+| `get(k).readAll()`, `size()`, `contains(v)`, `containsAll(c)`, `iterator()` | `to_vec()`, `len()`, `contains(&v)`, `contains_all(..)`, `iter()` |
+| `get(k).get(i)`, `range(..)`, `indexOf(v)`, `lastIndexOf(v)` (list) | `get(i)`, `range(r)`, `position(&v)`, `rposition(&v)` |
+| `addListener(MapPutListener / MapRemoveListener / ListAddListener / ListRemoveListener / SetAddListener / SetRemoveListener / DeletedObjectListener / ExpiredObjectListener)`, `addListenerAsync(..)` | `events()` or `events_of(&[MultimapEventKind::Put, ..])` → `MultimapEvents` |
+| `removeListener(id)` | drop the `MultimapEvents` |
+| other `RList` / `RSet` methods on `get(k)` | `as_vec()` / `as_set()`, the raw `Vec` / `HashSet`; writes through it do not update the key index |
 
 ## LocalCachedMap
 

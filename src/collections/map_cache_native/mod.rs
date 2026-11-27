@@ -2,7 +2,7 @@
 
 mod builders;
 mod scripts;
-mod support;
+pub(crate) mod support;
 mod ttl;
 
 use crate::codec::Codec;
