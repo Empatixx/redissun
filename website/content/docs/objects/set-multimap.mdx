@@ -1,6 +1,6 @@
 ---
 title: SetMultimap
-description: A map whose keys each hold a set of values, Redisson's RSetMultimap and RSetMultimapCacheNative. Experimental.
+description: A map whose keys each hold a set of values, Redisson's RSetMultimap, RSetMultimapCache and RSetMultimapCacheNative. Experimental.
 ---
 
 **Experimental.** A `SetMultimap` maps each key to a set of values. A key holds each value at most once; values are equal when their encoded bytes are equal. It is Redisson's `RSetMultimap`, with the same data in Redis, so Java and Rust clients share it.
@@ -111,6 +111,29 @@ The `Object` methods cover the hash and the set of every key, with Redisson's sc
 | `exists()`, `ttl()` | `isExists`, `remainTimeToLive` | read the hash |
 
 The scripts name the sets from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`, or `a` to `{a}2`. Every other method runs on a cluster: the values keys share the slot of the name.
+
+## Cache
+
+**Experimental.** `client.set_multimap_cache(name)` returns a `SetMultimapCache`, Redisson's `RSetMultimapCache`. It is a `SetMultimap` with the same data and methods, plus `expire_key`, which gives one key a deadline. The deadlines live in Redisson's ttl zset `{name}:redissun_set_multimap_ttl` (members are the encoded keys, scores Unix milliseconds), so it runs on Redis 6.2:
+
+```rust
+use std::time::Duration;
+
+let carts = client.set_multimap_cache::<String, String>("carts");
+carts.insert("user-1", "book").await?;
+carts.expire_key("user-1", Duration::from_secs(600)).await?; // true: the key exists
+```
+
+| Method | Redisson | Notes |
+|---|---|---|
+| `expire_key(&k, ttl)` | `expireKey(key, ttl, unit)` | records now + `ttl` as the key's score; `false` for a missing key |
+| `expire_key(&k, Duration::ZERO)` | — | removes the key's score, so the key no longer expires |
+
+- The deadline is taken from the client's clock, as in Redisson, and the scripts compare it with the client's clock too. Clients whose clocks disagree see a key expire at different times.
+- Reads of one key hide an expired key at once: `get_all`, `contains_key`, `contains_entry` and the handle from `get`, and also `contains_value`. `len`, `key_len`, `keys_to_vec`, `remove_from_all_keys` and the streams count an expired key until the clean-up task deletes it, as Redisson's unoverridden `size`, `keySize` and iterators do.
+- Writes to a live key keep its deadline. A key that is new to the hash starts without one: redissun's put scripts drop a stale score left by `remove`, `remove_many` or `remove_from_all_keys`, which Redisson's do not, so in Redisson such a key can read as expired at once.
+- `remove_all` drops the key's score, as in Redisson.
+- `Object::del`, `expire` and `persist` cover the ttl zset too, with Redisson's scripts. `rename` renames the ttl zset with the rest, so key TTLs survive it; Redisson's cache does not, and drops them.
 
 ## CacheNative
 

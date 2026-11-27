@@ -83,6 +83,8 @@ async fn main() -> redissun::Result<()> {
 | [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
 | [`ListMultimap`](https://empatixx.github.io/redissun/docs/objects/list-multimap) | hash + one list per key | experimental |
 | [`SetMultimap`](https://empatixx.github.io/redissun/docs/objects/set-multimap) | hash + one set per key | experimental |
+| [`ListMultimapCache`](https://empatixx.github.io/redissun/docs/objects/list-multimap#cache) | hash + one list per key with per-key TTL in a zset | experimental |
+| [`SetMultimapCache`](https://empatixx.github.io/redissun/docs/objects/set-multimap#cache) | hash + one set per key with per-key TTL in a zset | experimental |
 | [`ListMultimapCacheNative`](https://empatixx.github.io/redissun/docs/objects/list-multimap#cachenative) | hash + one list per key with per-key TTL (Redis 7.4+) | experimental |
 | [`SetMultimapCacheNative`](https://empatixx.github.io/redissun/docs/objects/set-multimap#cachenative) | hash + one set per key with per-key TTL (Redis 7.4+) | experimental |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |

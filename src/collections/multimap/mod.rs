@@ -12,7 +12,7 @@ use crate::collections::map::key_hash::hash128_base64;
 use crate::collections::map_cache_native::support::{self, Needs};
 use crate::error::{Error, Result};
 use crate::lua::Lua;
-use crate::object::{millis, suffix_name, Key};
+use crate::object::{millis, now_millis, suffix_name, Key};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -30,7 +30,6 @@ pub(crate) enum Shape {
 
 /// How the keys of a multimap expire.
 #[derive(Clone, Debug)]
-#[expect(dead_code, reason = "the cache variants (PR 3b) build `Cache`")]
 pub(crate) enum Mode {
     /// No key TTLs, Redisson's `RedissonListMultimap`/`RedissonSetMultimap`.
     Plain,
@@ -38,6 +37,32 @@ pub(crate) enum Mode {
     Cache { timeout: Arc<str> },
     /// Key TTLs as hash field TTLs (Redis 7.4), Redisson's `…MultimapCacheNative`.
     Native,
+}
+
+impl Mode {
+    /// The cache mode of the multimap `name`: its ttl zset is Redisson's `getTimeoutSetName`.
+    pub(crate) fn cache(name: &str, shape: Shape) -> Self {
+        Self::Cache {
+            timeout: ttl_name(name, shape).into(),
+        }
+    }
+
+    /// The ttl zset in cache mode.
+    pub(crate) fn timeout(&self) -> Option<&str> {
+        match self {
+            Self::Cache { timeout } => Some(timeout),
+            Self::Plain | Self::Native => None,
+        }
+    }
+}
+
+/// Redisson's `getTimeoutSetName` of the cache variants: `suffix_name(name, "redissun_list_multimap_ttl")` or `"redissun_set_multimap_ttl"`.
+pub(crate) fn ttl_name(name: &str, shape: Shape) -> String {
+    let suffix = match shape {
+        Shape::List => "redissun_list_multimap_ttl",
+        Shape::Set => "redissun_set_multimap_ttl",
+    };
+    suffix_name(name, suffix)
 }
 
 /// Redisson's `Hash.hash128toBase64` of an encoded key: the hash field value and the suffix of the values key.
@@ -79,13 +104,38 @@ pub(crate) fn slot(key: &Key, encoded_key: Bytes, mode: &Mode) -> Slot {
 
 type ScriptCall = (&'static Lua, Vec<String>, Vec<Bytes>);
 
-/// `Object::del`: Redisson's `deleteAsync` over the hash and every values key.
-pub(crate) fn del_script(key: &Key) -> ScriptCall {
-    (
-        &scripts::DELETE,
-        vec![key.redis_key()],
-        vec![Bytes::from(prefix(key.name()))],
-    )
+/// `Object::del`: Redisson's `deleteAsync` over the hash and every values key, and the ttl zset in cache mode.
+pub(crate) fn del_script(key: &Key, mode: &Mode) -> ScriptCall {
+    let args = vec![Bytes::from(prefix(key.name()))];
+    match mode.timeout() {
+        Some(timeout) => (
+            &scripts::CACHE_DELETE,
+            vec![key.redis_key(), timeout.to_string()],
+            args,
+        ),
+        None => (&scripts::DELETE, vec![key.redis_key()], args),
+    }
+}
+
+/// The keys `Object::expire` and `persist` cover besides the hash and the values keys: the ttl zset in cache mode.
+pub(crate) fn companions(mode: &Mode) -> Vec<String> {
+    mode.timeout().map(str::to_string).into_iter().collect()
+}
+
+/// `Object::expire`: Redisson's `expireAsync`, of `RedissonMultimapCache` in cache mode.
+pub(crate) fn expire_script(mode: &Mode) -> &'static Lua {
+    match mode {
+        Mode::Cache { .. } => &scripts::CACHE_EXPIRE,
+        Mode::Plain | Mode::Native => &scripts::EXPIRE,
+    }
+}
+
+/// `Object::persist`: Redisson's `clearExpireAsync`, of `RedissonMultimapCache` in cache mode.
+pub(crate) fn persist_script(mode: &Mode) -> &'static Lua {
+    match mode {
+        Mode::Cache { .. } => &scripts::CACHE_CLEAR_EXPIRE,
+        Mode::Plain | Mode::Native => &scripts::CLEAR_EXPIRE,
+    }
 }
 
 /// The arguments of `EXPIRE` after the milliseconds: the prefix and no `PEXPIRE` option.
@@ -98,17 +148,23 @@ pub(crate) fn persist_args(key: &Key) -> Vec<Bytes> {
     vec![Bytes::from(prefix(key.name()))]
 }
 
-/// `Object::rename`: Redisson's `renameAsync`, which renames the hash and every values key.
-pub(crate) fn rename_script(key: &Key, new_name: &str) -> ScriptCall {
-    (
-        &scripts::RENAME,
-        vec![key.redis_key()],
-        vec![
-            Bytes::from(prefix(key.name())),
-            Bytes::from(prefix(new_name)),
-            Bytes::from(new_name.to_string()),
-        ],
-    )
+/// `Object::rename`: Redisson's `renameAsync`, which renames the hash and every values key, and in cache mode the ttl zset too (D4).
+pub(crate) fn rename_script(key: &Key, mode: &Mode, shape: Shape, new_name: &str) -> ScriptCall {
+    let args = vec![
+        Bytes::from(prefix(key.name())),
+        Bytes::from(prefix(new_name)),
+        Bytes::from(new_name.to_string()),
+    ];
+    match mode.timeout() {
+        Some(timeout) => (
+            &scripts::CACHE_RENAME,
+            vec![key.redis_key(), timeout.to_string()],
+            args.into_iter()
+                .chain(std::iter::once(Bytes::from(ttl_name(new_name, shape))))
+                .collect(),
+        ),
+        None => (&scripts::RENAME, vec![key.redis_key()], args),
+    }
 }
 
 /// The operations of a multimap, on encoded keys and values. The public types decode what they return.
@@ -134,6 +190,18 @@ impl<C: Codec> Ops<'_, C> {
         vec![slot.map.redis_key(), slot.values.redis_key()]
     }
 
+    /// The hash, the values key and, in cache mode, the ttl zset: the KEYS of the write scripts.
+    fn write_keys(&self, slot: &Slot) -> Vec<String> {
+        let mut keys = Self::slot_keys(slot);
+        keys.extend(self.mode.timeout().map(str::to_string));
+        keys
+    }
+
+    /// The client clock, Redisson's `System.currentTimeMillis()`, as a script argument.
+    fn now_arg() -> Bytes {
+        Bytes::from(now_millis().to_string())
+    }
+
     /// `put`: list always `true`, set `true` when the value is new.
     pub(crate) async fn insert(&self, slot: &Slot, value: Bytes) -> Result<bool> {
         let args = vec![
@@ -142,21 +210,34 @@ impl<C: Codec> Ops<'_, C> {
             value,
         ];
         let core = &self.key.core;
-        let added: i64 = match self.shape {
-            Shape::List => {
-                core.eval_once(&scripts::LIST_PUT, Self::slot_keys(slot), args)
-                    .await?
-            }
-            Shape::Set => {
-                core.eval(&scripts::SET_PUT, Self::slot_keys(slot), args)
-                    .await?
-            }
+        let keys = self.write_keys(slot);
+        let cache = self.mode.timeout().is_some();
+        let added: i64 = match (self.shape, cache) {
+            (Shape::List, false) => core.eval_once(&scripts::LIST_PUT, keys, args).await?,
+            (Shape::List, true) => core.eval_once(&scripts::CACHE_LIST_PUT, keys, args).await?,
+            (Shape::Set, false) => core.eval(&scripts::SET_PUT, keys, args).await?,
+            (Shape::Set, true) => core.eval(&scripts::CACHE_SET_PUT, keys, args).await?,
         };
         Ok(added > 0)
     }
 
-    /// `getAll`: `LRANGE v 0 -1` or `SMEMBERS v`.
+    /// `getAll`: `LRANGE v 0 -1` or `SMEMBERS v`; in cache mode Redisson's script, empty for an expired key.
     pub(crate) async fn get_all(&self, slot: &Slot) -> Result<Vec<Bytes>> {
+        if let Some(timeout) = self.mode.timeout() {
+            let script = match self.shape {
+                Shape::List => &scripts::CACHE_LIST_GET_ALL,
+                Shape::Set => &scripts::CACHE_SET_GET_ALL,
+            };
+            return self
+                .key
+                .core
+                .eval(
+                    script,
+                    vec![slot.values.redis_key(), timeout.to_string()],
+                    vec![Self::now_arg(), slot.encoded_key.clone()],
+                )
+                .await;
+        }
         let cmd = match self.shape {
             Shape::List => {
                 let mut cmd = slot.values.key_cmd("LRANGE");
@@ -168,8 +249,28 @@ impl<C: Codec> Ops<'_, C> {
         slot.values.read(cmd).await
     }
 
-    /// `containsKey`: the values key holds anything (`LLEN`/`SCARD` > 0).
+    /// `containsKey`: the values key holds anything (`LLEN`/`SCARD` > 0); in cache mode also that the key has not expired.
     pub(crate) async fn contains_key(&self, slot: &Slot) -> Result<bool> {
+        if let Some(timeout) = self.mode.timeout() {
+            let script = match self.shape {
+                Shape::List => &scripts::CACHE_LIST_CONTAINS_KEY,
+                Shape::Set => &scripts::CACHE_SET_CONTAINS_KEY,
+            };
+            let found: i64 = self
+                .key
+                .core
+                .eval(
+                    script,
+                    vec![self.key.redis_key(), timeout.to_string()],
+                    vec![
+                        Self::now_arg(),
+                        slot.encoded_key.clone(),
+                        Bytes::from(slot.values.redis_key()),
+                    ],
+                )
+                .await?;
+            return Ok(found == 1);
+        }
         let cmd = match self.shape {
             Shape::List => slot.values.key_cmd("LLEN"),
             Shape::Set => slot.values.key_cmd("SCARD"),
@@ -235,17 +336,23 @@ impl<C: Codec> Ops<'_, C> {
             return Ok(0);
         }
         let core = &self.key.core;
-        let keys = Self::slot_keys(slot);
+        let keys = self.write_keys(slot);
         let args = Self::key_and_values(slot, values);
-        let native = matches!(self.mode, Mode::Native);
-        match (self.shape, native) {
-            (Shape::List, false) => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await,
-            (Shape::List, true) => {
+        match (self.shape, self.mode) {
+            (Shape::List, Mode::Plain) => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await,
+            (Shape::List, Mode::Native) => {
                 core.eval_once(&scripts::NATIVE_LIST_PUT_ALL, keys, args)
                     .await
             }
-            (Shape::Set, false) => core.eval(&scripts::SET_PUT_ALL, keys, args).await,
-            (Shape::Set, true) => core.eval(&scripts::NATIVE_SET_PUT_ALL, keys, args).await,
+            (Shape::List, Mode::Cache { .. }) => {
+                core.eval_once(&scripts::CACHE_LIST_PUT_ALL, keys, args)
+                    .await
+            }
+            (Shape::Set, Mode::Plain) => core.eval(&scripts::SET_PUT_ALL, keys, args).await,
+            (Shape::Set, Mode::Native) => core.eval(&scripts::NATIVE_SET_PUT_ALL, keys, args).await,
+            (Shape::Set, Mode::Cache { .. }) => {
+                core.eval(&scripts::CACHE_SET_PUT_ALL, keys, args).await
+            }
         }
     }
 
@@ -267,17 +374,20 @@ impl<C: Codec> Ops<'_, C> {
         Ok(removed > 0)
     }
 
-    /// `removeAll(K)`: the values the key held.
+    /// `removeAll(K)`: the values the key held; in cache mode its score goes too.
     pub(crate) async fn remove_all(&self, slot: &Slot) -> Result<Vec<Bytes>> {
-        let script = match self.shape {
-            Shape::List => &scripts::LIST_REMOVE_ALL,
-            Shape::Set => &scripts::SET_REMOVE_ALL,
+        let cache = self.mode.timeout().is_some();
+        let script = match (self.shape, cache) {
+            (Shape::List, false) => &scripts::LIST_REMOVE_ALL,
+            (Shape::List, true) => &scripts::CACHE_LIST_REMOVE_ALL,
+            (Shape::Set, false) => &scripts::SET_REMOVE_ALL,
+            (Shape::Set, true) => &scripts::CACHE_SET_REMOVE_ALL,
         };
         self.key
             .core
             .eval(
                 script,
-                Self::slot_keys(slot),
+                self.write_keys(slot),
                 vec![slot.encoded_key.clone()],
             )
             .await
@@ -293,14 +403,23 @@ impl<C: Codec> Ops<'_, C> {
             return self.remove_all(slot).await;
         }
         let core = &self.key.core;
-        let keys = Self::slot_keys(slot);
+        let keys = self.write_keys(slot);
         let args = Self::key_and_values(slot, values);
-        match self.shape {
-            Shape::List => {
+        let cache = self.mode.timeout().is_some();
+        match (self.shape, cache) {
+            (Shape::List, false) => {
                 core.eval_once(&scripts::LIST_REPLACE_VALUES, keys, args)
                     .await
             }
-            Shape::Set => core.eval(&scripts::SET_REPLACE_VALUES, keys, args).await,
+            (Shape::List, true) => {
+                core.eval_once(&scripts::CACHE_LIST_REPLACE_VALUES, keys, args)
+                    .await
+            }
+            (Shape::Set, false) => core.eval(&scripts::SET_REPLACE_VALUES, keys, args).await,
+            (Shape::Set, true) => {
+                core.eval(&scripts::CACHE_SET_REPLACE_VALUES, keys, args)
+                    .await
+            }
         }
     }
 
@@ -311,15 +430,24 @@ impl<C: Codec> Ops<'_, C> {
             return Ok(());
         }
         let core = &self.key.core;
-        let keys = Self::slot_keys(slot);
+        let keys = self.write_keys(slot);
         let args = Self::key_and_values(slot, values);
-        let () = match self.shape {
-            Shape::List => {
+        let cache = self.mode.timeout().is_some();
+        let () = match (self.shape, cache) {
+            (Shape::List, false) => {
                 core.eval_once(&scripts::LIST_FAST_REPLACE_VALUES, keys, args)
                     .await?
             }
-            Shape::Set => {
+            (Shape::List, true) => {
+                core.eval_once(&scripts::CACHE_LIST_FAST_REPLACE_VALUES, keys, args)
+                    .await?
+            }
+            (Shape::Set, false) => {
                 core.eval(&scripts::SET_FAST_REPLACE_VALUES, keys, args)
+                    .await?
+            }
+            (Shape::Set, true) => {
+                core.eval(&scripts::CACHE_SET_FAST_REPLACE_VALUES, keys, args)
                     .await?
             }
         };
@@ -354,8 +482,24 @@ impl<C: Codec> Ops<'_, C> {
             .await
     }
 
-    /// `containsValue`: whether any key holds the value.
+    /// `containsValue`: whether any key holds the value; in cache mode expired keys are skipped.
     pub(crate) async fn contains_value(&self, value: Bytes) -> Result<bool> {
+        if let Some(timeout) = self.mode.timeout() {
+            let script = match self.shape {
+                Shape::List => &scripts::CACHE_LIST_CONTAINS_VALUE,
+                Shape::Set => &scripts::CACHE_SET_CONTAINS_VALUE,
+            };
+            let found: i64 = self
+                .key
+                .core
+                .eval(
+                    script,
+                    vec![self.key.redis_key(), timeout.to_string()],
+                    vec![value, Self::now_arg(), self.prefix_arg()],
+                )
+                .await?;
+            return Ok(found == 1);
+        }
         let script = match self.shape {
             Shape::List => &scripts::LIST_CONTAINS_VALUE,
             Shape::Set => &scripts::SET_CONTAINS_VALUE,
@@ -372,8 +516,24 @@ impl<C: Codec> Ops<'_, C> {
         Ok(found == 1)
     }
 
-    /// `containsEntry`: the list script, or `SISMEMBER` on the values key.
+    /// `containsEntry`: the list script, or `SISMEMBER` on the values key; in cache mode Redisson's script, `false` for an expired key.
     pub(crate) async fn contains_entry(&self, slot: &Slot, value: Bytes) -> Result<bool> {
+        if let Some(timeout) = self.mode.timeout() {
+            let script = match self.shape {
+                Shape::List => &scripts::CACHE_LIST_CONTAINS_ENTRY,
+                Shape::Set => &scripts::CACHE_SET_CONTAINS_ENTRY,
+            };
+            let found: i64 = self
+                .key
+                .core
+                .eval(
+                    script,
+                    vec![slot.values.redis_key(), timeout.to_string()],
+                    vec![Self::now_arg(), slot.encoded_key.clone(), value],
+                )
+                .await?;
+            return Ok(found == 1);
+        }
         let found: i64 = match self.shape {
             Shape::List => {
                 self.key
@@ -399,13 +559,32 @@ impl<C: Codec> Ops<'_, C> {
         self.key.read(self.key.key_cmd("HKEYS")).await
     }
 
-    /// `expireKey` of the native variants: sets the TTL of the key's field and values key (`HPEXPIRE` + `PEXPIRE`), or clears both for a zero TTL. Whether the key exists. Needs Redis 7.4, checked before the write; `type_name` names the type in the error.
+    /// `expireKey`. Whether the key exists.
+    ///
+    /// In cache mode it records the deadline `now + ttl` (client clock) as the key's score in the ttl zset, or drops the score for a zero TTL. In native mode it sets the TTL of the key's field and values key (`HPEXPIRE` + `PEXPIRE`), or clears both for a zero TTL; that needs Redis 7.4, checked before the write, and `type_name` names the type in the error.
     pub(crate) async fn expire_key(
         &self,
         slot: &Slot,
         ttl: Duration,
         type_name: &str,
     ) -> Result<bool> {
+        if let Some(timeout) = self.mode.timeout() {
+            let deadline = if ttl.is_zero() {
+                0
+            } else {
+                now_millis().saturating_add(millis(ttl)?)
+            };
+            let done: i64 = self
+                .key
+                .core
+                .eval(
+                    &scripts::CACHE_EXPIRE_KEY,
+                    vec![self.key.redis_key(), timeout.to_string()],
+                    vec![Bytes::from(deadline.to_string()), slot.encoded_key.clone()],
+                )
+                .await?;
+            return Ok(done == 1);
+        }
         support::require(self.key, Needs::FieldTtl)
             .await
             .map_err(|error| match error {
@@ -435,9 +614,9 @@ impl<C: Codec> Ops<'_, C> {
         Ok(done == 1)
     }
 
-    /// `delete`: the hash and every values key; whether any key was deleted.
+    /// `delete`: the hash and every values key (and the ttl zset in cache mode); whether any key was deleted.
     pub(crate) async fn delete(&self) -> Result<bool> {
-        let (script, keys, args) = del_script(self.key);
+        let (script, keys, args) = del_script(self.key, self.mode);
         let deleted: i64 = self.key.core.eval(script, keys, args).await?;
         Ok(deleted > 0)
     }
@@ -476,6 +655,10 @@ macro_rules! multimap_type {
                 &self.key
             }
 
+            fn companions(&self) -> ::std::vec::Vec<String> {
+                $crate::collections::multimap::companions(&self.mode)
+            }
+
             fn del_script(
                 &self,
             ) -> Option<(
@@ -483,11 +666,13 @@ macro_rules! multimap_type {
                 ::std::vec::Vec<String>,
                 ::std::vec::Vec<::bytes::Bytes>,
             )> {
-                Some($crate::collections::multimap::del_script(&self.key))
+                Some($crate::collections::multimap::del_script(
+                    &self.key, &self.mode,
+                ))
             }
 
             fn expire_script(&self) -> Option<&'static $crate::lua::Lua> {
-                Some(&$crate::collections::multimap::scripts::EXPIRE)
+                Some($crate::collections::multimap::expire_script(&self.mode))
             }
 
             fn expire_args(&self) -> ::std::vec::Vec<::bytes::Bytes> {
@@ -495,7 +680,7 @@ macro_rules! multimap_type {
             }
 
             fn persist_script(&self) -> Option<&'static $crate::lua::Lua> {
-                Some(&$crate::collections::multimap::scripts::CLEAR_EXPIRE)
+                Some($crate::collections::multimap::persist_script(&self.mode))
             }
 
             fn persist_args(&self) -> ::std::vec::Vec<::bytes::Bytes> {
@@ -511,7 +696,7 @@ macro_rules! multimap_type {
                 ::std::vec::Vec<::bytes::Bytes>,
             )> {
                 Some($crate::collections::multimap::rename_script(
-                    &self.key, new_name,
+                    &self.key, &self.mode, $shape, new_name,
                 ))
             }
         }
@@ -925,6 +1110,58 @@ multimap_type!(
     "getSetMultimapCacheNative"
 );
 native_expire_key!(SetMultimapCacheNative);
+
+/// Adds `expire_key` over Redisson's ttl zset to a cache multimap type.
+macro_rules! cache_expire_key {
+    ($name:ident) => {
+        impl<K, V, C> $name<K, V, C>
+        where
+            K: ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync,
+            V: ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync,
+            C: $crate::codec::Codec,
+        {
+            /// Sets the time to live of the key `k`, Redisson's `expireKey`: it records the deadline, now plus `ttl` on the client's clock (as in Redisson), as the key's score in the multimap's ttl zset. [`Duration::ZERO`](::std::time::Duration::ZERO) removes the key's TTL instead. Returns whether the key exists.
+            ///
+            /// Reads of one key ([`get_all`](Self::get_all), [`contains_key`](Self::contains_key), [`contains_entry`](Self::contains_entry), the handle from [`get`](Self::get)) and [`contains_value`](Self::contains_value) hide an expired key at once. [`len`](Self::len), [`key_len`](Self::key_len), [`keys_to_vec`](Self::keys_to_vec), [`remove_from_all_keys`](Self::remove_from_all_keys) and the streams count it until the clean-up task deletes it, as in Redisson. Writes to a live key keep its TTL; a key that is new to the multimap starts without one.
+            #[doc(alias = "expireKey")]
+            pub async fn expire_key<Q>(
+                &self,
+                k: &Q,
+                ttl: ::std::time::Duration,
+            ) -> $crate::error::Result<bool>
+            where
+                K: ::std::borrow::Borrow<Q>,
+                Q: ::serde::Serialize + ?Sized + Sync,
+            {
+                let ops = self.ops();
+                let slot = ops.slot(k)?;
+                ops.expire_key(&slot, ttl, stringify!($name)).await
+            }
+        }
+    };
+}
+
+multimap_type!(
+    /// **Experimental.** A [`ListMultimap`] whose keys can expire one by one, Redisson's `RListMultimapCache`. [`expire_key`](Self::expire_key) gives a key a deadline, kept in Redisson's ttl zset `{name}:redissun_list_multimap_ttl`; a background task deletes expired keys. It runs on Redis 6.2.
+    ///
+    /// It uses Redisson's layout, so Redisson clients read and write the same data. Get one with [`Client::list_multimap_cache`](crate::Client::list_multimap_cache).
+    ListMultimapCache,
+    ListMultimapValues,
+    Shape::List,
+    "getListMultimapCache"
+);
+cache_expire_key!(ListMultimapCache);
+
+multimap_type!(
+    /// **Experimental.** A [`SetMultimap`] whose keys can expire one by one, Redisson's `RSetMultimapCache`. [`expire_key`](Self::expire_key) gives a key a deadline, kept in Redisson's ttl zset `{name}:redissun_set_multimap_ttl`; a background task deletes expired keys. It runs on Redis 6.2.
+    ///
+    /// It uses Redisson's layout, so Redisson clients read and write the same data. Get one with [`Client::set_multimap_cache`](crate::Client::set_multimap_cache).
+    SetMultimapCache,
+    SetMultimapValues,
+    Shape::Set,
+    "getSetMultimapCache"
+);
+cache_expire_key!(SetMultimapCache);
 
 #[cfg(test)]
 mod tests {
