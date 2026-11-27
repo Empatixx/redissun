@@ -144,7 +144,8 @@ pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
 pub use collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 pub use collections::multimap::events::{MultimapEvent, MultimapEventKind};
 pub use collections::multimap::{
-    ListMultimap, ListMultimapCacheNative, SetMultimap, SetMultimapCacheNative,
+    ListMultimap, ListMultimapCache, ListMultimapCacheNative, SetMultimap, SetMultimapCache,
+    SetMultimapCacheNative,
 };
 pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;

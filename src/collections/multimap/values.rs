@@ -2,13 +2,14 @@
 //!
 //! A handle is lazy: building it sends nothing. Writes that can add or remove the key go through the multimap scripts, so the key index (the hash) stays right. Reads and index writes go to the existing [`crate::Vec`] or [`crate::HashSet`] on the values key.
 
-use super::{scripts, Mode, Ops, Shape, Slot};
+use super::{scripts, Ops, Shape, Slot};
 use crate::codec::Codec;
-use crate::collections::{hash_set::HashSet, vec::Vec};
-use crate::error::Result;
-use crate::object::Key;
+use crate::collections::{hash_set::HashSet, list, vec::Vec};
+use crate::error::{Error, Result};
+use crate::lua::Lua;
+use crate::object::{now_millis, Key};
 use bytes::Bytes;
-use futures::Stream;
+use futures::{stream, Stream, StreamExt, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -25,10 +26,59 @@ fn ops<'a, C: Codec>(slot: &'a Slot, codec: &'a C, shape: Shape) -> Ops<'a, C> {
     }
 }
 
+/// The page size of the cache list handle's `iter`, as `Vec::iter`.
+const LIST_PAGE: i64 = 100;
+/// The `SSCAN` count of the cache set handle's `iter`, Redisson's `iterator()` (10).
+const SET_PAGE: usize = 10;
+
+/// ARGV that the cache handle scripts start with: the client clock, Redisson's `System.currentTimeMillis()`, and the encoded key.
+fn now_and_key(slot: &Slot) -> std::vec::Vec<Bytes> {
+    vec![
+        Bytes::from(now_millis().to_string()),
+        slot.encoded_key.clone(),
+    ]
+}
+
+/// Runs a script of `RedissonListMultimapValues`/`RedissonSetMultimapValues`: KEYS are the ttl zset and the values key.
+async fn cache_eval<R: redis::FromRedisValue>(
+    slot: &Slot,
+    timeout: &str,
+    script: &'static Lua,
+    args: std::vec::Vec<Bytes>,
+) -> Result<R> {
+    slot.map
+        .core
+        .eval(
+            script,
+            vec![timeout.to_string(), slot.values.redis_key()],
+            args,
+        )
+        .await
+}
+
+/// A cache handle script whose ARGV are the clock, the key and `values`.
+async fn cache_eval_values<R: redis::FromRedisValue>(
+    slot: &Slot,
+    timeout: &str,
+    script: &'static Lua,
+    values: std::vec::Vec<Bytes>,
+) -> Result<R> {
+    let args = now_and_key(slot).into_iter().chain(values).collect();
+    cache_eval(slot, timeout, script, args).await
+}
+
 /// `removeAll(values)` of `InnerList`/`InnerSet`: whether any value was removed; the key goes when its values do. No values send nothing.
 async fn remove_values(slot: &Slot, shape: Shape, values: std::vec::Vec<Bytes>) -> Result<bool> {
     if values.is_empty() {
         return Ok(false);
+    }
+    if let Some(timeout) = slot.mode.timeout() {
+        let script = match shape {
+            Shape::List => &scripts::LV_REMOVE_ALL,
+            Shape::Set => &scripts::SV_REMOVE_ALL,
+        };
+        let removed: i64 = cache_eval_values(slot, timeout, script, values).await?;
+        return Ok(removed == 1);
     }
     let script = match shape {
         Shape::List => &scripts::LIST_VALUES_REMOVE_ALL,
@@ -49,9 +99,38 @@ async fn remove_values(slot: &Slot, shape: Shape, values: std::vec::Vec<Bytes>) 
     Ok(removed == 1)
 }
 
-/// **Experimental.** The values of one key of a [`ListMultimap`](crate::ListMultimap) or [`ListMultimapCacheNative`](crate::ListMultimapCacheNative), Redisson's `RList` from `get(key)`. Get one with `get(&k)`.
+/// `LV_RANGE`: the values from `start` to `stop` (inclusive, `-1` for the end); nothing for an expired key.
+async fn cache_range(
+    slot: &Slot,
+    timeout: &str,
+    start: i64,
+    stop: i64,
+) -> Result<std::vec::Vec<Bytes>> {
+    let args = now_and_key(slot)
+        .into_iter()
+        .chain([
+            Bytes::from(start.to_string()),
+            Bytes::from(stop.to_string()),
+        ])
+        .collect();
+    cache_eval(slot, timeout, &scripts::LV_RANGE, args).await
+}
+
+/// The handle's `clear`: the multimap's `remove_all` of the key in cache mode (D9), which also drops its score, and `remove_many` otherwise.
+async fn clear<C: Codec>(ops: &Ops<'_, C>, slot: &Slot) -> Result<()> {
+    if slot.mode.timeout().is_some() {
+        ops.remove_all(slot).await?;
+    } else {
+        ops.remove_many(std::slice::from_ref(slot)).await?;
+    }
+    Ok(())
+}
+
+/// **Experimental.** The values of one key of a [`ListMultimap`](crate::ListMultimap), [`ListMultimapCache`](crate::ListMultimapCache) or [`ListMultimapCacheNative`](crate::ListMultimapCacheNative), Redisson's `RList` from `get(key)`. Get one with `get(&k)`.
 ///
 /// The handle is lazy: building it sends nothing. [`push`](Self::push), [`extend`](Self::extend), [`remove_value`](Self::remove_value), [`remove_values`](Self::remove_values) and [`clear`](Self::clear) go through the multimap, so a new key joins the key index and a key whose last value goes leaves it. Reads and index writes run on the list itself. An index write that empties the list ([`pop`](Self::pop), [`remove`](Self::remove), [`trim`](Self::trim), [`retain_values`](Self::retain_values)) keeps the key in the index, as in Redisson: [`contains_key`](crate::ListMultimap::contains_key) is `false`, but `key_len` and `keys` count it until `remove_all` or `remove_many` removes it.
+///
+/// On a [`ListMultimapCache`](crate::ListMultimapCache) the reads, [`remove_value`](Self::remove_value), [`remove_value_n`](Self::remove_value_n), [`remove_value_all`](Self::remove_value_all), [`remove_values`](Self::remove_values) and [`retain_values`](Self::retain_values) run Redisson's TTL-aware scripts: an expired key reads as empty and these writes leave it alone. Those removals do not take the key out of the index when they empty the list, as in Redisson. [`push`](Self::push) and [`extend`](Self::extend) go through the multimap, so a new key joins the index (Redisson's cache handle writes the list only), and [`clear`](Self::clear) is the multimap's `remove_all`, which also drops the key's TTL. The index writes (`set`, `insert`, `remove`, `pop`, `trim`, …) do not check the TTL, as in Redisson.
 pub struct ListMultimapValues<V, C: Codec> {
     slot: Slot,
     list: Vec<V, C>,
@@ -110,11 +189,7 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let v = self.codec.encode(v)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.ops().insert(&self.slot, v).await?;
-            }
-        }
+        self.ops().insert(&self.slot, v).await?;
         Ok(())
     }
 
@@ -127,41 +202,62 @@ where
     {
         let ops = self.ops();
         let values = ops.encode_values(values)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                ops.extend(&self.slot, values).await?;
-            }
-        }
+        ops.extend(&self.slot, values).await?;
         Ok(())
     }
 
     /// The value at the index, or `None` past the end.
     pub async fn get(&self, index: usize) -> Result<Option<V>> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.get(index).await,
-        }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.list.get(index).await;
+        };
+        let Ok(index) = i64::try_from(index) else {
+            return Ok(None);
+        };
+        let args = vec![
+            Bytes::from(now_millis().to_string()),
+            Bytes::from(index.to_string()),
+            self.slot.encoded_key.clone(),
+        ];
+        let raw: Option<Bytes> = cache_eval(&self.slot, timeout, &scripts::LV_GET, args).await?;
+        raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
     /// The values in the range, as [`Vec::range`](crate::Vec::range). Redisson's inclusive `range(1, 3)` is `range(1..=3)`, and `range(2)` is `range(..=2)`.
     pub async fn range(&self, range: impl RangeBounds<usize>) -> Result<std::vec::Vec<V>> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.range(range).await,
-        }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.list.range(range).await;
+        };
+        let Some((start, stop)) = list::bounds(range) else {
+            return Ok(std::vec::Vec::new());
+        };
+        let raw = cache_range(&self.slot, timeout, start, stop).await?;
+        self.ops().decode_all(raw)
     }
 
     /// Every value in order, Redisson's `readAll`.
     #[doc(alias = "readAll")]
     pub async fn to_vec(&self) -> Result<std::vec::Vec<V>> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.to_vec().await,
+        match self.slot.mode.timeout() {
+            Some(_) => self.range(..).await,
+            None => self.list.to_vec().await,
         }
     }
 
     /// The number of values, Redisson's `size`.
     #[doc(alias = "size")]
     pub async fn len(&self) -> Result<usize> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.len().await,
+        match self.slot.mode.timeout() {
+            Some(timeout) => {
+                cache_eval(
+                    &self.slot,
+                    timeout,
+                    &scripts::LV_SIZE,
+                    now_and_key(&self.slot),
+                )
+                .await
+            }
+            None => self.list.len().await,
         }
     }
 
@@ -187,8 +283,9 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.position(v).await,
+        match self.slot.mode.timeout() {
+            Some(timeout) => self.cache_index_of(timeout, &scripts::LV_INDEX_OF, v).await,
+            None => self.list.position(v).await,
         }
     }
 
@@ -199,8 +296,12 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.rposition(v).await,
+        match self.slot.mode.timeout() {
+            Some(timeout) => {
+                self.cache_index_of(timeout, &scripts::LV_LAST_INDEX_OF, v)
+                    .await
+            }
+            None => self.list.rposition(v).await,
         }
     }
 
@@ -211,9 +312,16 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync + 'a,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.contains_all(values).await,
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.list.contains_all(values).await;
+        };
+        let values = self.ops().encode_values(values)?;
+        if values.is_empty() {
+            return Ok(true);
         }
+        let found: i64 =
+            cache_eval_values(&self.slot, timeout, &scripts::LV_CONTAINS_ALL, values).await?;
+        Ok(found == 1)
     }
 
     /// Removes the first equal value through the multimap's `remove`, Redisson's `remove(value)`. The key goes with its last value.
@@ -224,10 +332,9 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let v = self.codec.encode(v)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.ops().remove(&self.slot, v).await
-            }
+        match self.slot.mode.timeout() {
+            Some(timeout) => Ok(self.cache_remove(timeout, v, 1).await? > 0),
+            None => self.ops().remove(&self.slot, v).await,
         }
     }
 
@@ -237,11 +344,15 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.list.remove_value_n(v, count).await
-            }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.list.remove_value_n(v, count).await;
+        };
+        if count == 0 {
+            return Ok(0);
         }
+        let v = self.codec.encode(v)?;
+        self.cache_remove(timeout, v, i64::try_from(count).unwrap_or(i64::MAX))
+            .await
     }
 
     /// Removes every equal value and returns how many went. It does not remove the key from the index.
@@ -250,14 +361,16 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.remove_value_all(v).await,
-        }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.list.remove_value_all(v).await;
+        };
+        let v = self.codec.encode(v)?;
+        self.cache_remove(timeout, v, 0).await
     }
 
     /// Removes every occurrence of each value and returns whether any was removed, Redisson's `removeAll`. The key goes when its list is emptied. No values send nothing.
     ///
-    /// A value that occurred several times counts as removed too. Redisson's script counts it only when it occurred exactly once (deviation D10).
+    /// A value that occurred several times counts as removed too. Redisson's script counts it only when it occurred exactly once (deviations D10 and D11).
     #[doc(alias = "removeAll")]
     pub async fn remove_values<'a, W>(
         &self,
@@ -268,11 +381,7 @@ where
         W: Serialize + ?Sized + Sync + 'a,
     {
         let values = self.ops().encode_values(values)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                remove_values(&self.slot, Shape::List, values).await
-            }
-        }
+        remove_values(&self.slot, Shape::List, values).await
     }
 
     /// Keeps only the values equal to one of `values`, Redisson's `retainAll`; returns whether any was removed. It does not remove the key from the index.
@@ -285,11 +394,13 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync + 'a,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.list.retain_values(values).await
-            }
-        }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.list.retain_values(values).await;
+        };
+        let values = self.ops().encode_values(values)?;
+        let changed: i64 =
+            cache_eval_values(&self.slot, timeout, &scripts::LV_RETAIN_ALL, values).await?;
+        Ok(changed == 1)
     }
 
     /// Replaces the value at the index without reading the old one, as [`Vec::set`](crate::Vec::set).
@@ -370,28 +481,67 @@ where
     /// Removes the key with all its values, Redisson's `delete` on the handle.
     #[doc(alias = "delete")]
     pub async fn clear(&self) -> Result<()> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.ops()
-                    .remove_many(std::slice::from_ref(&self.slot))
-                    .await?;
-            }
-        }
-        Ok(())
+        clear(&self.ops(), &self.slot).await
     }
 
     /// Streams the values in order, in pages of 100, Redisson's `iterator`.
     #[doc(alias = "iterator")]
     pub fn iter(&self) -> impl Stream<Item = Result<V>> + '_ {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.list.iter(),
+        match self.slot.mode.timeout() {
+            Some(timeout) => self.cache_pages(timeout).left_stream(),
+            None => self.list.iter().right_stream(),
         }
+    }
+
+    /// `indexOf`/`lastIndexOf` of the cache handle: `-1` for none or an expired key.
+    async fn cache_index_of<W>(
+        &self,
+        timeout: &str,
+        script: &'static Lua,
+        v: &W,
+    ) -> Result<Option<usize>>
+    where
+        W: Serialize + ?Sized + Sync,
+    {
+        let v = self.codec.encode(v)?;
+        let index: i64 = cache_eval_values(&self.slot, timeout, script, vec![v]).await?;
+        Ok(usize::try_from(index).ok())
+    }
+
+    /// `remove(value, count)` of the cache handle: how many went (D7); `0` for an expired key.
+    async fn cache_remove(&self, timeout: &str, v: Bytes, count: i64) -> Result<usize> {
+        let args = vec![
+            Bytes::from(now_millis().to_string()),
+            Bytes::from(count.to_string()),
+            self.slot.encoded_key.clone(),
+            v,
+        ];
+        cache_eval(&self.slot, timeout, &scripts::LV_REMOVE, args).await
+    }
+
+    /// The values in pages of 100 over `LV_RANGE`; nothing for an expired key.
+    fn cache_pages<'a>(&'a self, timeout: &'a str) -> impl Stream<Item = Result<V>> + 'a {
+        stream::try_unfold(Some(0i64), move |offset| async move {
+            let Some(offset) = offset else {
+                return Ok::<_, Error>(None);
+            };
+            let raw = cache_range(&self.slot, timeout, offset, offset + LIST_PAGE - 1).await?;
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            let next = (i64::try_from(raw.len()) == Ok(LIST_PAGE)).then_some(offset + LIST_PAGE);
+            let values = self.ops().decode_all::<V>(raw)?;
+            Ok(Some((stream::iter(values.into_iter().map(Ok)), next)))
+        })
+        .try_flatten()
     }
 }
 
-/// **Experimental.** The values of one key of a [`SetMultimap`](crate::SetMultimap) or [`SetMultimapCacheNative`](crate::SetMultimapCacheNative), Redisson's `RSet` from `get(key)`. Get one with `get(&k)`.
+/// **Experimental.** The values of one key of a [`SetMultimap`](crate::SetMultimap), [`SetMultimapCache`](crate::SetMultimapCache) or [`SetMultimapCacheNative`](crate::SetMultimapCacheNative), Redisson's `RSet` from `get(key)`. Get one with `get(&k)`.
 ///
 /// The handle is lazy: building it sends nothing. [`insert`](Self::insert), [`extend`](Self::extend), [`remove`](Self::remove), [`remove_values`](Self::remove_values) and [`clear`](Self::clear) go through the multimap, so a new key joins the key index and a key whose last value goes leaves it. Reads and [`retain`](Self::retain) run on the set itself; a `retain` that empties the set keeps the key in the index, as in Redisson.
+///
+/// On a [`SetMultimapCache`](crate::SetMultimapCache) the reads, [`remove`](Self::remove), [`remove_values`](Self::remove_values) and [`retain`](Self::retain) run Redisson's TTL-aware scripts: an expired key reads as empty and these writes leave it alone. Those removals do not take the key out of the index when they empty the set, as in Redisson. [`insert`](Self::insert) and [`extend`](Self::extend) go through the multimap, so a new key joins the index (Redisson's cache handle writes the set only), and [`clear`](Self::clear) is the multimap's `remove_all`, which also drops the key's TTL. Writes through [`as_set`](Self::as_set) do not check the TTL, as in Redisson.
 pub struct SetMultimapValues<V, C: Codec> {
     slot: Slot,
     set: HashSet<V, C>,
@@ -454,11 +604,7 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let v = self.codec.encode(v)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.ops().insert(&self.slot, v).await
-            }
-        }
+        self.ops().insert(&self.slot, v).await
     }
 
     /// Adds values in one round trip through the multimap's `extend`, Redisson's `addAll`; returns how many were new. No values send nothing.
@@ -470,11 +616,7 @@ where
     {
         let ops = self.ops();
         let values = ops.encode_values(values)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                ops.extend_count(&self.slot, values).await
-            }
-        }
+        ops.extend_count(&self.slot, values).await
     }
 
     /// Removes a value through the multimap's `remove`; returns whether it was there. The key goes with its last value.
@@ -484,10 +626,13 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let v = self.codec.encode(v)?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.ops().remove(&self.slot, v).await
+        match self.slot.mode.timeout() {
+            Some(timeout) => {
+                let removed: i64 =
+                    cache_eval_values(&self.slot, timeout, &scripts::SV_REMOVE, vec![v]).await?;
+                Ok(removed == 1)
             }
+            None => self.ops().remove(&self.slot, v).await,
         }
     }
 
@@ -499,11 +644,7 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let values = self.ops().encode_values(values.iter().copied())?;
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                remove_values(&self.slot, Shape::Set, values).await
-            }
-        }
+        remove_values(&self.slot, Shape::Set, values).await
     }
 
     /// Keeps only the given values, Redisson's `retainAll`; returns whether the set changed. It does not remove the key from the index.
@@ -513,9 +654,13 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.set.retain(values).await,
-        }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.set.retain(values).await;
+        };
+        let values = self.ops().encode_values(values.iter().copied())?;
+        let changed: i64 =
+            cache_eval_values(&self.slot, timeout, &scripts::SV_RETAIN_ALL, values).await?;
+        Ok(changed == 1)
     }
 
     /// Whether the value is there.
@@ -524,9 +669,13 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.set.contains(v).await,
-        }
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.set.contains(v).await;
+        };
+        let v = self.codec.encode(v)?;
+        let found: i64 =
+            cache_eval_values(&self.slot, timeout, &scripts::SV_CONTAINS, vec![v]).await?;
+        Ok(found == 1)
     }
 
     /// Whether every one of the values is there, Redisson's `containsAll`. It is `true` for no values.
@@ -536,16 +685,32 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.set.contains_all(values).await,
+        let Some(timeout) = self.slot.mode.timeout() else {
+            return self.set.contains_all(values).await;
+        };
+        let values = self.ops().encode_values(values.iter().copied())?;
+        if values.is_empty() {
+            return Ok(true);
         }
+        let found: i64 =
+            cache_eval_values(&self.slot, timeout, &scripts::SV_CONTAINS_ALL, values).await?;
+        Ok(found == 1)
     }
 
     /// The number of values, Redisson's `size`.
     #[doc(alias = "size")]
     pub async fn len(&self) -> Result<usize> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.set.len().await,
+        match self.slot.mode.timeout() {
+            Some(timeout) => {
+                cache_eval(
+                    &self.slot,
+                    timeout,
+                    &scripts::SV_SIZE,
+                    now_and_key(&self.slot),
+                )
+                .await
+            }
+            None => self.set.len().await,
         }
     }
 
@@ -558,36 +723,59 @@ where
     /// Every value, in no particular order, Redisson's `readAll` (`SMEMBERS`).
     #[doc(alias = "readAll")]
     pub async fn to_vec(&self) -> Result<std::vec::Vec<V>> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                let raw: std::vec::Vec<Bytes> = self
-                    .values_key()
-                    .read(self.values_key().key_cmd("SMEMBERS"))
-                    .await?;
-                self.ops().decode_all(raw)
+        let raw: std::vec::Vec<Bytes> = match self.slot.mode.timeout() {
+            Some(timeout) => {
+                cache_eval(
+                    &self.slot,
+                    timeout,
+                    &scripts::SV_READ_ALL,
+                    now_and_key(&self.slot),
+                )
+                .await?
             }
-        }
+            None => {
+                self.values_key()
+                    .read(self.values_key().key_cmd("SMEMBERS"))
+                    .await?
+            }
+        };
+        self.ops().decode_all(raw)
     }
 
     /// Removes the key with all its values, Redisson's `delete` on the handle.
     #[doc(alias = "delete")]
     pub async fn clear(&self) -> Result<()> {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => {
-                self.ops()
-                    .remove_many(std::slice::from_ref(&self.slot))
-                    .await?;
-            }
-        }
-        Ok(())
+        clear(&self.ops(), &self.slot).await
     }
 
     /// Streams the values with `SSCAN`, Redisson's `iterator`.
     #[doc(alias = "iterator")]
     #[doc(alias = "iteratorAsync")]
     pub fn iter(&self) -> impl Stream<Item = Result<V>> + '_ {
-        match self.slot.mode {
-            Mode::Plain | Mode::Native | Mode::Cache { .. } => self.set.iter(),
+        match self.slot.mode.timeout() {
+            Some(timeout) => self.cache_scan(timeout).left_stream(),
+            None => self.set.iter().right_stream(),
         }
+    }
+
+    /// The values with `SV_SCAN`, `SSCAN … COUNT 10` that yields nothing for an expired key.
+    fn cache_scan<'a>(&'a self, timeout: &'a str) -> impl Stream<Item = Result<V>> + 'a {
+        stream::try_unfold(Some("0".to_string()), move |cursor| async move {
+            let Some(cursor) = cursor else {
+                return Ok::<_, Error>(None);
+            };
+            let args = vec![
+                Bytes::from(now_millis().to_string()),
+                Bytes::from(cursor),
+                self.slot.encoded_key.clone(),
+                Bytes::from(SET_PAGE.to_string()),
+            ];
+            let (next, raw): (String, std::vec::Vec<Bytes>) =
+                cache_eval(&self.slot, timeout, &scripts::SV_SCAN, args).await?;
+            let next = (next != "0").then_some(next);
+            let values = self.ops().decode_all::<V>(raw)?;
+            Ok(Some((stream::iter(values.into_iter().map(Ok)), next)))
+        })
+        .try_flatten()
     }
 }

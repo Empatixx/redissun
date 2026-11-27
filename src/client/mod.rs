@@ -19,8 +19,8 @@ use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
 use crate::collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 use crate::collections::multimap::{
-    ListMultimap, ListMultimapCacheNative, Mode as MultimapMode, SetMultimap,
-    SetMultimapCacheNative,
+    ListMultimap, ListMultimapCache, ListMultimapCacheNative, Mode as MultimapMode, SetMultimap,
+    SetMultimapCache, SetMultimapCacheNative, Shape as MultimapShape,
 };
 use crate::collections::sorted_set::SortedSet;
 use crate::coordination::adder::{Adder, Summable};
@@ -248,6 +248,25 @@ impl<C: Codec> Client<C> {
             self.codec.clone(),
             MultimapMode::Plain,
         )
+    }
+
+    /// Returns the [`ListMultimapCache`] stored under `name`, Redisson's `getListMultimapCache`: a `ListMultimap` whose keys expire one by one, with deadlines in a zset. **Experimental.**
+    #[doc(alias = "getListMultimapCache")]
+    pub fn list_multimap_cache<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> ListMultimapCache<K, V, C> {
+        let name: Arc<str> = name.into();
+        let mode = MultimapMode::cache(&name, MultimapShape::List);
+        ListMultimapCache::new(Key::new(self.core.clone(), name), self.codec.clone(), mode)
+    }
+
+    /// Returns the [`SetMultimapCache`] stored under `name`, Redisson's `getSetMultimapCache`: a `SetMultimap` whose keys expire one by one, with deadlines in a zset. **Experimental.**
+    #[doc(alias = "getSetMultimapCache")]
+    pub fn set_multimap_cache<K, V>(&self, name: impl Into<Arc<str>>) -> SetMultimapCache<K, V, C> {
+        let name: Arc<str> = name.into();
+        let mode = MultimapMode::cache(&name, MultimapShape::Set);
+        SetMultimapCache::new(Key::new(self.core.clone(), name), self.codec.clone(), mode)
     }
 
     /// Returns the [`ListMultimapCacheNative`] stored under `name`, Redisson's `getListMultimapCacheNative`: a `ListMultimap` whose keys expire with Redis 7.4 field expiry. **Experimental.**
