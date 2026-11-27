@@ -4,8 +4,8 @@ use common::store::MemoryStore;
 use common::{client, redis_url, unique};
 use futures::TryStreamExt;
 use redissun::{
-    Client, EvictionPolicy, JsonCodec, LocalCachedMap, Object, ReconnectionStrategy, StoreMode,
-    SyncStrategy,
+    Client, EvictionPolicy, ExpirationEventPolicy, JsonCodec, LocalCachedMap, Object,
+    ReconnectionStrategy, StoreMode, SyncStrategy,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -1419,5 +1419,62 @@ async fn local_store_mode_len_counts_values_only() {
         .unwrap();
     assert_eq!(map.get("x").await.unwrap(), None);
     assert_eq!(map.len().await.unwrap(), 0);
+    assert_eq!(map.local_len(), 1);
+}
+
+/// A server of its own that sends keyspace and keyevent expiry notifications, and a client on it.
+async fn notifying_redis() -> (
+    testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
+    String,
+    Client,
+) {
+    let (container, url) = common::own_redis().await;
+    common::raw_command_at(&url, &["CONFIG", "SET", "notify-keyspace-events", "KEx"]).await;
+    let client = Client::builder().url(url.clone()).build().await.unwrap();
+    (container, url, client)
+}
+
+async fn with_policy(client: &Client, name: &str, policy: ExpirationEventPolicy) -> Map {
+    client
+        .local_cached_map::<String, String>(name.to_string())
+        .expiration_event_policy(policy)
+        .build()
+        .await
+        .unwrap()
+}
+
+// the_keyevent_pattern_stays_the_default: an_expired_map_clears_the_cache_of_every_instance covers the default policy unchanged.
+#[tokio::test]
+async fn keyspace_channel_policy_clears_on_expiry() {
+    let _gate = shared().await;
+    let (_container, url, client) = notifying_redis().await;
+    let name = unique("lcm");
+    let map = with_policy(&client, &name, ExpirationEventPolicy::KeyspaceChannel).await;
+    let channel = format!("__keyspace@0__:{name}");
+    let listed = common::raw_command_at(&url, &["PUBSUB", "CHANNELS", &channel]).await;
+    assert!(listed.contains(&channel), "{listed}");
+    map.insert("k", "v").await.unwrap();
+    assert_eq!(map.local_len(), 1);
+    common::raw_command_at(&url, &["PEXPIRE", &name, "100"]).await;
+    eventually("the cache was not cleared", || async {
+        map.local_len() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn no_expiration_policy_keeps_the_local_cache() {
+    let _gate = shared().await;
+    let (_container, url, client) = notifying_redis().await;
+    let name = unique("lcm");
+    let before = common::raw_command_at(&url, &["PUBSUB", "NUMPAT"]).await;
+    let map = with_policy(&client, &name, ExpirationEventPolicy::None).await;
+    assert_eq!(
+        common::raw_command_at(&url, &["PUBSUB", "NUMPAT"]).await,
+        before
+    );
+    map.insert("k", "v").await.unwrap();
+    common::raw_command_at(&url, &["PEXPIRE", &name, "100"]).await;
+    sleep(Duration::from_millis(500)).await;
     assert_eq!(map.local_len(), 1);
 }

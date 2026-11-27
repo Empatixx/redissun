@@ -113,6 +113,60 @@ pub enum ReconnectionStrategy {
     Load,
 }
 
+/// How a [`LocalCachedMap`] learns that its map expired in Redis, so it clears its local cache, Redisson's `ExpirationEventPolicy` (the deprecated `useKeyEventsPattern`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExpirationEventPolicy {
+    /// `PSUBSCRIBE __keyevent@*:expired`, shared by every map of the client; the server needs `notify-keyspace-events` with `Ex`. The default.
+    #[default]
+    #[doc(alias = "SUBSCRIBE_WITH_KEYEVENT_PATTERN")]
+    KeyeventPattern,
+    /// `SUBSCRIBE __keyspace@<database>__:<name>`, one channel for this map; the server needs `notify-keyspace-events` with `Kx`.
+    #[doc(alias = "SUBSCRIBE_WITH_KEYSPACE_CHANNEL")]
+    KeyspaceChannel,
+    /// No subscription: the local cache is not cleared when the map expires.
+    #[doc(alias = "DONT_SUBSCRIBE")]
+    None,
+}
+
+/// The expiry notifications the listener of a [`LocalCachedMap`] reads, by [`ExpirationEventPolicy`]. The subscriptions are held for their `Drop`, which unsubscribes.
+#[allow(dead_code)]
+enum ExpiryFeed {
+    Pattern(
+        Subscription<PatternMessage>,
+        broadcast::Receiver<PatternMessage>,
+    ),
+    Channel(Subscription, broadcast::Receiver<Bytes>),
+    None,
+}
+
+/// What one expiry notification means for the local cache.
+enum Expiry {
+    /// The map expired, or messages were lost: clear the cache.
+    Clear,
+    /// Another key or event.
+    Ignore,
+    /// The feed ended.
+    Closed,
+}
+
+impl ExpiryFeed {
+    /// The next notification; never returns once the feed is [`ExpiryFeed::None`].
+    async fn next(&mut self, key: &[u8]) -> Expiry {
+        let received = match self {
+            ExpiryFeed::Pattern(_, messages) => messages.recv().await.map(|(_, name)| name == key),
+            ExpiryFeed::Channel(_, messages) => {
+                messages.recv().await.map(|event| &event[..] == b"expired")
+            }
+            ExpiryFeed::None => std::future::pending().await,
+        };
+        match received {
+            Ok(true) | Err(RecvError::Lagged(_)) => Expiry::Clear,
+            Ok(false) => Expiry::Ignore,
+            Err(RecvError::Closed) => Expiry::Closed,
+        }
+    }
+}
+
 /// Where a [`LocalCachedMap`] keeps its entries, Redisson's `StoreMode`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StoreMode {
@@ -420,6 +474,7 @@ pub struct LocalCachedMapBuilder<K, V, C: Codec> {
     eviction: EvictionPolicy,
     store_cache_miss: bool,
     store_mode: StoreMode,
+    expiration: ExpirationEventPolicy,
     options: StoreOptions<K, V>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
@@ -437,6 +492,7 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             eviction: EvictionPolicy::default(),
             store_cache_miss: false,
             store_mode: StoreMode::default(),
+            expiration: ExpirationEventPolicy::default(),
             options: StoreOptions::default(),
             _marker: PhantomData,
         }
@@ -490,6 +546,13 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
         self.store_mode = mode;
         self
     }
+
+    /// Chooses how the map learns that it expired in Redis. The default is [`ExpirationEventPolicy::KeyeventPattern`].
+    #[doc(alias = "expirationEventPolicy", alias = "useKeyEventsPattern")]
+    pub fn expiration_event_policy(mut self, policy: ExpirationEventPolicy) -> Self {
+        self.expiration = policy;
+        self
+    }
 }
 
 impl<K, V, C> LocalCachedMapBuilder<K, V, C>
@@ -532,15 +595,31 @@ where
         } else {
             (None, None)
         };
-        let (expiry, expired) = pubsub.psubscribe_with_messages(EXPIRED_EVENTS).await?;
+        let expiry = match self.expiration {
+            ExpirationEventPolicy::KeyeventPattern => {
+                let (subscription, messages) =
+                    pubsub.psubscribe_with_messages(EXPIRED_EVENTS).await?;
+                ExpiryFeed::Pattern(subscription, messages)
+            }
+            ExpirationEventPolicy::KeyspaceChannel => {
+                let name = format!(
+                    "__keyspace@{}__:{}",
+                    self.key.core.database,
+                    self.key.redis_key()
+                );
+                let (subscription, messages) = pubsub.subscribe_with_messages(&name).await?;
+                ExpiryFeed::Channel(subscription, messages)
+            }
+            ExpirationEventPolicy::None => ExpiryFeed::None,
+        };
         let reconnects = pubsub.reconnects();
         let handle = tokio::spawn(listen(
             Arc::downgrade(&local),
             Arc::downgrade(&self.key.core),
             vec![self.key.redis_key(), updates_log(&self.key)],
-            (subscription, expiry),
+            subscription,
             messages,
-            Some(expired),
+            expiry,
             reconnects,
         ));
         *local.listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
@@ -606,9 +685,9 @@ async fn listen(
     local: Weak<Local>,
     core: Weak<Core>,
     keys: std::vec::Vec<String>,
-    _subscriptions: (Option<Subscription>, Subscription<PatternMessage>),
+    _subscription: Option<Subscription>,
     mut messages: Option<broadcast::Receiver<Bytes>>,
-    mut expired: Option<broadcast::Receiver<PatternMessage>>,
+    mut expiry: ExpiryFeed,
     mut reconnects: broadcast::Receiver<()>,
 ) {
     loop {
@@ -621,13 +700,12 @@ async fn listen(
                     Err(RecvError::Closed) => return,
                 }
             }
-            received = next(&mut expired) => {
+            received = expiry.next(keys[0].as_bytes()) => {
                 let Some(local) = local.upgrade() else { return };
                 match received {
-                    Ok((_, name)) if name == keys[0].as_bytes() => local.forget_all(),
-                    Ok(_) => {}
-                    Err(RecvError::Lagged(_)) => local.forget_all(),
-                    Err(RecvError::Closed) => expired = None,
+                    Expiry::Clear => local.forget_all(),
+                    Expiry::Ignore => {}
+                    Expiry::Closed => expiry = ExpiryFeed::None,
                 }
             }
             reconnected = reconnects.recv() => {
@@ -653,7 +731,7 @@ async fn listen(
 ///
 /// Only changes made through a `LocalCachedMap` are announced. Changes made through a plain [`HashMap`] of the same name are not, so other instances see them only when their entry expires or is pushed out. [`LocalCachedMap::clear`] and [`Object::del`](crate::Object::del) on a `LocalCachedMap` empty the map for everybody.
 ///
-/// As in Redisson, every instance also listens for `__keyevent@*:expired` and clears its local cache when the map's key expires. Redis sends these events only when `notify-keyspace-events` contains `Ex`; neither Redisson nor this crate sets it.
+/// As in Redisson, every instance also listens for `__keyevent@*:expired` by default and clears its local cache when the map's key expires; [`ExpirationEventPolicy`] chooses another channel or none. Redis sends these events only when `notify-keyspace-events` contains `Ex` (`Kx` for [`ExpirationEventPolicy::KeyspaceChannel`]); neither Redisson nor this crate sets it.
 ///
 /// The data in Redis is a normal hash, so a [`HashMap`] with the same name and codec reads the same entries.
 ///

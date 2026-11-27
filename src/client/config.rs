@@ -538,6 +538,7 @@ impl<C: Codec> ClientBuilder<C> {
     pub async fn build(self) -> Result<Client<C>> {
         let url = self.validate()?;
         let topology = self.topology(&url)?;
+        let database = database_of(topology.settings());
         let check_slots_coverage = self.settings.check_slots_coverage;
         let settings = self.settings;
         let core = Core::connect(
@@ -562,11 +563,17 @@ impl<C: Codec> ClientBuilder<C> {
                 ping_interval: settings.ping_connection_interval,
                 credentials_refresh: settings.resolver.as_ref().and(settings.credentials_refresh),
                 replica_scan_interval: settings.replica_scan_interval,
+                database,
             },
         )
         .await?;
         Ok(Client::from_parts(core, self.codec))
     }
+}
+
+/// The database the connections select: [`ClientBuilder::database`], else the URL's, else 0.
+fn database_of(node: &crate::net::node::NodeSettings) -> i64 {
+    node.db.unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -633,6 +640,20 @@ mod tests {
     fn the_url_database_is_kept_without_an_override() {
         let node = node(ClientBuilder::new().url("redis://127.0.0.1:6379/3"));
         assert_eq!(node.db, Some(3));
+    }
+
+    #[test]
+    fn the_core_database_follows_the_node_database() {
+        let url = "redis://127.0.0.1:6379/3";
+        assert_eq!(database_of(&node(ClientBuilder::new().url(url))), 3);
+        assert_eq!(
+            database_of(&node(ClientBuilder::new().url(url).database(5))),
+            5
+        );
+        assert_eq!(
+            database_of(&node(ClientBuilder::new().url("redis://127.0.0.1:6379"))),
+            0
+        );
     }
 
     #[test]

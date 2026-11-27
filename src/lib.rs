@@ -113,8 +113,8 @@ pub use collections::hash_map_cache::{
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};
 pub use collections::local_cached_map::{
-    EvictionPolicy, LocalCachedMap, LocalCachedMapBuilder, ReconnectionStrategy, StoreMode,
-    SyncStrategy,
+    EvictionPolicy, ExpirationEventPolicy, LocalCachedMap, LocalCachedMapBuilder,
+    ReconnectionStrategy, StoreMode, SyncStrategy,
 };
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;

@@ -30,6 +30,8 @@ pub(crate) struct Startup {
     pub(crate) credentials_refresh: Option<Duration>,
     /// How often to look for replicas while reads may go to them; `None` takes the default of the topology.
     pub(crate) replica_scan_interval: Option<Duration>,
+    /// The database number the connections select, 0 by default.
+    pub(crate) database: i64,
 }
 
 pub(crate) struct Core {
@@ -41,6 +43,8 @@ pub(crate) struct Core {
     pub(crate) eviction_interval: Duration,
     pub(crate) reliable_topic_watchdog_timeout: Duration,
     pub(crate) retry: Retry,
+    /// The database number the connections select, 0 by default; keyspace channels name it.
+    pub(crate) database: i64,
     pub(crate) read_only_scripts: std::sync::atomic::AtomicBool,
     background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
@@ -83,6 +87,7 @@ impl Core {
             eviction_interval: startup.eviction_interval,
             reliable_topic_watchdog_timeout: startup.reliable_topic_watchdog_timeout,
             retry: startup.retry,
+            database: startup.database,
             read_only_scripts: std::sync::atomic::AtomicBool::new(true),
             background: std::sync::Mutex::new(Vec::new()),
             pubsub: tokio::sync::OnceCell::new(),

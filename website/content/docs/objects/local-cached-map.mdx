@@ -33,6 +33,7 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `sync_strategy(..)` | `Invalidate` (default): other instances drop the entry. `Update`: they receive the new value. `None`: nothing is sent. |
 | `reconnection_strategy(..)` | what happens after the pub/sub connection comes back: `None` (default) keeps the cache, `Clear` empties it, `Load` drops the keys changed meanwhile, read from a 10 minute log in Redis, or everything when the instance was away longer |
 | `store_cache_miss(bool)` | also cache that a key is missing. Off by default. |
+| `expiration_event_policy(..)` | how the map learns that it expired in Redis, Redisson's `expirationEventPolicy` (formerly `useKeyEventsPattern`): `KeyeventPattern` (default) subscribes to the pattern `__keyevent@*:expired` and needs `notify-keyspace-events` with `Ex`; `KeyspaceChannel` subscribes to the map's own channel `__keyspace@<database>__:<name>` and needs `Kx`; `None` subscribes to nothing, so the local cache is not cleared when the map expires |
 | `store_mode(..)` | `LocalRedis` (default): entries live in Redis and in the local cache. `Local`: in the local cache only; see [Store mode](#store-mode). |
 | `loader(l)` | a `MapLoader` asked on a miss; see [Loaders and writers](/docs/guides/loaders-and-writers). None by default. |
 | `writer(w)` | a `MapWriter` that `insert` and `remove` call. None by default. |
@@ -85,6 +86,6 @@ With `store_mode(StoreMode::Local)`, Redisson's `StoreMode.LOCALCACHE`, the entr
 
 Only changes made through a `LocalCachedMap` are announced. A plain `HashMap` of the same name changes Redis without telling the others. Their cached entries stay until they expire (`ttl`, `max_idle`), are pushed out, or you call `clear()`. `del()` works like `clear()`: it deletes the map and tells the other clients to clear their local caches.
 
-When the map itself expires in Redis (`expire`), every client clears its local cache, as in Redisson. For this the Redis server must send expired events: set `notify-keyspace-events` to at least `Ex`.
+When the map itself expires in Redis (`expire`), every client clears its local cache, as in Redisson. For this the Redis server must send expired events: set `notify-keyspace-events` to at least `Ex` for the default `ExpirationEventPolicy::KeyeventPattern`, or `Kx` for `KeyspaceChannel`. With `ExpirationEventPolicy::None` the map does not listen at all.
 
 The data in Redis is a normal hash, so a `HashMap` with the same name and codec reads the same entries.
