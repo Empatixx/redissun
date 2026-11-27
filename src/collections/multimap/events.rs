@@ -1,6 +1,6 @@
 //! Redisson's multimap listeners (`MapPutListener`, `MapRemoveListener`, `ListAddListener`/`SetAddListener`, `ListRemoveListener`/`SetRemoveListener`, `DeletedObjectListener`, `ExpiredObjectListener`) as one stream of events.
 //!
-//! The hash events come from [`MapEvents`]. The value events are `__keyevent@*:rpush`/`lrem` (list) or `sadd`/`srem` (set) whose key starts with the multimap's prefix, as Redisson's `m.startsWith(prefix)` filter.
+//! The hash events come from [`MapEvents`]. The value events are `__keyevent@*:rpush`/`lrem` (list) or `sadd`/`srem` (set) whose key starts with the multimap's prefix, as Redisson's `m.startsWith(prefix)` filter (so a multimap `m` also hears the values keys of one named `{m}:x`).
 
 use super::{prefix, Shape};
 use crate::codec::Codec;
@@ -20,9 +20,9 @@ use tokio::sync::broadcast::{self, error::RecvError};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MultimapEvent<K> {
-    /// A key was added to the hash (`hset`), Redisson's `MapPutListener`.
+    /// A key's field in the hash was written (`hset`), Redisson's `MapPutListener`. The put scripts write the field on every put, so this fires for a key that already exists as well, not only when a key is added.
     Put {
-        /// The added key, when the server names it.
+        /// The written key, when the server names it.
         key: Option<K>,
     },
     /// A key was removed from the hash (`hdel`), Redisson's `MapRemoveListener`.
@@ -104,6 +104,8 @@ impl MultimapEventKind {
 /// The changes of one multimap. Dropping it stops listening, Redisson's `removeListener`.
 ///
 /// Redis sends these events only when its `notify-keyspace-events` setting enables them, as for Redisson: `E` with `h` for [`Put`](MultimapEvent::Put) and [`Removed`](MultimapEvent::Removed), `l` (list) or `s` (set) for the value events, `g` for [`Deleted`](MultimapEvent::Deleted), `x` for [`Expired`](MultimapEvent::Expired), and `T` (Redis 8.8 or newer) for the names of changed keys. It hears the node of the client's pub/sub connection, which in a cluster is one master.
+///
+/// The value events are kept when the values key starts with the multimap's prefix (`{name}:`), as Redisson's `startsWith` filter. So listening on `m` also hears the values keys of a multimap named `{m}:x`, whose values keys are `{m}:x:<hash>`, as in Redisson.
 pub struct MultimapEvents<K, C: Codec> {
     prefix: String,
     map: Option<MapEvents<K, C>>,

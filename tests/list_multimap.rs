@@ -458,6 +458,16 @@ async fn handle_remove_drops_the_key() {
 }
 
 #[tokio::test]
+async fn remove_values_with_duplicates_reports_true_and_drops_the_key() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.extend("0", ["x", "x"]).await.unwrap();
+    assert!(map.get("0").unwrap().remove_values(["x"]).await.unwrap());
+    assert_eq!(map.key_len().await.unwrap(), 0);
+    assert!(!map.contains_key("0").await.unwrap());
+}
+
+#[tokio::test]
 async fn handle_clear_removes_the_key() {
     let name = unique("lmm");
     let map = list(&name).await;

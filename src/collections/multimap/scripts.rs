@@ -344,11 +344,13 @@ pub(super) static CLEAR_EXPIRE: LazyLock<Lua> = LazyLock::new(|| {
 });
 
 /// `RedissonListMultimap.InnerList.removeAllAsync`. KEYS: map, values. ARGV: key, values….
+///
+/// Deviation from Redisson (D10): `lrem(...) == 1` → `lrem(...) > 0`. `LREM` with count 0 returns how many it removed, so Redisson reports `false` for a value that occurred more than once, and when that empties the list it keeps the key in the hash with no values.
 pub(super) static LIST_VALUES_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
         "local v = 0 ",
         "for i = 2, #ARGV, 1 do ",
-        "if redis.call('lrem', KEYS[2], 0, ARGV[i]) == 1 then ",
+        "if redis.call('lrem', KEYS[2], 0, ARGV[i]) > 0 then ",
         "v = 1; ",
         "end ",
         "end ",

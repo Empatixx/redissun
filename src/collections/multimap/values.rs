@@ -257,7 +257,7 @@ where
 
     /// Removes every occurrence of each value and returns whether any was removed, Redisson's `removeAll`. The key goes when its list is emptied. No values send nothing.
     ///
-    /// As in Redisson's script, a value counts as removed only when it occurred exactly once.
+    /// A value that occurred several times counts as removed too. Redisson's script counts it only when it occurred exactly once (deviation D10).
     #[doc(alias = "removeAll")]
     pub async fn remove_values<'a, W>(
         &self,
