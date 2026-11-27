@@ -5,7 +5,10 @@ mod common;
 use common::store::MemoryStore;
 use common::{client, raw_command, unique};
 use redissun::hash_map::Entry;
-use redissun::{Error, HashMap, JsonCodec, Object, WriteMode};
+use redissun::{
+    EntryEvent, EntryEventKind, EntryEvents, Error, HashMap, HashMapCache, JsonCodec, Lease,
+    Object, WriteMode,
+};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -772,4 +775,295 @@ async fn flush_without_write_behind_is_a_no_op() {
         .await
         .unwrap();
     assert!(store.write_calls().is_empty());
+}
+
+type Cache = HashMapCache<String, String, JsonCodec>;
+
+async fn cache_loading(store: &MemoryStore) -> Cache {
+    client()
+        .await
+        .hash_map_cache_builder::<String, String>(unique("ms"))
+        .loader(store.clone())
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn cache_writing(store: &MemoryStore) -> Cache {
+    client()
+        .await
+        .hash_map_cache_builder::<String, String>(unique("ms"))
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn next_event(
+    events: &mut EntryEvents<String, String, JsonCodec>,
+) -> EntryEvent<String, String> {
+    timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("no event arrived")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cache_get_loads_and_stores_without_limits() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let cache = cache_loading(&store).await;
+    let mut events = cache.events_of(&[EntryEventKind::Created]).await.unwrap();
+    assert_eq!(cache.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(cache.entry_ttl("1").await.unwrap(), None);
+    assert_eq!(
+        next_event(&mut events).await,
+        EntryEvent::Created {
+            key: "1".into(),
+            value: "11".into()
+        }
+    );
+    assert_eq!(store.loads(), 1);
+    assert_eq!(cache.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(store.loads(), 1);
+}
+
+#[tokio::test]
+async fn cache_an_expired_entry_is_loaded_again() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let cache = cache_loading(&store).await;
+    cache
+        .insert("1", "00")
+        .ttl(Duration::from_millis(200))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(cache.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(store.loads(), 1);
+}
+
+#[tokio::test]
+async fn cache_get_many_peek_and_contains_key_load() {
+    let store = MemoryStore::with(&[("1", "11"), ("2", "22"), ("3", "33")]);
+    let cache = cache_loading(&store).await;
+    assert_eq!(
+        cache.get_many(&["1", "9"]).await.unwrap(),
+        vec![Some("11".to_string()), None]
+    );
+    assert_eq!(cache.peek("2").await.unwrap(), Some("22".to_string()));
+    assert_eq!(
+        cache.peek_many(&["3"]).await.unwrap(),
+        vec![Some("33".to_string())]
+    );
+    let before = store.loads();
+    assert!(!cache.contains_key("x").await.unwrap());
+    assert_eq!(store.loads(), before + 1);
+    assert!(cache.contains_key("1").await.unwrap());
+    assert_eq!(store.loads(), before + 1);
+}
+
+#[tokio::test]
+async fn cache_entry_loads_under_its_lock() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let cache = cache_loading(&store).await;
+    let entry = timeout(
+        Duration::from_secs(5),
+        cache.entry("1").ttl(Duration::from_secs(60)),
+    )
+    .await
+    .expect("the entry hangs")
+    .unwrap();
+    match entry {
+        redissun::hash_map::Entry::Occupied(entry) => {
+            assert_eq!(entry.get(), "11");
+            entry.into_value().await.unwrap();
+        }
+        redissun::hash_map::Entry::Vacant(_) => panic!("the loader was not asked"),
+    }
+    assert_eq!(cache.get("1").await.unwrap(), Some("11".to_string()));
+}
+
+// Redisson testLoadAllReplaceValues, on the cache.
+#[tokio::test]
+async fn cache_load_all_keeps_present_values() {
+    let store = numbered(10);
+    let cache = cache_loading(&store).await;
+    cache.insert("0", "010").await.unwrap();
+    cache.insert("1", "011").await.unwrap();
+    cache.load_all().await.unwrap();
+    assert_eq!(cache.get("0").await.unwrap(), Some("010".to_string()));
+    assert_eq!(cache.get("1").await.unwrap(), Some("011".to_string()));
+    for i in 2..10 {
+        assert_eq!(
+            cache.get(&i.to_string()).await.unwrap(),
+            Some(format!("{i}{i}"))
+        );
+    }
+    cache.load_many(&["0"]).replace_existing().await.unwrap();
+    assert_eq!(cache.get("0").await.unwrap(), Some("00".to_string()));
+    assert_eq!(cache.len().await.unwrap(), 10);
+}
+
+// RedissonMapCacheTest testWriterPutTTL, testWriterFastPutTTL, testWriterPutIfAbsentTTL and testWriterFastPutIfAbsentTTL.
+#[tokio::test]
+async fn cache_writer_with_limits() {
+    let ttl = Duration::from_secs(10);
+    let all = expected(&[("1", "11"), ("2", "22"), ("3", "33")]);
+    let store = MemoryStore::default();
+    let cache = cache_writing(&store).await;
+    for (k, v) in [("1", "11"), ("2", "22"), ("3", "33")] {
+        cache.insert(k, v).ttl(ttl).await.unwrap();
+    }
+    assert_eq!(store.snapshot(), all);
+
+    let store = MemoryStore::default();
+    let cache = cache_writing(&store).await;
+    for (k, v) in [("1", "11"), ("2", "22"), ("3", "33")] {
+        cache.set(k, v).ttl(ttl).await.unwrap();
+    }
+    assert_eq!(store.snapshot(), all);
+
+    let store = MemoryStore::default();
+    let cache = cache_writing(&store).await;
+    assert_eq!(cache.try_insert("1", "11").ttl(ttl).await.unwrap(), None);
+    assert_eq!(
+        cache.try_insert("1", "00").ttl(ttl).await.unwrap(),
+        Some("11".to_string())
+    );
+    assert_eq!(store.snapshot(), expected(&[("1", "11")]));
+    assert_eq!(store.write_calls(), vec![vec!["1"]]);
+}
+
+// Task 3's RMap writer ports, on the cache.
+#[tokio::test]
+async fn cache_writer_rmap_family() {
+    let store = MemoryStore::default();
+    let cache = cache_writing(&store).await;
+    cache.insert("1", "11").await.unwrap();
+    cache.replace("1", "00").await.unwrap();
+    cache.replace("2", "22").await.unwrap();
+    assert_eq!(store.snapshot(), expected(&[("1", "00")]));
+    assert_eq!(store.write_calls(), vec![vec!["1"], vec!["1"]]);
+
+    assert!(cache.compare_and_set("1", "00", "01").await.unwrap());
+    assert!(!cache.compare_and_set("1", "00", "02").await.unwrap());
+    assert_eq!(store.snapshot(), expected(&[("1", "01")]));
+    assert_eq!(store.write_calls().len(), 3);
+
+    cache.insert("2", "22").await.unwrap();
+    cache.insert("3", "33").await.unwrap();
+    assert!(!cache.remove_if_eq("2", "00").await.unwrap());
+    assert!(cache.remove_if_eq("2", "22").await.unwrap());
+    assert_eq!(store.delete_calls(), vec![vec!["2"]]);
+    assert_eq!(cache.remove("1").await.unwrap(), Some("01".to_string()));
+    assert_eq!(cache.remove("x").await.unwrap(), None);
+    assert_eq!(store.delete_calls(), vec![vec!["2"], vec!["1"], vec!["x"]]);
+    assert_eq!(store.snapshot(), expected(&[("3", "33")]));
+
+    let numbers = MemoryStore::default();
+    let counters: HashMapCache<String, i64, JsonCodec> = client()
+        .await
+        .hash_map_cache_builder(unique("ms"))
+        .writer(numbers.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(counters.incr_by("1", 11).await.unwrap(), 11);
+    assert_eq!(counters.incr_by("1", 7).await.unwrap(), 18);
+    assert_eq!(numbers.snapshot(), expected(&[("1", "18")]));
+}
+
+#[tokio::test]
+async fn cache_remove_many_tells_the_writer_and_publishes() {
+    let store = MemoryStore::default();
+    let cache = cache_writing(&store).await;
+    cache.insert("a", "1").await.unwrap();
+    cache.insert("b", "2").await.unwrap();
+    let mut events = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
+    assert_eq!(cache.remove_many(&["a", "b", "zz"]).await.unwrap(), 2);
+    assert_eq!(store.delete_calls(), vec![vec!["a", "b"]]);
+    let mut removed = vec![next_event(&mut events).await, next_event(&mut events).await];
+    removed.sort_by_key(|event| format!("{event:?}"));
+    assert_eq!(
+        removed,
+        vec![
+            EntryEvent::Removed {
+                key: "a".into(),
+                value: "1".into()
+            },
+            EntryEvent::Removed {
+                key: "b".into(),
+                value: "2".into()
+            }
+        ]
+    );
+    assert_eq!(cache.remove_many(&["zz"]).await.unwrap(), 0);
+    assert_eq!(store.delete_calls().len(), 1);
+}
+
+#[tokio::test]
+async fn cache_extend_with_ttl_writes_each_batch() {
+    let store = MemoryStore::default();
+    let cache = cache_writing(&store).await;
+    let entries = [
+        ("1", "11"),
+        ("2", "22"),
+        ("3", "33"),
+        ("4", "44"),
+        ("5", "55"),
+    ];
+    cache
+        .extend(entries.map(|(k, v)| (k, v)))
+        .batch_size(2)
+        .ttl(Duration::from_secs(10))
+        .await
+        .unwrap();
+    let sizes: Vec<usize> = store.write_calls().iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![2, 2, 1]);
+    assert_eq!(store.snapshot().len(), 5);
+}
+
+#[tokio::test]
+async fn cache_leases_bypass_the_loader_and_the_writer() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let cache: Cache = client()
+        .await
+        .hash_map_cache_builder(unique("ms"))
+        .loader(store.clone())
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap();
+    let guard = match cache.lease("1", Duration::from_secs(1)).await.unwrap() {
+        Lease::Acquired(guard) => guard,
+        other => panic!("expected a lease, got {other:?}"),
+    };
+    assert_eq!(store.loads(), 0);
+    guard.insert(&"v".to_string()).await.unwrap();
+    assert!(store.write_calls().is_empty());
+    cache.invalidate("1").await.unwrap();
+    assert!(store.delete_calls().is_empty());
+}
+
+#[tokio::test]
+async fn cache_write_behind_flush() {
+    let store = MemoryStore::default();
+    let cache: Cache = client()
+        .await
+        .hash_map_cache_builder(unique("ms"))
+        .writer(store.clone())
+        .write_mode(WriteMode::WriteBehind {
+            batch_size: 50,
+            delay: LATER,
+        })
+        .build()
+        .await
+        .unwrap();
+    cache
+        .insert("a", "1")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(store.snapshot().is_empty());
+    cache.flush().await.unwrap();
+    assert_eq!(store.snapshot(), expected(&[("a", "1")]));
 }

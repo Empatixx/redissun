@@ -50,7 +50,7 @@ where
     };
     let loaded = store.load(k).await?;
     if let Some(value) = &loaded {
-        target.write(k, value).await?;
+        target.write_loaded(k, value).await?;
     }
     Ok(loaded)
 }

@@ -14,7 +14,7 @@ use crate::client::config::ClientBuilder;
 use crate::client::core::Core;
 use crate::codec::{Codec, JsonCodec};
 use crate::collections::hash_map::{HashMap, HashMapBuilder};
-use crate::collections::hash_map_cache::HashMapCache;
+use crate::collections::hash_map_cache::{HashMapCache, HashMapCacheBuilder};
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
 use crate::collections::sorted_set::SortedSet;
@@ -266,6 +266,29 @@ impl<C: Codec> Client<C> {
     pub fn hash_map_cache<K, V>(&self, name: impl Into<Arc<str>>) -> HashMapCache<K, V, C> {
         let name: Arc<str> = name.into();
         HashMapCache::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Starts a [`HashMapCache`] stored under `name` with a loader or a writer, Redisson's `getMapCache(name, MapCacheOptions)`. Set its options, then `.build().await`; like [`hash_map_cache`](Client::hash_map_cache), the cache schedules its clean-up.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client, users: impl redissun::MapWriter<String, String>) -> redissun::Result<()> {
+    /// use redissun::WriteMode;
+    /// let cache = client
+    ///     .hash_map_cache_builder::<String, String>("sessions")
+    ///     .writer(users)
+    ///     .write_mode(WriteMode::write_behind())
+    ///     .build()
+    ///     .await?;
+    /// cache.flush().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(alias = "getMapCache")]
+    pub fn hash_map_cache_builder<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> HashMapCacheBuilder<K, V, C> {
+        HashMapCacheBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Lock`] named `name`.

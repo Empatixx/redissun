@@ -851,6 +851,36 @@ pub(super) static FAST_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
+/// RedissonMapCache.fastRemoveOperationBatchAsync: [`FAST_REMOVE`] that returns one `0`/`1` per key, for the writer to get the removed keys. KEYS: main, timeout, idle, removed, last access, options. ARGV: publish command, keys.
+pub(super) static FAST_REMOVE_BATCH: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local publishCommand = table.remove(ARGV, 1); ",
+        "local maxSize = tonumber(redis.call('hget', KEYS[6], 'max-size')); ",
+        "if maxSize ~= nil and maxSize ~= 0 then ",
+        "    redis.call('zrem', KEYS[5], unpack(ARGV)); ",
+        "end; ",
+        "redis.call('zrem', KEYS[3], unpack(ARGV)); ",
+        "redis.call('zrem', KEYS[2], unpack(ARGV)); ",
+        "local hasListeners = redis.call('hget', KEYS[6], 'has-listeners'); ",
+        "if hasListeners ~= false then ",
+        "for i, key in ipairs(ARGV) do ",
+        "local v = redis.call('hget', KEYS[1], key); ",
+        "if v ~= false then ",
+        "local t, val = struct.unpack('dLc0', v); ",
+        "local msg = struct.pack('Lc0Lc0', string.len(key), key, string.len(val), val); ",
+        "redis.call(publishCommand, KEYS[4], msg); ",
+        "end; ",
+        "end; ",
+        "end; ",
+        "local result = {}; ",
+        "for i = 1, #ARGV, 1 do ",
+        "local val = redis.call('hdel', KEYS[1], ARGV[i]); ",
+        "table.insert(result, val); ",
+        "end;",
+        "return result;",
+    ))
+});
+
 /// `RedissonMapCache.replaceOperationAsync(key, oldValue, newValue)`. KEYS: main, timeout, idle, updated, options. ARGV: now, key, old value, new value, publish command.
 pub(super) static REPLACE_IF: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(

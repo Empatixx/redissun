@@ -413,6 +413,9 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 | `keySet(pattern, count)`, `values(pattern, count)`, `entrySet(pattern, count)` | `keys_with(MapScan::new().pattern(p).page_size(n))`, `values_with(..)`, `iter_with(..)` |
 | `addListener(MapEntryListener)` (`EntryCreatedListener`, …) | `events()`, `events_of(&[EntryEventKind])` → `EntryEvents` |
 | `addListener(MapPutListener / MapIncrListener / MapRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `keyspace_events()`, `keyspace_events_of(&[MapEventKind])` → `MapEvents` (what `HashMap::events()` returns) |
+| `getMapCache(name, MapCacheOptions)` | `client.hash_map_cache_builder(name).loader(l).writer(w)….build().await` |
+| `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)`; loaded values get no limits |
+| `destroy()` (write-behind) | `flush().await`, and dropping the last handle drains once more |
 
 Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, `trySetMaxSize(n, mode)` is `init_max_size(n, mode)`, and listeners are read with `recv()`. Both take expiry times from the client clock.
 

@@ -6,9 +6,12 @@ mod scripts;
 
 use crate::client::request::Request;
 use crate::codec::Codec;
+use crate::collections::map::entry::Target;
 use crate::collections::map::events::{self as map_events, MapEventKind, MapEvents};
 use crate::collections::map::key_hash::per_key_objects;
+use crate::collections::map::load::{load_value, LoadAll};
 use crate::collections::map::scan::{decode_pairs, MapScan};
+use crate::collections::map::store::{store_options, Store, StoreOptions};
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
 use crate::lua::Lua;
@@ -17,9 +20,9 @@ use bytes::Bytes;
 use futures::{stream, Stream, TryStreamExt};
 use scripts::{
     ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, CONTAINS_VALUE, EVICT, EXPIRE, FAST_PUT_WITH_LIMITS,
-    FAST_REMOVE, GET, GET_ALL, GET_ALL_WITH_TTL_ONLY, GET_WITH_TTL_ONLY, PUT, RANDOM_ENTRIES,
-    RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE, REMOVE_IF, REPLACE, REPLACE_IF, SCAN_ENTRIES,
-    SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
+    FAST_REMOVE, FAST_REMOVE_BATCH, GET, GET_ALL, GET_ALL_WITH_TTL_ONLY, GET_WITH_TTL_ONLY, PUT,
+    RANDOM_ENTRIES, RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE, REMOVE_IF, REPLACE, REPLACE_IF,
+    SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -27,6 +30,7 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub use builders::{
@@ -147,10 +151,14 @@ enum Name {
 ///
 /// An entry can have a time to live ([`Insert::ttl`]) and a maximum idle time ([`Insert::max_idle`]). As in Redisson, the deadlines come from the clock of the client that writes or reads: a client whose clock is ahead sees entries expire earlier. A plain write replaces the entry and clears its limits, like [`std::collections::HashMap::insert`]. Reads skip expired entries at once but leave them in Redis; a background task deletes them, as Redisson's eviction task does. It first runs [`ClientBuilder::eviction_interval`](crate::ClientBuilder::eviction_interval) after the cache is first used in this client, deletes up to 100 entries per run, and adapts its pause between that interval and 30 minutes. A latch in Redis, held for that pause (between 1 and 30 seconds), lets only one client clean a cache per run.
 ///
+/// A cache from [`Client::hash_map_cache_builder`](crate::Client::hash_map_cache_builder) can have a [`MapLoader`](crate::MapLoader) and a [`MapWriter`](crate::MapWriter); see the "Loaders and writers" guide.
+///
 /// [`HashMapCache::set_max_size`] limits the number of entries. The data lives in the hash `name`, each value stored as Redisson's `struct.pack('dLc0', maxIdleMs, #value, value)`. The deadlines are in the sorted sets `redissun__timeout__set:{name}` and `redissun__idle__set:{name}`, the uses in `redissun__map_cache__last_access__set:{name}` and the settings in `{name}:redissun_options`. A name that contains `{` is used as it is in every key, as in Redisson, so all keys are in one slot in Redis Cluster.
 pub struct HashMapCache<K, V, C: Codec> {
     key: Key,
     codec: C,
+    /// The loader and writer; `None` keeps every call as it is without them.
+    store: Option<Arc<Store<K, V, C>>>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -159,6 +167,7 @@ impl<K, V, C: Codec> Clone for HashMapCache<K, V, C> {
         Self {
             key: self.key.clone(),
             codec: self.codec.clone(),
+            store: self.store.clone(),
             _marker: PhantomData,
         }
     }
@@ -221,9 +230,15 @@ fn old_layout_keys(name: &str) -> std::vec::Vec<String> {
 
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
+        Self::with_store(key, codec, None)
+    }
+
+    /// A cache with the loader and writer of `store`; like [`new`](HashMapCache::new), it schedules the clean-up.
+    pub(crate) fn with_store(key: Key, codec: C, store: Option<Arc<Store<K, V, C>>>) -> Self {
         let cache = Self {
             key,
             codec,
+            store,
             _marker: PhantomData,
         };
         let mut keys = cache.redis_keys(&[
@@ -287,6 +302,69 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
             .await?;
         Ok(*prefix)
     }
+
+    pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
+        self.store.as_deref()
+    }
+
+    /// Whether a miss asks the loader.
+    fn loads(&self) -> bool {
+        self.store.as_ref().is_some_and(|store| store.has_loader())
+    }
+
+    /// The store when it has a writer; `None` skips every writer call.
+    pub(super) fn writer(&self) -> Option<&Store<K, V, C>> {
+        self.store.as_deref().filter(|store| store.has_writer())
+    }
+}
+
+/// Sets up a [`HashMapCache`] with a [`MapLoader`](crate::MapLoader) or a [`MapWriter`](crate::MapWriter), Redisson's `getMapCache(name, MapCacheOptions)`. Get one from [`Client::hash_map_cache_builder`](crate::Client::hash_map_cache_builder), set its options, then `.build().await`.
+#[must_use = "a builder does nothing until build() is awaited"]
+pub struct HashMapCacheBuilder<K, V, C: Codec> {
+    key: Key,
+    codec: C,
+    options: StoreOptions<K, V>,
+}
+
+impl<K, V, C: Codec> fmt::Debug for HashMapCacheBuilder<K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HashMapCacheBuilder")
+            .field("name", &self.key.name())
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl<K, V, C: Codec> HashMapCacheBuilder<K, V, C> {
+    pub(crate) fn new(key: Key, codec: C) -> Self {
+        Self {
+            key,
+            codec,
+            options: StoreOptions::default(),
+        }
+    }
+}
+
+impl<K, V, C> HashMapCacheBuilder<K, V, C>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    C: Codec,
+{
+    store_options!();
+}
+
+impl<K, V, C> HashMapCacheBuilder<K, V, C>
+where
+    K: DeserializeOwned + Send + Sync + 'static,
+    V: DeserializeOwned + Send + Sync + 'static,
+    C: Codec,
+{
+    /// Checks the options and returns the cache. Invalid options are an [`Error::Config`](crate::Error::Config).
+    pub async fn build(self) -> Result<HashMapCache<K, V, C>> {
+        let store = self.options.into_store(&self.key, self.codec.clone())?;
+        Ok(HashMapCache::with_store(self.key, self.codec, store))
+    }
 }
 
 impl<K, V, C> HashMapCache<K, V, C>
@@ -297,6 +375,61 @@ where
 {
     fn decode_value(&self, raw: Option<Bytes>) -> Result<Option<V>> {
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
+    }
+
+    /// Hands stored entries to the writer, if there is one.
+    pub(super) async fn written(&self, entries: &[(Bytes, Bytes)]) -> Result<()> {
+        match self.writer() {
+            Some(store) => store.written(entries).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Hands a removed key to the writer, if there is one.
+    async fn deleted(&self, k: Bytes) -> Result<()> {
+        match self.writer() {
+            Some(store) => store.deleted(&[k]).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Asks the loader for the missing values, one key at a time, in the order of the keys.
+    async fn load_missing(&self, values: &mut [Option<V>], keys: &[Bytes]) -> Result<()> {
+        if self.loads() {
+            for (value, k) in values.iter_mut().zip(keys) {
+                if value.is_none() {
+                    *value = load_value(&Target::Cache(self, None), k, false).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands every write-behind change still queued to the writer now and returns the first writer error, like [`HashMap::flush`](crate::HashMap::flush). Without write-behind it does nothing.
+    ///
+    /// It plays the part Redisson's `destroy()` plays for pending writes; dropping the cache's last handle drains the queue once more in the background.
+    pub async fn flush(&self) -> Result<()> {
+        match &self.store {
+            Some(store) => store.drain().await,
+            None => Ok(()),
+        }
+    }
+
+    /// Loads every key of the loader into the cache, Redisson's `loadAll(replaceExistingValues, parallelism)`. A loaded value is stored without limits, like `insert`. Live keys keep their value unless [`replace_existing`](LoadAll::replace_existing). Without a loader it is an [`Error::Config`](crate::Error::Config).
+    #[doc(alias = "loadAll")]
+    pub fn load_all(&self) -> LoadAll<'_, K, V, C> {
+        LoadAll::new(Target::Cache(self, None), None)
+    }
+
+    /// Loads the given keys into the cache, Redisson's `loadAll(keys, replaceExistingValues, parallelism)`.
+    #[doc(alias = "loadAll")]
+    pub fn load_many<Q>(&self, ks: &[&Q]) -> LoadAll<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let keys = ks.iter().map(|k| self.codec.encode(*k)).collect();
+        LoadAll::new(Target::Cache(self, None), Some(keys))
     }
 
     /// Inserts an entry and returns the live value it replaced. Without [`Insert::ttl`] and [`Insert::max_idle`] the entry never expires, and a limit that the old entry had is removed, like [`std::collections::HashMap::insert`] replaces the value.
@@ -358,6 +491,7 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
         let raw: Option<Bytes> = self
             .key
             .core
@@ -370,14 +504,12 @@ where
                     Name::Updated,
                     Name::Options,
                 ]),
-                vec![
-                    now(),
-                    self.codec.encode(k)?,
-                    self.codec.encode(v)?,
-                    Bytes::from(PUBLISH),
-                ],
+                vec![now(), k.clone(), v.clone(), Bytes::from(PUBLISH)],
             )
             .await?;
+        if raw.is_some() {
+            self.written(&[(k, v)]).await?;
+        }
         self.decode_value(raw)
     }
 
@@ -390,6 +522,7 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        let (k, new) = (self.codec.encode(k)?, self.codec.encode(new)?);
         let replaced: i64 = self
             .key
             .core
@@ -404,13 +537,16 @@ where
                 ]),
                 vec![
                     now(),
-                    self.codec.encode(k)?,
+                    k.clone(),
                     self.codec.encode(old)?,
-                    self.codec.encode(new)?,
+                    new.clone(),
                     Bytes::from(PUBLISH),
                 ],
             )
             .await?;
+        if replaced == 1 {
+            self.written(&[(k, new)]).await?;
+        }
         Ok(replaced == 1)
     }
 
@@ -423,6 +559,7 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        let k = self.codec.encode(k)?;
         let removed: i64 = self
             .key
             .core
@@ -438,16 +575,19 @@ where
                 ]),
                 vec![
                     now(),
-                    self.codec.encode(k)?,
+                    k.clone(),
                     self.codec.encode(v)?,
                     Bytes::from(PUBLISH),
                 ],
             )
             .await?;
+        if removed == 1 {
+            self.deleted(k).await?;
+        }
         Ok(removed == 1)
     }
 
-    /// Removes several entries in one call and returns how many were in Redis. As in Redisson, an expired entry that the clean-up has not deleted yet counts too.
+    /// Removes several entries in one call and returns how many were in Redis. As in Redisson, an expired entry that the clean-up has not deleted yet counts too. With a writer, the removed keys are deleted from the store in one call, and none removed calls nothing.
     #[doc(alias = "fastRemove")]
     pub async fn remove_many<Q>(&self, ks: &[&Q]) -> Result<usize>
     where
@@ -462,22 +602,30 @@ where
         for k in ks {
             args.push(self.codec.encode(*k)?);
         }
-        let removed: usize = self
-            .key
-            .core
-            .eval(
-                &FAST_REMOVE,
-                self.redis_keys(&[
-                    Name::Main,
-                    Name::Timeout,
-                    Name::Idle,
-                    Name::Removed,
-                    Name::LastAccess,
-                    Name::Options,
-                ]),
-                args,
-            )
-            .await?;
+        let keys = self.redis_keys(&[
+            Name::Main,
+            Name::Timeout,
+            Name::Idle,
+            Name::Removed,
+            Name::LastAccess,
+            Name::Options,
+        ]);
+        if let Some(store) = self.writer() {
+            let flags: std::vec::Vec<i64> = self
+                .key
+                .core
+                .eval(&FAST_REMOVE_BATCH, keys, args.clone())
+                .await?;
+            let removed: std::vec::Vec<Bytes> = args
+                .into_iter()
+                .skip(1)
+                .zip(flags)
+                .filter_map(|(k, flag)| (flag == 1).then_some(k))
+                .collect();
+            store.deleted(&removed).await?;
+            return Ok(removed.len());
+        }
+        let removed: usize = self.key.core.eval(&FAST_REMOVE, keys, args).await?;
         Ok(removed)
     }
 
@@ -516,8 +664,9 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let k = self.codec.encode(k)?;
         // Not idempotent: a retried call would add twice.
-        let outcome = self
+        let outcome: Result<String> = self
             .key
             .core
             .eval_once(
@@ -532,12 +681,7 @@ where
                     Name::Removed,
                     Name::Options,
                 ]),
-                vec![
-                    now(),
-                    self.codec.encode(k)?,
-                    Bytes::from(delta),
-                    Bytes::from(PUBLISH),
-                ],
+                vec![now(), k.clone(), Bytes::from(delta), Bytes::from(PUBLISH)],
             )
             .await;
         if let Err(Error::Redis(_)) = &outcome {
@@ -550,7 +694,10 @@ where
                 .query(Request::new(cmd).key(self.key.name().as_bytes()))
                 .await;
         }
-        outcome
+        let result = outcome?;
+        // The writer gets the new number as the reply's text, the bytes `get` would decode, Redisson's `addAndGet` result.
+        self.written(&[(k, Bytes::from(result.clone()))]).await?;
+        Ok(result)
     }
 
     /// Inserts all entries, as [`HashMapCache::insert`] would one by one: each replaces its entry and clears its limits unless [`Extend::ttl`] or [`Extend::max_idle`] sets new ones (Redisson's `putAll(map)` keeps them). Entries are `(&key, &value)` pairs and are encoded at once; nothing is sent for none.
@@ -662,31 +809,20 @@ where
         map_events::subscribe(&self.key, self.codec.clone(), kinds, Some(TEMP_VAL_FIELD)).await
     }
 
-    /// Returns the value for the key, or `None` when it is missing or expired. A read starts the idle time of the entry again and counts as a use for the size limit.
+    /// Returns the value for the key, or `None` when it is missing or expired. A read starts the idle time of the entry again and counts as a use for the size limit. With a loader, a miss asks the loader and stores what it returns without limits.
     pub async fn get<Q>(&self, k: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let raw: Option<Bytes> = self
-            .key
-            .core
-            .eval(
-                &GET,
-                self.redis_keys(&[
-                    Name::Main,
-                    Name::Timeout,
-                    Name::Idle,
-                    Name::LastAccess,
-                    Name::Options,
-                ]),
-                vec![now(), self.codec.encode(k)?],
-            )
-            .await?;
-        self.decode_value(raw)
+        let encoded = self.codec.encode(k)?;
+        match self.read_encoded(&encoded).await? {
+            None if self.loads() => load_value(&Target::Cache(self, None), &encoded, false).await,
+            value => Ok(value),
+        }
     }
 
-    /// Returns the values for several keys, in the order of the keys: `None` for a key that is missing or expired. Like [`HashMapCache::get`], it starts the idle time of each live entry again and counts as a use for the size limit. Nothing is sent for no keys.
+    /// Returns the values for several keys, in the order of the keys: `None` for a key that is missing or expired. Like [`HashMapCache::get`], it starts the idle time of each live entry again and counts as a use for the size limit. With a loader, the missing keys are loaded one at a time, in the order of the keys. Nothing is sent for no keys.
     #[doc(alias = "getAll")]
     pub async fn get_many<Q>(&self, ks: &[&Q]) -> Result<std::vec::Vec<Option<V>>>
     where
@@ -713,32 +849,42 @@ where
                     Name::LastAccess,
                     Name::Options,
                 ]),
-                args,
+                args.clone(),
             )
             .await?;
-        raw.into_iter().map(|raw| self.decode_value(raw)).collect()
+        let mut values = raw
+            .into_iter()
+            .map(|raw| self.decode_value(raw))
+            .collect::<Result<std::vec::Vec<Option<V>>>>()?;
+        self.load_missing(&mut values, args.get(1..).unwrap_or_default())
+            .await?;
+        Ok(values)
     }
 
-    /// Returns the value for the key without counting it as a read, like `lru::LruCache::peek`: `None` when it is missing or its time to live has passed. It ignores the idle limit, does not start the idle time again and is not a use for the size limit.
+    /// Returns the value for the key without counting it as a read, like `lru::LruCache::peek`: `None` when it is missing or its time to live has passed. It ignores the idle limit, does not start the idle time again and is not a use for the size limit. With a loader, a miss asks the loader, as Redisson's `getWithTTLOnly` does.
     #[doc(alias = "getWithTTLOnly")]
     pub async fn peek<Q>(&self, k: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let encoded = self.codec.encode(k)?;
         let raw: Option<Bytes> = self
             .key
             .core
             .eval(
                 &GET_WITH_TTL_ONLY,
                 self.redis_keys(&[Name::Main, Name::Timeout]),
-                vec![now(), self.codec.encode(k)?],
+                vec![now(), encoded.clone()],
             )
             .await?;
-        self.decode_value(raw)
+        match self.decode_value(raw)? {
+            None if self.loads() => load_value(&Target::Cache(self, None), &encoded, false).await,
+            value => Ok(value),
+        }
     }
 
-    /// Returns the values for several keys like [`HashMapCache::peek`], in the order of the keys: `None` for a key that is missing or whose time to live has passed. Nothing is sent for no keys.
+    /// Returns the values for several keys like [`HashMapCache::peek`], in the order of the keys: `None` for a key that is missing or whose time to live has passed. With a loader, the missing keys are loaded one at a time. Nothing is sent for no keys.
     #[doc(alias = "getAllWithTTLOnly")]
     pub async fn peek_many<Q>(&self, ks: &[&Q]) -> Result<std::vec::Vec<Option<V>>>
     where
@@ -759,10 +905,16 @@ where
             .eval(
                 &GET_ALL_WITH_TTL_ONLY,
                 self.redis_keys(&[Name::Main, Name::Timeout]),
-                args,
+                args.clone(),
             )
             .await?;
-        raw.into_iter().map(|raw| self.decode_value(raw)).collect()
+        let mut values = raw
+            .into_iter()
+            .map(|raw| self.decode_value(raw))
+            .collect::<Result<std::vec::Vec<Option<V>>>>()?;
+        self.load_missing(&mut values, args.get(1..).unwrap_or_default())
+            .await?;
+        Ok(values)
     }
 
     /// Sets new limits on a live entry and returns whether there was one. Without [`ExpireEntry::ttl`] and [`ExpireEntry::max_idle`] both limits are removed; [`ExpireEntry::if_not_set`] changes only an entry that has no limit. The deadlines start now, and the call counts as a use for the size limit.
@@ -864,12 +1016,13 @@ where
             .await
     }
 
-    /// Removes the live entry and returns its value. An expired entry is left for the clean-up and `None` is returned.
+    /// Removes the live entry and returns its value. An expired entry is left for the clean-up and `None` is returned. With a writer, the key is deleted from the store also when the cache did not have it, as in Redisson.
     pub async fn remove<Q>(&self, k: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let k = self.codec.encode(k)?;
         let raw: Option<Bytes> = self
             .key
             .core
@@ -883,19 +1036,21 @@ where
                     Name::LastAccess,
                     Name::Options,
                 ]),
-                vec![now(), self.codec.encode(k)?, Bytes::from(PUBLISH)],
+                vec![now(), k.clone(), Bytes::from(PUBLISH)],
             )
             .await?;
+        self.deleted(k).await?;
         self.decode_value(raw)
     }
 
-    /// Returns whether a live entry exists for the key. Like a read, it starts the idle time again and counts as a use for the size limit.
+    /// Returns whether a live entry exists for the key. Like a read, it starts the idle time again and counts as a use for the size limit. With a loader, a miss asks the loader, and a loaded value counts as present.
     #[doc(alias = "containsKey")]
     pub async fn contains_key<Q>(&self, k: &Q) -> Result<bool>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let encoded = self.codec.encode(k)?;
         let found: i64 = self
             .key
             .core
@@ -908,9 +1063,14 @@ where
                     Name::LastAccess,
                     Name::Options,
                 ]),
-                vec![now(), self.codec.encode(k)?],
+                vec![now(), encoded.clone()],
             )
             .await?;
+        if found != 1 && self.loads() {
+            return Ok(load_value(&Target::Cache(self, None), &encoded, false)
+                .await?
+                .is_some());
+        }
         Ok(found == 1)
     }
 

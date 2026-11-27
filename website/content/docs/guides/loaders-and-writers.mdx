@@ -43,6 +43,8 @@ let user = users.get("jirka").await?; // a miss asks the loader
 
 `client.hash_map(name)` is the same map without options.
 
+`client.hash_map_cache_builder::<K, V>(name)` takes the same options for a `HashMapCache`; [HashMapCache](/docs/objects/hash-map-cache) lists where its loader and writer are called.
+
 ## When the loader is asked
 
 | Method | The loader is asked |

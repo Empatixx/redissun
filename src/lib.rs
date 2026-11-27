@@ -59,6 +59,7 @@ pub mod hash_map_cache {
         EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, LeaseInsert, Migrate, Set,
         TryInsert,
     };
+    pub use crate::collections::map::load::LoadAll;
 }
 
 /// The builders [`SortedSet`] methods return.
@@ -106,7 +107,8 @@ pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
 pub use collections::hash_map::{HashMap, HashMapBuilder};
 pub use collections::hash_map_cache::{
-    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, Lease, LeaseGuard,
+    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, HashMapCacheBuilder,
+    Lease, LeaseGuard,
 };
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};

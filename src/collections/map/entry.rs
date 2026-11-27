@@ -87,7 +87,15 @@ where
     pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
         match self {
             Target::Map(map) => map.store(),
-            Target::Cache(..) => None,
+            Target::Cache(cache, _) => cache.store(),
+        }
+    }
+
+    /// Stores a loaded value with the map's plain put, Redisson's `loadValue`: `HSET` on a map, `PUT` without limits on a cache, also inside an entry with a time to live.
+    pub(crate) async fn write_loaded(&self, k: &Bytes, v: &V) -> Result<()> {
+        match self {
+            Target::Map(map) => map.write_encoded(k, v).await,
+            Target::Cache(cache, _) => cache.write_encoded(k, v, None).await,
         }
     }
 }
