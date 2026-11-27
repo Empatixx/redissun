@@ -1,7 +1,7 @@
 mod common;
 
 use common::{client, raw_command, unique};
-use redissun::{Error, Object, RateLimiter, RateLimiterArgs, RateType};
+use redissun::{Error, Object, RateLimiter, RateType};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,15 +16,15 @@ async fn an_unconfigured_limiter_is_an_error() {
 }
 
 #[tokio::test]
-async fn try_set_rate_only_works_once() {
+async fn init_rate_only_works_once() {
     let limiter = client().await.rate_limiter(unique("rate"));
     let second = Duration::from_secs(1);
     assert!(limiter
-        .try_set_rate(RateType::Overall, 3, second)
+        .init_rate(RateType::Overall, 3, second)
         .await
         .unwrap());
     assert!(!limiter
-        .try_set_rate(RateType::Overall, 9, second)
+        .init_rate(RateType::Overall, 9, second)
         .await
         .unwrap());
     for _ in 0..3 {
@@ -37,7 +37,7 @@ async fn try_set_rate_only_works_once() {
 async fn permits_come_back_after_the_interval() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 3, Duration::from_millis(600))
+        .init_rate(RateType::Overall, 3, Duration::from_millis(600))
         .await
         .unwrap();
     for _ in 0..3 {
@@ -55,7 +55,7 @@ async fn permits_come_back_after_the_interval() {
 async fn the_window_slides_instead_of_resetting() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_millis(800))
+        .init_rate(RateType::Overall, 2, Duration::from_millis(800))
         .await
         .unwrap();
     assert!(limiter.try_acquire(1).await.unwrap());
@@ -71,7 +71,7 @@ async fn the_window_slides_instead_of_resetting() {
 async fn several_permits_can_be_taken_in_one_call() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 5, Duration::from_secs(10))
+        .init_rate(RateType::Overall, 5, Duration::from_secs(10))
         .await
         .unwrap();
     assert!(limiter.try_acquire(3).await.unwrap());
@@ -84,7 +84,7 @@ async fn several_permits_can_be_taken_in_one_call() {
 async fn asking_for_more_than_the_rate_is_an_error() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(10))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(10))
         .await
         .unwrap();
     let error = limiter.try_acquire(3).await.unwrap_err();
@@ -96,27 +96,25 @@ async fn invalid_arguments_are_config_errors() {
     let limiter = client().await.rate_limiter(unique("rate"));
     let second = Duration::from_secs(1);
     assert!(matches!(
-        limiter.try_set_rate(RateType::Overall, 0, second).await,
+        limiter.init_rate(RateType::Overall, 0, second).await,
         Err(Error::Config(_))
     ));
     assert!(matches!(
         limiter
-            .try_set_rate(RateType::Overall, 1, Duration::ZERO)
+            .init_rate(RateType::Overall, 1, Duration::ZERO)
             .await,
         Err(Error::Config(_))
     ));
     limiter
-        .try_set_rate(RateType::Overall, 1, second)
+        .init_rate(RateType::Overall, 1, second)
         .await
         .unwrap();
     assert!(limiter.try_acquire(0).await.unwrap());
     limiter.acquire(0).await.unwrap();
     assert!(matches!(
         limiter
-            .try_set_rate_with(
-                RateLimiterArgs::new(RateType::Overall, 1, Duration::from_secs(5))
-                    .keep_alive(Duration::from_secs(1))
-            )
+            .init_rate(RateType::Overall, 1, Duration::from_secs(5))
+            .keep_alive(Duration::from_secs(1))
             .await,
         Err(Error::Config(_))
     ));
@@ -128,7 +126,7 @@ async fn an_overall_limit_is_shared_between_clients() {
     let first = client().await.rate_limiter(name.clone());
     let second = client().await.rate_limiter(name);
     first
-        .try_set_rate(RateType::Overall, 3, Duration::from_secs(10))
+        .init_rate(RateType::Overall, 3, Duration::from_secs(10))
         .await
         .unwrap();
     assert!(first.try_acquire(3).await.unwrap());
@@ -141,7 +139,7 @@ async fn a_per_client_limit_is_counted_for_each_client() {
     let first = client().await.rate_limiter(name.clone());
     let second = client().await.rate_limiter(name);
     first
-        .try_set_rate(RateType::PerClient, 3, Duration::from_secs(10))
+        .init_rate(RateType::PerClient, 3, Duration::from_secs(10))
         .await
         .unwrap();
     assert!(first.try_acquire(3).await.unwrap());
@@ -154,7 +152,7 @@ async fn a_per_client_limit_is_counted_for_each_client() {
 async fn try_acquire_for_waits_for_the_window_to_move() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_millis(500))
+        .init_rate(RateType::Overall, 1, Duration::from_millis(500))
         .await
         .unwrap();
     assert!(limiter.try_acquire(1).await.unwrap());
@@ -184,7 +182,7 @@ async fn try_acquire_for_waits_for_the_window_to_move() {
 async fn acquire_blocks_until_a_permit_is_free() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_millis(500))
+        .init_rate(RateType::Overall, 1, Duration::from_millis(500))
         .await
         .unwrap();
     limiter.acquire(1).await.unwrap();
@@ -200,7 +198,7 @@ async fn concurrent_callers_never_get_more_than_the_rate() {
     client()
         .await
         .rate_limiter(name.clone())
-        .try_set_rate(RateType::Overall, 7, Duration::from_secs(30))
+        .init_rate(RateType::Overall, 7, Duration::from_secs(30))
         .await
         .unwrap();
     let granted = Arc::new(AtomicU32::new(0));
@@ -226,7 +224,7 @@ async fn concurrent_callers_never_get_more_than_the_rate() {
 async fn available_permits_reflect_what_was_taken() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 5, Duration::from_millis(600))
+        .init_rate(RateType::Overall, 5, Duration::from_millis(600))
         .await
         .unwrap();
     assert_eq!(limiter.available_permits().await.unwrap(), 5);
@@ -240,7 +238,7 @@ async fn available_permits_reflect_what_was_taken() {
 async fn set_rate_replaces_the_configuration_and_resets_usage() {
     let limiter = client().await.rate_limiter(unique("rate"));
     limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_secs(30))
+        .init_rate(RateType::Overall, 1, Duration::from_secs(30))
         .await
         .unwrap();
     assert!(limiter.try_acquire(1).await.unwrap());
@@ -260,7 +258,7 @@ async fn object_operations_cover_every_key_of_the_limiter() {
     let limiter = client.rate_limiter(name.clone());
     assert!(!limiter.exists().await.unwrap());
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(30))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(30))
         .await
         .unwrap();
     limiter.try_acquire(1).await.unwrap();
@@ -281,7 +279,7 @@ async fn object_operations_cover_every_key_of_the_limiter() {
     assert!(!limiter.exists().await.unwrap());
     assert!(limiter.try_acquire(1).await.is_err());
     assert!(limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(30))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(30))
         .await
         .unwrap());
     assert!(limiter.try_acquire(2).await.unwrap());
@@ -304,7 +302,7 @@ async fn refreshing_expired_permits_keeps_the_ttl_of_the_value_key() {
     let name = unique("rate");
     let limiter = client().await.rate_limiter(name.clone());
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_millis(400))
+        .init_rate(RateType::Overall, 2, Duration::from_millis(400))
         .await
         .unwrap();
     assert!(limiter.try_acquire(1).await.unwrap());
@@ -326,10 +324,6 @@ async fn keys_of(name: &str) -> usize {
     reply.lines().filter(|line| line.starts_with('$')).count()
 }
 
-fn args(rate_type: RateType, rate: u64, interval: Duration) -> RateLimiterArgs {
-    RateLimiterArgs::new(rate_type, rate, interval)
-}
-
 async fn take(limiter: &RateLimiter, permits: u64) {
     limiter.acquire(permits).await.unwrap();
 }
@@ -346,7 +340,7 @@ async fn the_client_clock_and_redisson_key_layout_are_used() {
     let name = unique("rate");
     let limiter = client().await.rate_limiter(name.clone());
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(10))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(10))
         .await
         .unwrap();
     let before = now_millis();
@@ -385,17 +379,15 @@ async fn the_client_clock_and_redisson_key_layout_are_used() {
 async fn keep_alive_deletes_an_idle_limiter_and_acquiring_extends_it() {
     let limiter = client().await.rate_limiter(unique("testKeepAliveTime"));
     limiter
-        .try_set_rate_with(
-            args(RateType::Overall, 1, Duration::from_secs(1)).keep_alive(Duration::from_secs(1)),
-        )
+        .init_rate(RateType::Overall, 1, Duration::from_secs(1))
+        .keep_alive(Duration::from_secs(1))
         .await
         .unwrap();
     sleep(Duration::from_millis(1100)).await;
     assert!(!limiter.exists().await.unwrap());
     limiter
-        .try_set_rate_with(
-            args(RateType::Overall, 10, Duration::from_secs(2)).keep_alive(Duration::from_secs(2)),
-        )
+        .init_rate(RateType::Overall, 10, Duration::from_secs(2))
+        .keep_alive(Duration::from_secs(2))
         .await
         .unwrap();
     sleep(Duration::from_secs(1)).await;
@@ -409,7 +401,7 @@ async fn expire_removes_the_limiter_and_its_permit_keys() {
     let name = unique("test1");
     let limiter = client().await.rate_limiter(name.clone());
     limiter
-        .try_set_rate(RateType::Overall, 5, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 5, Duration::from_secs(5))
         .await
         .unwrap();
     limiter.expire(Duration::from_secs(2)).await.unwrap();
@@ -461,7 +453,7 @@ async fn an_expired_limiter_leaves_no_keys_behind() {
     let name = unique("limiter");
     let limiter = client().await.rate_limiter(name.clone());
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(5))
         .await
         .unwrap();
     limiter.try_acquire(1).await.unwrap();
@@ -475,7 +467,7 @@ async fn an_expired_limiter_leaves_no_keys_behind() {
 async fn a_permit_is_free_again_one_interval_later() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(5))
         .await
         .unwrap();
     assert!(limiter.try_acquire(1).await.unwrap());
@@ -491,7 +483,7 @@ async fn a_permit_is_free_again_one_interval_later() {
 async fn config_returns_the_rate_interval_and_type_that_were_set() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 1, Duration::from_secs(5))
         .await
         .unwrap());
     let config = limiter.config().await.unwrap().unwrap();
@@ -505,7 +497,7 @@ async fn config_returns_the_rate_interval_and_type_that_were_set() {
 async fn available_permits_are_full_again_after_the_interval() {
     let limiter = client().await.rate_limiter(unique("rt2"));
     limiter
-        .try_set_rate(RateType::Overall, 10, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 10, Duration::from_secs(5))
         .await
         .unwrap();
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
@@ -519,7 +511,7 @@ async fn available_permits_are_full_again_after_the_interval() {
 async fn set_rate_overwrites_the_stored_config() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 1, Duration::from_secs(5))
         .await
         .unwrap());
     limiter
@@ -537,7 +529,7 @@ async fn set_rate_overwrites_the_stored_config() {
 async fn acquiring_above_the_rate_fails_with_the_redisson_message() {
     let limiter = client().await.rate_limiter(unique("myLimiter"));
     limiter
-        .try_set_rate(RateType::PerClient, 1, Duration::from_secs(1))
+        .init_rate(RateType::PerClient, 1, Duration::from_secs(1))
         .await
         .unwrap();
     let error = limiter.try_acquire(20).await.unwrap_err();
@@ -555,7 +547,7 @@ async fn acquiring_above_the_rate_fails_with_the_redisson_message() {
 async fn acquire_with_a_zero_timeout_takes_only_free_permits() {
     let limiter = client().await.rate_limiter(unique("myLimiter"));
     limiter
-        .try_set_rate(RateType::Overall, 5, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 5, Duration::from_secs(1))
         .await
         .unwrap();
     assert_eq!(limiter.available_permits().await.unwrap(), 5);
@@ -588,7 +580,7 @@ async fn acquire_with_a_zero_timeout_takes_only_free_permits() {
 async fn acquire_with_a_timeout_gives_up_without_a_free_permit() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_secs(5))
+        .init_rate(RateType::Overall, 1, Duration::from_secs(5))
         .await
         .unwrap());
     let started = Instant::now();
@@ -604,7 +596,7 @@ async fn acquire_with_a_timeout_gives_up_without_a_free_permit() {
 async fn acquire_waits_for_the_next_interval_once_permits_run_out() {
     let limiter = client().await.rate_limiter(unique("acquire"));
     assert!(limiter
-        .try_set_rate(RateType::Overall, 1, Duration::from_millis(500))
+        .init_rate(RateType::Overall, 1, Duration::from_millis(500))
         .await
         .unwrap());
     for _ in 0..10 {
@@ -617,11 +609,11 @@ async fn acquire_waits_for_the_next_interval_once_permits_run_out() {
 async fn try_acquire_grants_exactly_the_rate_in_every_interval() {
     let limiter = client().await.rate_limiter(unique("test"));
     assert!(limiter
-        .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 10, Duration::from_secs(1))
         .await
         .unwrap());
     assert!(!limiter
-        .try_set_rate(RateType::Overall, 20, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 20, Duration::from_secs(1))
         .await
         .unwrap());
     for _ in 0..3 {
@@ -642,7 +634,7 @@ async fn del_removes_the_limiter_keys_and_reports_whether_it_existed() {
     let limiter = client().await.rate_limiter(name.clone());
     assert!(!limiter.del().await.unwrap());
     limiter
-        .try_set_rate(RateType::Overall, 5, Duration::from_secs(300))
+        .init_rate(RateType::Overall, 5, Duration::from_secs(300))
         .await
         .unwrap();
     assert_eq!(keys_of(&name).await, 1);
@@ -724,7 +716,7 @@ fn assert_rate(times: &[u128], rate: usize, interval_ms: u128) {
 async fn concurrent_blocking_acquires_keep_to_the_rate() {
     let limiter = client().await.rate_limiter(unique("test"));
     limiter
-        .try_set_rate(RateType::Overall, 18, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 18, Duration::from_secs(1))
         .await
         .unwrap();
     let times = acquisition_times(&limiter, 8, 100, true).await;
@@ -736,11 +728,11 @@ async fn concurrent_blocking_acquires_keep_to_the_rate() {
 async fn concurrent_try_acquires_keep_to_the_rate() {
     let limiter = client().await.rate_limiter(unique("test"));
     assert!(limiter
-        .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 10, Duration::from_secs(1))
         .await
         .unwrap());
     assert!(!limiter
-        .try_set_rate(RateType::Overall, 20, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 20, Duration::from_secs(1))
         .await
         .unwrap());
     let times = acquisition_times(&limiter, 8, 50, false).await;
@@ -790,7 +782,8 @@ async fn set_rate_changes_the_rate_in_both_modes() {
 async fn permits_taken_with_keep_state_still_expire_after_the_interval() {
     let limiter = client().await.rate_limiter(unique("testSetStateArgs"));
     limiter
-        .set_rate_with(args(RateType::Overall, 10, Duration::from_secs(1)).keep_state(true))
+        .set_rate(RateType::Overall, 10, Duration::from_secs(1))
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 3).await;
@@ -808,13 +801,15 @@ async fn set_rate_with_keep_state_carries_the_used_permits_over() {
         .rate_limiter(unique("testSetStateArgsKeepState"));
     let five = Duration::from_secs(5);
     limiter
-        .set_rate_with(args(RateType::Overall, 10, five).keep_state(true))
+        .set_rate(RateType::Overall, 10, five)
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 3).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 7);
     limiter
-        .set_rate_with(args(RateType::Overall, 20, five).keep_state(true))
+        .set_rate(RateType::Overall, 20, five)
+        .keep_state(true)
         .await
         .unwrap();
     assert_eq!(limiter.available_permits().await.unwrap(), 17);
@@ -828,15 +823,13 @@ async fn set_rate_without_keep_state_frees_every_permit() {
         .rate_limiter(unique("testSetStateArgsNotKeepState"));
     let five = Duration::from_secs(5);
     limiter
-        .set_rate_with(args(RateType::Overall, 10, five).keep_state(true))
+        .set_rate(RateType::Overall, 10, five)
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 3).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 7);
-    limiter
-        .set_rate_with(args(RateType::Overall, 20, five))
-        .await
-        .unwrap();
+    limiter.set_rate(RateType::Overall, 20, five).await.unwrap();
     assert_eq!(limiter.available_permits().await.unwrap(), 20);
 }
 
@@ -848,12 +841,14 @@ async fn update_rate_of_a_missing_limiter_creates_nothing() {
         .rate_limiter(unique("testUpdateRateNonExisting"));
     let five = Duration::from_secs(5);
     assert!(!limiter
-        .update_rate(args(RateType::Overall, 10, five).keep_state(true))
+        .update_rate(RateType::Overall, 10, five)
+        .keep_state(true)
         .await
         .unwrap());
     assert!(!limiter.exists().await.unwrap());
     assert!(!limiter
-        .update_rate(args(RateType::PerClient, 10, five).keep_state(true))
+        .update_rate(RateType::PerClient, 10, five)
+        .keep_state(true)
         .await
         .unwrap());
     assert!(!limiter.exists().await.unwrap());
@@ -867,11 +862,13 @@ async fn update_rate_with_the_same_settings_keeps_the_limiter_working() {
         .rate_limiter(unique("testUpdateRateKeepsState"));
     let five = Duration::from_secs(5);
     limiter
-        .set_rate_with(args(RateType::Overall, 10, five).keep_state(true))
+        .set_rate(RateType::Overall, 10, five)
+        .keep_state(true)
         .await
         .unwrap();
     assert!(limiter
-        .update_rate(args(RateType::Overall, 10, five).keep_state(true))
+        .update_rate(RateType::Overall, 10, five)
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
@@ -888,14 +885,16 @@ async fn update_rate_to_a_higher_rate_adds_free_permits() {
         .await
         .rate_limiter(unique("testUpdateRateExistingKeyHigherRate"));
     limiter
-        .set_rate_with(args(RateType::Overall, 10, Duration::from_secs(2)).keep_state(true))
+        .set_rate(RateType::Overall, 10, Duration::from_secs(2))
+        .keep_state(true)
         .await
         .unwrap();
     sleep(Duration::from_millis(1000)).await;
     take(&limiter, 4).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 6);
     assert!(limiter
-        .update_rate(args(RateType::Overall, 20, Duration::from_secs(5)).keep_state(true))
+        .update_rate(RateType::Overall, 20, Duration::from_secs(5))
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 16);
@@ -909,14 +908,16 @@ async fn update_rate_to_a_lower_rate_removes_free_permits() {
         .await
         .rate_limiter(unique("testUpdateRateLowerRateNewValuePositive"));
     limiter
-        .set_rate_with(args(RateType::Overall, 10, Duration::from_secs(2)).keep_state(true))
+        .set_rate(RateType::Overall, 10, Duration::from_secs(2))
+        .keep_state(true)
         .await
         .unwrap();
     sleep(Duration::from_millis(1000)).await;
     take(&limiter, 3).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 7);
     assert!(limiter
-        .update_rate(args(RateType::Overall, 5, Duration::from_secs(5)).keep_state(true))
+        .update_rate(RateType::Overall, 5, Duration::from_secs(5))
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 2);
@@ -931,14 +932,16 @@ async fn update_rate_below_the_used_permits_leaves_none_free() {
         .await
         .rate_limiter(unique("testUpdateRateLowerRateNewValueNegative"));
     limiter
-        .set_rate_with(args(RateType::Overall, 10, Duration::from_secs(2)).keep_state(true))
+        .set_rate(RateType::Overall, 10, Duration::from_secs(2))
+        .keep_state(true)
         .await
         .unwrap();
     sleep(Duration::from_millis(1000)).await;
     take(&limiter, 8).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 2);
     assert!(limiter
-        .update_rate(args(RateType::Overall, 5, Duration::from_secs(5)).keep_state(true))
+        .update_rate(RateType::Overall, 5, Duration::from_secs(5))
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 0);
@@ -954,14 +957,16 @@ async fn update_rate_after_the_interval_starts_with_every_permit_free() {
         .rate_limiter(unique("testUpdateRatePermitResetFull"));
     let second = Duration::from_secs(1);
     limiter
-        .set_rate_with(args(RateType::Overall, 10, second).keep_state(true))
+        .set_rate(RateType::Overall, 10, second)
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 8).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 2);
     sleep(Duration::from_millis(2000)).await;
     assert!(limiter
-        .update_rate(args(RateType::Overall, 10, second).keep_state(true))
+        .update_rate(RateType::Overall, 10, second)
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
@@ -975,13 +980,15 @@ async fn update_rate_to_another_rate_type_clears_the_used_permits() {
         .rate_limiter(unique("testUpdateRateModeChangeClearsState"));
     let five = Duration::from_secs(5);
     limiter
-        .set_rate_with(args(RateType::Overall, 10, five).keep_state(true))
+        .set_rate(RateType::Overall, 10, five)
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 4).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 6);
     assert!(limiter
-        .update_rate(args(RateType::PerClient, 10, five).keep_state(true))
+        .update_rate(RateType::PerClient, 10, five)
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
@@ -994,11 +1001,9 @@ async fn update_rate_rejects_a_keep_alive_shorter_than_the_interval() {
         .await
         .rate_limiter(unique("testUpdateRateKeepAliveTimeLessThanIntervalThrows"));
     let result = limiter
-        .update_rate(
-            args(RateType::Overall, 10, Duration::from_secs(5))
-                .keep_state(true)
-                .keep_alive(Duration::from_secs(1)),
-        )
+        .update_rate(RateType::Overall, 10, Duration::from_secs(5))
+        .keep_state(true)
+        .keep_alive(Duration::from_secs(1))
         .await;
     assert!(matches!(result, Err(Error::Config(_))));
 }
@@ -1010,14 +1015,16 @@ async fn update_rate_to_a_shorter_interval_drops_old_permits() {
         .await
         .rate_limiter(unique("testUpdateRateRateIntervalChangeDropsExpired"));
     limiter
-        .set_rate_with(args(RateType::Overall, 10, Duration::from_secs(5)).keep_state(true))
+        .set_rate(RateType::Overall, 10, Duration::from_secs(5))
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 3).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 7);
     sleep(Duration::from_millis(1100)).await;
     assert!(limiter
-        .update_rate(args(RateType::Overall, 10, Duration::from_secs(1)).keep_state(true))
+        .update_rate(RateType::Overall, 10, Duration::from_secs(1))
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 10);
@@ -1031,13 +1038,15 @@ async fn update_rate_in_per_client_mode_keeps_the_client_usage() {
         .rate_limiter(unique("testUpdateRatePerClientUsesClientState"));
     let five = Duration::from_secs(5);
     limiter
-        .set_rate_with(args(RateType::PerClient, 10, five).keep_state(true))
+        .set_rate(RateType::PerClient, 10, five)
+        .keep_state(true)
         .await
         .unwrap();
     take(&limiter, 3).await;
     assert_eq!(limiter.available_permits().await.unwrap(), 7);
     assert!(limiter
-        .update_rate(args(RateType::PerClient, 20, five).keep_state(true))
+        .update_rate(RateType::PerClient, 20, five)
+        .keep_state(true)
         .await
         .unwrap());
     assert_eq!(limiter.available_permits().await.unwrap(), 17);
@@ -1069,7 +1078,7 @@ async fn release_returns_permits_but_never_above_the_rate() {
 async fn acquire_and_release_cycles_lose_no_permits_after_expiry() {
     let limiter = client().await.rate_limiter(unique("testNoCollapse"));
     limiter
-        .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 10, Duration::from_secs(1))
         .await
         .unwrap();
     limiter.try_acquire(1).await.unwrap();

@@ -349,7 +349,7 @@ async fn semaphore_never_overbooks_and_loses_permits_only_to_failed_calls_under_
     let name = unique("chaos-semaphore");
     assert!(clients[0]
         .semaphore(name.clone())
-        .try_set_permits(3)
+        .init_permits(3)
         .await
         .unwrap());
     let state = Exclusive::new();
@@ -370,7 +370,7 @@ async fn semaphore_never_overbooks_and_loses_permits_only_to_failed_calls_under_
                 } else {
                     2000
                 });
-                match semaphore.acquire(1).timeout(wait).await {
+                match semaphore.acquire().timeout(wait).await {
                     Ok(Some(permits)) => {
                         state.critical_section(3).await;
                         if permits.release().await.is_err() {
@@ -448,7 +448,7 @@ async fn rate_limiter_keeps_its_long_run_rate_under_faults() {
     let name = unique("chaos-limiter");
     clients[0]
         .rate_limiter(name.clone())
-        .try_set_rate(RateType::Overall, 10, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 10, Duration::from_secs(1))
         .await
         .unwrap();
     let grants = Arc::new(Mutex::new(std::vec::Vec::new()));

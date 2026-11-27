@@ -157,8 +157,9 @@ macro_rules! server_commands {
             self.run(redis::cmd("BGREWRITEAOF")).await.map(drop)
         }
 
-        /// The number of keys in the client's database, `DBSIZE`.
-        pub async fn size(&self) -> Result<u64> {
+        /// The number of keys in the client's database, `DBSIZE`. Redisson's `size`.
+        #[doc(alias = "size", alias = "dbsize")]
+        pub async fn db_size(&self) -> Result<u64> {
             Ok(redis::from_redis_value(
                 self.run(redis::cmd("DBSIZE")).await?,
             )?)
@@ -446,7 +447,8 @@ impl SentinelNode {
     server_commands!();
 
     /// The `host:port` of the master the sentinel names for `master_name`, `None` when it knows no such master; Redisson's `getMasterAddr`.
-    pub async fn master_addr(&self, master_name: &str) -> Result<Option<String>> {
+    #[doc(alias = "getMasterAddr")]
+    pub async fn master_address(&self, master_name: &str) -> Result<Option<String>> {
         let reply = self
             .run(sentinel(&["GET-MASTER-ADDR-BY-NAME", master_name]))
             .await?;

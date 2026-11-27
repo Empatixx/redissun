@@ -373,7 +373,8 @@ where
     }
 
     /// Takes every waiting value equal to one of `values` out; returns whether any was removed.
-    pub async fn remove_all<Q>(&self, values: &[&Q]) -> Result<bool>
+    #[doc(alias = "removeAll")]
+    pub async fn remove_values<Q>(&self, values: &[&Q]) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -390,7 +391,8 @@ where
     }
 
     /// Keeps only the waiting values equal to one of `values`; returns whether any was removed. An empty list drops every waiting value.
-    pub async fn retain_all<Q>(&self, values: &[&Q]) -> Result<bool>
+    #[doc(alias = "retainAll")]
+    pub async fn retain_values<Q>(&self, values: &[&Q]) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -446,7 +448,8 @@ where
     }
 
     /// Returns the waiting value that was offered first, without taking it out.
-    pub async fn peek(&self) -> Result<Option<V>> {
+    #[doc(alias = "peek")]
+    pub async fn front(&self) -> Result<Option<V>> {
         let raw: Option<Bytes> = self
             .key
             .core
@@ -456,12 +459,14 @@ where
     }
 
     /// Takes the waiting value that was offered first out, before its delay ends. It is sent once and not retried.
-    pub async fn poll(&self) -> Result<Option<V>> {
-        Ok(self.poll_many(1).await?.into_iter().next())
+    #[doc(alias = "poll")]
+    pub async fn pop_front(&self) -> Result<Option<V>> {
+        Ok(self.pop_front_many(1).await?.into_iter().next())
     }
 
     /// Takes up to `limit` waiting values out, in the order they were offered. It is sent once and not retried.
-    pub async fn poll_many(&self, limit: usize) -> Result<std::vec::Vec<V>> {
+    #[doc(alias = "poll")]
+    pub async fn pop_front_many(&self, limit: usize) -> Result<std::vec::Vec<V>> {
         let raw: std::vec::Vec<Bytes> = self
             .key
             .core
@@ -471,7 +476,8 @@ where
     }
 
     /// Takes the waiting value that was offered last out and pushes it to the front of `target`. It is sent once and not retried.
-    pub async fn poll_last_and_offer_first_to<D: Codec>(
+    #[doc(alias = "pollLastAndOfferFirstTo")]
+    pub async fn pop_back_push_front<D: Codec>(
         &self,
         target: &VecDeque<V, D>,
     ) -> Result<Option<V>> {
@@ -509,7 +515,8 @@ where
     }
 
     /// Returns the waiting values in the order they were offered.
-    pub async fn values(&self) -> Result<std::vec::Vec<V>> {
+    #[doc(alias = "readAll")]
+    pub async fn to_vec(&self) -> Result<std::vec::Vec<V>> {
         let raw: std::vec::Vec<Bytes> = self
             .key
             .core

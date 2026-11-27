@@ -85,7 +85,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | Redisson | redissun |
 |---|---|
 | `getKeys()`, `getKeysStream()` | `iter()` |
-| `getKeysByPattern(p)`, `getKeysStreamByPattern(p)` | `iter_matching(p)` |
+| `getKeysByPattern(p)`, `getKeysStreamByPattern(p)` | `iter_with(KeysScan::new().pattern(p))`, 10 keys per `SCAN` as in Redisson |
 | `getKeys(KeysScanOptions)`, `getKeysWithLimit(…)` | `iter_with(KeysScan::new().pattern(p).limit(n).chunk_size(c).key_type(t))` |
 | `getType(name)` | `key_type(name)`, `KeyType` instead of `RType` |
 | `getSlot(name)` | `slot(name)`, computed without a round trip |
@@ -97,7 +97,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `remainTimeToLive(name)` | `ttl(name)`, `None` instead of `-1`/`-2` |
 | `expire(name, ttl, unit)`, `expireAt(name, ms)`, `clearExpire(name)` | `expire(name, ttl)`, `expire_at(name, time)`, `persist(name)` |
 | `expire(duration, names…)`, `expireAt(instant, names…)` | `expire_many(&names, ttl)`, `expire_at_many(&names, time)` |
-| `rename(a, b)`, `renamenx(a, b)` | `rename(a, b)`, `rename_nx(a, b)` |
+| `rename(a, b)`, `renamenx(a, b)` | `rename(a, b)`, `try_rename(a, b)` |
 | `migrate(MigrateArgs…)`, `copy(…)` | `migrate(Migrate::new(keys, host, port, db, timeout))` with `.copy()`, `.replace()`, `.username()`, `.password()` |
 | `move(name, db)`, `swapdb(a, b)` | `move_to_db(name, db)`, `swap_db(a, b)` |
 | `addListener(NewObjectListener)` and the other `ObjectListener`s | `listen(KeyEvent::New)` and so on; `removeListener` is dropping the `KeyEvents` |
@@ -324,7 +324,7 @@ Redisson's rank ranges include both ends; redissun takes any Rust range, so `val
 | `createGroup(StreamCreateGroupArgs.name(g).id(id).makeStream())` | `create_group(g, &id)` |
 | `removeGroup(g)` | `destroy_group(g)` |
 | `createConsumer`, `removeConsumer` | `create_consumer`, `remove_consumer` |
-| `updateGroupMessageId` | `update_group_message_id` |
+| `updateGroupMessageId` | `set_group_id` |
 | `readGroup(g, c, neverDelivered())` | `read_group(g, c, count)` |
 | `readGroup(..., greaterThan(id))`, `noAck()` | `.after(id)`, `.no_ack()` |
 | `readGroup` with a timeout | `read_group_wait(...).timeout(d)` |
@@ -332,8 +332,8 @@ Redisson's rank ranges include both ends; redissun takes any Rust range, so `val
 | `getPendingInfo(g)` | `pending(g)` |
 | `listPending(g, [c], s, e, [idle], n)` | `pending_entries(g, n).range(&s, &e).consumer(c).min_idle(d)` |
 | `pendingRange(...)` | `pending_entries(...).messages()` |
-| `claim`, `fastClaim` | `claim`, `fast_claim` |
-| `autoClaim`, `fastAutoClaim` | `auto_claim`, `fast_auto_claim` |
+| `claim`, `fastClaim` | `claim`, `claim_ids` |
+| `autoClaim`, `fastAutoClaim` | `auto_claim`, `auto_claim_ids` |
 | `getInfo`, `listGroups`, `listConsumers` | `info`, `groups`, `consumers` |
 
 ## Object methods
@@ -356,13 +356,13 @@ For objects that use more than one key, `expire`, `persist` and `rename` change 
 | `publish(m)` | `publish(&m)` |
 | `addListener(...)` | `subscribe()` then `recv()` or `into_stream()` |
 | `removeListener(...)` | drop the `Subscriber` |
-| `removeAllListeners()` | `remove_all_listeners()` |
-| `countListeners()` | `listener_count()` |
+| `removeAllListeners()` | `unsubscribe_all()` |
+| `countListeners()` | `local_subscriber_count()` |
 | `countSubscribers()` | `subscriber_count()` |
 
 ## ReliableTopic and ShardedTopic
 
-They map like `Topic`. A `ReliableTopic` also has `size()`, and each `client.reliable_topic(name)` handle is one subscriber, as each `getReliableTopic` call is in Redisson.
+They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`), and each `client.reliable_topic(name)` handle is one subscriber, as each `getReliableTopic` call is in Redisson.
 
 ## RwLock
 
@@ -437,13 +437,13 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 
 | Redisson | redissun |
 |---|---|
-| `trySetPermits(n)` | `try_set_permits(n)` |
+| `trySetPermits(n)`, `trySetPermits(n, ttl)` | `init_permits(n)`, `init_permits(n).ttl(ttl)` |
 | `addPermits(n)` | `add_permits(n)` |
 | `availablePermits()` | `available_permits()` |
 | `drainPermits()` | `drain_permits()` |
-| `acquire(n)` | `acquire(n)`, returns a `Permits` value |
-| `tryAcquire(n)` | `try_acquire(n)` |
-| `tryAcquire(n, wait, unit)` | `acquire(n).timeout(wait)` |
+| `acquire()`, `acquire(n)` | `acquire()`, `acquire_many(n)`; both return a `Permits` value |
+| `tryAcquire()`, `tryAcquire(n)` | `try_acquire()`, `try_acquire_many(n)` |
+| `tryAcquire(n, wait, unit)` | `acquire_many(n).timeout(wait)` |
 | `release(n)` | `permits.release()` or `semaphore.release(n)` |
 
 ## PermitExpirableSemaphore
@@ -458,7 +458,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `release(id)`, `release(ids)` | `release(&id)`, `release_many(&ids)`; `IllegalArgumentException` is `Error::PermitNotHeld` |
 | `tryRelease(id)`, `tryRelease(ids)` | `try_release(&id)`, `try_release_many(&ids)` |
 | `availablePermits()`, `acquiredPermits()`, `getPermits()` | `available_permits()`, `acquired_permits()`, `permits()` |
-| `trySetPermits(n)`, `setPermits(n)`, `addPermits(n)` | `try_set_permits(n)`, `set_permits(n)`, `add_permits(n)` |
+| `trySetPermits(n)`, `setPermits(n)`, `addPermits(n)` | `init_permits(n)`, `set_permits(n)`, `add_permits(n)` |
 | `updateLeaseTime(id, lease, unit)` | `update_lease(&id, Some(lease))` |
 | `getLeaseTime(id)` | `lease_time(&id)`, `None` instead of `-1` |
 
@@ -466,7 +466,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 
 | Redisson | redissun |
 |---|---|
-| `trySetCount(n)` | `try_set_count(n)` |
+| `trySetCount(n)` | `init_count(n)` |
 | `countDown()` | `count_down()` |
 | `getCount()` | `count()` |
 | `await()` | `wait()` |
@@ -476,8 +476,10 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 
 | Redisson | redissun |
 |---|---|
-| `trySetRate(mode, rate, interval, unit)` | `try_set_rate(type, rate, interval)` |
-| `setRate(...)` | `set_rate(...)` |
+| `trySetRate(mode, rate, interval, unit)` | `init_rate(type, rate, interval)` |
+| `trySetRate(mode, rate, interval, keepAlive)` | `init_rate(type, rate, interval).keep_alive(d)` |
+| `setRate(...)`, `setRate(RateLimiterArgs)` | `set_rate(type, rate, interval)` with `.keep_alive(d)`, `.keep_state(true)` |
+| `updateRate(...)` | `update_rate(type, rate, interval)`, same options |
 | `tryAcquire(n)` | `try_acquire(n)` |
 | `tryAcquire(n, timeout, unit)` | `acquire(n).timeout(timeout)` |
 | `acquire(n)` | `acquire(n)` |
@@ -503,7 +505,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `setReconnectionDelay` | `.reconnection_delay()` |
 | `ConstantDelay`, `EqualJitterDelay`, `FullJitterDelay`, `DecorrelatedJitterDelay` | `DelayStrategy::{Constant, EqualJitter, FullJitter, DecorrelatedJitter}` |
 | `setPingConnectionInterval` | `.ping_connection_interval()` |
-| `setKeepAlive`, `setTcpKeepAliveIdle`, `setTcpKeepAliveInterval` | `.keep_alive()`, `.tcp_keep_alive_idle()`, `.tcp_keep_alive_interval()` |
+| `setKeepAlive`, `setTcpKeepAliveIdle`, `setTcpKeepAliveInterval` | `.tcp_keep_alive()`, `.tcp_keep_alive_idle()`, `.tcp_keep_alive_interval()` |
 | `setTcpNoDelay` | `.tcp_no_delay()` |
 | `setSslTruststore` | `.tls_ca_file()` or `.tls_ca_pem()` |
 | `setSslKeystore` | `.tls_client_auth_files()` or `.tls_client_auth_pem()` |
@@ -519,7 +521,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `setConnectionListener`, `ConnectionListener`, `NodeType.MASTER / SLAVE / SENTINEL` | `.connection_listener()`, `ConnectionListener`, `NodeType::Master / Replica / Sentinel` |
 | `getRedisNodes(RedisNodes.SINGLE / SENTINEL_MASTER_SLAVE / CLUSTER)` | `client.nodes()`, one type for every topology, see [Nodes](/docs/guides/nodes) |
 | `pingAll`, `getMasters`, `getSlaves`, `getSentinels` | `ping_all()`, `masters()`, `replicas()`, `sentinels()` |
-| `RedisNode.info`, `time`, `getConfig`, `setConfig`, `save`, `bgSave`, `size` | `info()`, `time()`, `config()`, `set_config()`, `save()`, `bg_save()`, `size()` |
+| `RedisNode.info`, `time`, `getConfig`, `setConfig`, `save`, `bgSave`, `size` | `info()`, `time()`, `config()`, `set_config()`, `save()`, `bg_save()`, `db_size()` |
 | `SetSlotCommand.MIGRATING / IMPORTING / STABLE / NODE` | `SetSlot::Migrating(id) / Importing(id) / Stable / Node(id)` |
 | SLF4J logs | `tracing` events with the same messages and levels, see [Logging](/docs/guides/logging) |
 
@@ -532,7 +534,7 @@ Not available: `subscriptionMode` (redissun subscribes on masters only), load ba
 | `script.eval(Mode.READ_WRITE, lua, ReturnType.INTEGER, keys, values...)` | `script.eval::<i64>(lua).keys(keys).args(values).await` |
 | `Mode.READ_ONLY` | `.read_only()` |
 | `evalSha(mode, sha, type, keys, values...)` | `eval_sha(sha)` |
-| `scriptLoad`, `scriptExists`, `scriptFlush`, `scriptKill` | `script_load`, `script_exists`, `script_flush`, `script_kill` |
+| `scriptLoad`, `scriptExists`, `scriptFlush`, `scriptKill` | `load`, `exists`, `flush`, `kill` |
 | `ReturnType.BOOLEAN`, `INTEGER`, `STRING`, `VALUE`, `LIST` | `bool`, `i64`, `String`, `Decoded<V>`, `Vec<T>` |
 | `function.load(lib)`, `loadAndReplace(lib)` | `function.load(lib)`, `load_and_replace(lib)` |
 | `function.call(mode, name, type, keys, values...)` | `function.call::<T>(name).keys(keys).args(values).await` |
@@ -545,4 +547,3 @@ Not available: `subscriptionMode` (redissun subscribes on masters only), load ba
 - Values use a serde codec rather than Redisson's Java codecs, so data written with Redisson's default codec is not readable by redissun and the other way round. With `StringCodec` on both sides, plain text values are shared.
 - When a semaphore or latch changes, redissun wakes every waiter and each one tries again. Redisson wakes only as many as there are permits.
 - The rate limiter reads the time from the Redis server. Redisson sends the time of the client.
-- `RateLimiter` has no `keepAliveTime` setting yet.

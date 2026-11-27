@@ -75,10 +75,10 @@ A script error, for example `redis.error_reply('boom')`, is an `Error::Redis` wi
 | Method | Redisson | Meaning |
 |---|---|---|
 | `eval_sha(sha)` | `evalSha` | runs a script that Redis knows. Fails with `NOSCRIPT` when it does not. |
-| `script_load(source)` | `scriptLoad` | loads a script and returns its SHA-1. In Redis Cluster on every master. |
-| `script_exists(&[sha])` | `scriptExists` | whether Redis has each script. In Redis Cluster only when every master has it. |
-| `script_flush()` | `scriptFlush` | removes all scripts. In Redis Cluster on every master. |
-| `script_kill()` | `scriptKill` | stops the running script. Fails with `NOTBUSY` when none runs. |
+| `load(source)` | `scriptLoad` | loads a script and returns its SHA-1. In Redis Cluster on every master. |
+| `exists(&[sha])` | `scriptExists` | whether Redis has each script. In Redis Cluster only when every master has it. |
+| `flush()` | `scriptFlush` | removes all scripts. In Redis Cluster on every master. |
+| `kill()` | `scriptKill` | stops the running script. Fails with `NOTBUSY` when none runs. |
 
 ### Retries
 

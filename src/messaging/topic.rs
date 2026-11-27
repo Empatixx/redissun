@@ -51,7 +51,8 @@ impl<M, C: Codec> Topic<M, C> {
     }
 
     /// Number of [`Subscriber`]s of this topic in this client, like Redisson's `countListeners`.
-    pub async fn listener_count(&self) -> usize {
+    #[doc(alias = "countListeners")]
+    pub async fn local_subscriber_count(&self) -> usize {
         match self.key.core.pubsub_started() {
             Some(pubsub) => pubsub.listeners::<Bytes>(&self.key.redis_key()).await,
             None => 0,
@@ -59,7 +60,8 @@ impl<M, C: Codec> Topic<M, C> {
     }
 
     /// Ends every [`Subscriber`] of this topic in this client and unsubscribes from Redis, like Redisson's `removeAllListeners`. Their `recv` fails once the messages already received are read.
-    pub async fn remove_all_listeners(&self) {
+    #[doc(alias = "removeAllListeners")]
+    pub async fn unsubscribe_all(&self) {
         if let Some(pubsub) = self.key.core.pubsub_started() {
             pubsub.close::<Bytes>(&self.key.redis_key()).await;
         }
@@ -220,7 +222,8 @@ impl<M, C: Codec> PatternTopic<M, C> {
     }
 
     /// Number of [`PatternSubscriber`]s of this pattern in this client.
-    pub async fn listener_count(&self) -> usize {
+    #[doc(alias = "countListeners")]
+    pub async fn local_subscriber_count(&self) -> usize {
         match self.key.core.pubsub_started() {
             Some(pubsub) => {
                 pubsub
@@ -232,7 +235,8 @@ impl<M, C: Codec> PatternTopic<M, C> {
     }
 
     /// Ends every [`PatternSubscriber`] of this pattern in this client and unsubscribes from Redis, like Redisson's `removeAllListeners`.
-    pub async fn remove_all_listeners(&self) {
+    #[doc(alias = "removeAllListeners")]
+    pub async fn unsubscribe_all(&self) {
         if let Some(pubsub) = self.key.core.pubsub_started() {
             pubsub.close::<PatternMessage>(&self.key.redis_key()).await;
         }

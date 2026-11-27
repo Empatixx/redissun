@@ -53,7 +53,7 @@ fn channel(name: &str) -> String {
 
 /// A shared count-down latch, modelled on Redisson's `RCountDownLatch`.
 ///
-/// Set a count with [`CountDownLatch::try_set_count`], call [`CountDownLatch::count_down`] from any process, and let any number of processes [`CountDownLatch::wait`] until the count reaches zero. A latch that does not exist counts as open.
+/// Set a count with [`CountDownLatch::init_count`], call [`CountDownLatch::count_down`] from any process, and let any number of processes [`CountDownLatch::wait`] until the count reaches zero. A latch that does not exist counts as open.
 #[derive(Clone)]
 pub struct CountDownLatch {
     key: Key,
@@ -74,8 +74,9 @@ impl CountDownLatch {
         vec![self.key.redis_key(), channel(self.key.name())]
     }
 
-    /// Sets the count, but only when the latch does not exist. Returns whether it was set. A count of 0 creates a latch that is already open.
-    pub async fn try_set_count(&self, count: u64) -> Result<bool> {
+    /// Sets the count, but only when the latch does not exist. Returns whether it was set. A count of 0 creates a latch that is already open. Redisson's `trySetCount`.
+    #[doc(alias = "trySetCount")]
+    pub async fn init_count(&self, count: u64) -> Result<bool> {
         let set: i64 = self
             .key
             .core

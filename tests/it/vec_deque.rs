@@ -298,7 +298,7 @@ async fn pop_front_many_returns_at_most_the_asked_count() {
 }
 
 #[tokio::test]
-async fn poll_last_limited() {
+async fn pop_back_many_takes_at_most_the_limit() {
     let deque = deque().await;
     deque.extend_back(&[1, 2, 3, 4]).await.unwrap();
     assert_eq!(deque.pop_back_many(3).await.unwrap(), [4, 3, 2]);

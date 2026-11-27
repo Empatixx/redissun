@@ -228,12 +228,14 @@ impl<M, C: Codec> ReliableTopic<M, C> {
     }
 
     /// How many messages the stream holds, read or not, Redisson's `size`.
-    pub async fn size(&self) -> Result<u64> {
+    #[doc(alias = "size")]
+    pub async fn len(&self) -> Result<u64> {
         self.key.read(self.key.key_cmd("XLEN")).await
     }
 
     /// How many [`ReliableSubscriber`]s this handle and its clones have, Redisson's `countListeners`.
-    pub fn listener_count(&self) -> usize {
+    #[doc(alias = "countListeners")]
+    pub fn local_subscriber_count(&self) -> usize {
         lock(&self.shared.state).listeners.len()
     }
 
@@ -251,7 +253,8 @@ impl<M, C: Codec> ReliableTopic<M, C> {
     }
 
     /// Ends every [`ReliableSubscriber`] of this handle and removes the subscriber, Redisson's `removeAllListeners`. Its unread messages are dropped.
-    pub async fn remove_all_listeners(&self) -> Result<()> {
+    #[doc(alias = "removeAllListeners")]
+    pub async fn unsubscribe_all(&self) -> Result<()> {
         let _transition = self.shared.transition.lock().await;
         let stopping = {
             let mut state = lock(&self.shared.state);
@@ -629,7 +632,7 @@ where
     M: DeserializeOwned + Send,
     C: Codec,
 {
-    /// Waits for the next message. Fails with [`Error::Unsupported`] after [`ReliableTopic::remove_all_listeners`] ended the subscriber.
+    /// Waits for the next message. Fails with [`Error::Unsupported`] after [`ReliableTopic::unsubscribe_all`] ended the subscriber.
     pub async fn recv(&mut self) -> Result<M> {
         match self.receiver.recv().await {
             Some(payload) => self.codec.decode(&payload),

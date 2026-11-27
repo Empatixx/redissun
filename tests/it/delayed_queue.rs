@@ -129,7 +129,7 @@ async fn remove_takes_a_pending_value_out() {
     assert!(delayed.remove("drop").await.unwrap());
     assert!(!delayed.remove("drop").await.unwrap());
     assert_eq!(delayed.len().await.unwrap(), 1);
-    assert_eq!(delayed.values().await.unwrap(), ["keep"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["keep"]);
     assert_eq!(destination.len().await.unwrap(), 0);
 }
 
@@ -270,7 +270,7 @@ async fn a_removed_value_is_never_delivered_but_the_others_are() {
 
 // Redisson: testRemoveAll
 #[tokio::test]
-async fn remove_all_drops_every_listed_value_before_delivery() {
+async fn remove_values_drops_every_listed_value_before_delivery() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("delay_queue"));
     delayed
@@ -283,7 +283,7 @@ async fn remove_all_drops_every_listed_value_before_delivery() {
         .unwrap();
     assert!(delayed.contains("1_1_1").await.unwrap());
     assert!(delayed.contains("1_1_2").await.unwrap());
-    assert!(delayed.remove_all(&["1_1_1", "1_1_2"]).await.unwrap());
+    assert!(delayed.remove_values(&["1_1_1", "1_1_2"]).await.unwrap());
     assert!(!delayed.contains("1_1_1").await.unwrap());
     assert!(!delayed.contains("1_1_2").await.unwrap());
     sleep(Duration::from_millis(1200)).await;
@@ -307,15 +307,15 @@ async fn three_two_one(delayed: &DelayedQueue<i32, JsonCodec>) {
 
 // Redisson: testDealyedQueueRetainAll
 #[tokio::test]
-async fn retain_all_keeps_only_the_listed_values_and_delivers_them() {
+async fn retain_values_keeps_only_the_listed_values_and_delivers_them() {
     let client = client().await;
     let (destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
-    assert!(!delayed.retain_all(&[&1, &2, &3]).await.unwrap());
-    assert!(!delayed.retain_all(&[&3, &1, &2, &8]).await.unwrap());
-    assert_eq!(delayed.values().await.unwrap(), [3, 1, 2]);
-    assert!(delayed.retain_all(&[&1, &2]).await.unwrap());
-    assert_eq!(delayed.values().await.unwrap(), [1, 2]);
+    assert!(!delayed.retain_values(&[&1, &2, &3]).await.unwrap());
+    assert!(!delayed.retain_values(&[&3, &1, &2, &8]).await.unwrap());
+    assert_eq!(delayed.to_vec().await.unwrap(), [3, 1, 2]);
+    assert!(delayed.retain_values(&[&1, &2]).await.unwrap());
+    assert_eq!(delayed.to_vec().await.unwrap(), [1, 2]);
     sleep(Duration::from_millis(5500)).await;
     let mut delivered = contents(&destination).await;
     delivered.sort_unstable();
@@ -324,22 +324,22 @@ async fn retain_all_keeps_only_the_listed_values_and_delivers_them() {
 
 // Redisson: testDealyedQueueReadAll
 #[tokio::test]
-async fn values_lists_the_pending_values_in_insertion_order() {
+async fn to_vec_lists_the_pending_values_in_insertion_order() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
-    assert_eq!(delayed.values().await.unwrap(), [3, 1, 2]);
+    assert_eq!(delayed.to_vec().await.unwrap(), [3, 1, 2]);
 }
 
 // Redisson: testDealyedQueueRemoveAll
 #[tokio::test]
-async fn remove_all_reports_true_when_any_listed_value_was_removed() {
+async fn remove_values_reports_true_when_any_listed_value_was_removed() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
-    assert!(delayed.remove_all(&[&1, &2]).await.unwrap());
-    assert_eq!(delayed.values().await.unwrap(), [3]);
-    assert!(delayed.remove_all(&[&3, &4]).await.unwrap());
+    assert!(delayed.remove_values(&[&1, &2]).await.unwrap());
+    assert_eq!(delayed.to_vec().await.unwrap(), [3]);
+    assert!(delayed.remove_values(&[&3, &4]).await.unwrap());
     assert!(delayed.is_empty().await.unwrap());
 }
 
@@ -373,21 +373,21 @@ async fn remove_reports_whether_the_value_was_pending() {
     three_two_one(&delayed).await;
     assert!(!delayed.remove(&4).await.unwrap());
     assert!(delayed.remove(&3).await.unwrap());
-    assert_eq!(delayed.values().await.unwrap(), [1, 2]);
+    assert_eq!(delayed.to_vec().await.unwrap(), [1, 2]);
 }
 
 // Redisson: testDealyedQueuePeek
 #[tokio::test]
-async fn peek_returns_the_first_inserted_value() {
+async fn front_returns_the_first_inserted_value() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     three_two_one(&delayed).await;
-    assert_eq!(delayed.peek().await.unwrap(), Some(3));
+    assert_eq!(delayed.front().await.unwrap(), Some(3));
 }
 
 // Redisson: testDealyedQueuePollLastAndOfferFirstTo
 #[tokio::test]
-async fn poll_last_and_offer_first_to_moves_the_newest_value() {
+async fn pop_back_push_front_moves_the_newest_value() {
     let client = client().await;
     let (_destination, delayed) = numbers(&client, &unique("test"));
     delayed.push(&3, Duration::from_secs(5)).await.unwrap();
@@ -397,16 +397,13 @@ async fn poll_last_and_offer_first_to_moves_the_newest_value() {
     for value in [6, 5, 4] {
         other.push_back(&value).await.unwrap();
     }
-    assert_eq!(
-        delayed.poll_last_and_offer_first_to(&other).await.unwrap(),
-        Some(1)
-    );
+    assert_eq!(delayed.pop_back_push_front(&other).await.unwrap(), Some(1));
     assert_eq!(contents(&other).await, [1, 6, 5, 4]);
 }
 
 // Redisson: testDelayedQueueOrder
 #[tokio::test]
-async fn poll_returns_the_values_in_insertion_order_not_due_order() {
+async fn pop_front_returns_the_values_in_insertion_order_not_due_order() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("4", 4), ("3", 3), ("2", 2)] {
@@ -415,9 +412,9 @@ async fn poll_returns_the_values_in_insertion_order_not_due_order() {
             .await
             .unwrap();
     }
-    assert_eq!(delayed.values().await.unwrap(), ["1", "4", "3", "2"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["1", "4", "3", "2"]);
     for value in ["1", "4", "3", "2"] {
-        assert_eq!(delayed.poll().await.unwrap().as_deref(), Some(value));
+        assert_eq!(delayed.pop_front().await.unwrap().as_deref(), Some(value));
     }
     assert!(destination.is_empty().await.unwrap());
     assert_eq!(destination.pop_front().await.unwrap(), None);
@@ -425,7 +422,7 @@ async fn poll_returns_the_values_in_insertion_order_not_due_order() {
 
 // Redisson: testPollLimited
 #[tokio::test]
-async fn poll_many_takes_pending_values_so_none_are_delivered() {
+async fn pop_front_many_takes_pending_values_so_none_are_delivered() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("2", 2), ("3", 3), ("4", 4)] {
@@ -434,9 +431,9 @@ async fn poll_many_takes_pending_values_so_none_are_delivered() {
             .await
             .unwrap();
     }
-    assert_eq!(delayed.poll_many(3).await.unwrap(), ["1", "2", "3"]);
-    assert_eq!(delayed.poll_many(2).await.unwrap(), ["4"]);
-    assert!(delayed.poll_many(2).await.unwrap().is_empty());
+    assert_eq!(delayed.pop_front_many(3).await.unwrap(), ["1", "2", "3"]);
+    assert_eq!(delayed.pop_front_many(2).await.unwrap(), ["4"]);
+    assert!(delayed.pop_front_many(2).await.unwrap().is_empty());
     sleep(Duration::from_millis(1500)).await;
     assert!(destination.is_empty().await.unwrap());
     assert_eq!(destination.pop_front().await.unwrap(), None);
@@ -444,7 +441,7 @@ async fn poll_many_takes_pending_values_so_none_are_delivered() {
 
 // Redisson: testPoll
 #[tokio::test]
-async fn polled_values_are_never_delivered() {
+async fn popped_values_are_never_delivered() {
     let client = client().await;
     let (destination, delayed) = pair(&client, &unique("test"));
     for (value, seconds) in [("1", 1), ("2", 2), ("3", 3), ("4", 4)] {
@@ -454,7 +451,7 @@ async fn polled_values_are_never_delivered() {
             .unwrap();
     }
     for value in ["1", "2", "3", "4"] {
-        assert_eq!(delayed.poll().await.unwrap().as_deref(), Some(value));
+        assert_eq!(delayed.pop_front().await.unwrap().as_deref(), Some(value));
     }
     sleep(Duration::from_millis(1500)).await;
     assert!(destination.is_empty().await.unwrap());
@@ -474,28 +471,28 @@ async fn each_value_is_delivered_at_its_own_due_time() {
     }
     let started = Instant::now();
     let at = |millis: u64| sleep_until_offset(started, millis);
-    assert_eq!(delayed.values().await.unwrap(), ["1", "2", "4", "2", "3"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["1", "2", "4", "2", "3"]);
 
     at(500).await;
     assert!(destination.is_empty().await.unwrap());
     at(1300).await;
     assert_eq!(contents(&destination).await, ["1"]);
-    assert_eq!(delayed.values().await.unwrap(), ["2", "4", "2", "3"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["2", "4", "2", "3"]);
     at(1700).await;
     assert_eq!(contents(&destination).await, ["1"]);
     at(2300).await;
     assert_eq!(contents(&destination).await, ["1", "2"]);
-    assert_eq!(delayed.values().await.unwrap(), ["2", "4", "3"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["2", "4", "3"]);
     at(2700).await;
     assert_eq!(contents(&destination).await, ["1", "2"]);
     at(3300).await;
     assert_eq!(contents(&destination).await, ["1", "2", "3"]);
-    assert_eq!(delayed.values().await.unwrap(), ["2", "4"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["2", "4"]);
     at(3700).await;
     assert_eq!(contents(&destination).await, ["1", "2", "3"]);
     at(4300).await;
     assert_eq!(contents(&destination).await, ["1", "2", "3", "4"]);
-    assert_eq!(delayed.values().await.unwrap(), ["2"]);
+    assert_eq!(delayed.to_vec().await.unwrap(), ["2"]);
     at(4700).await;
     assert_eq!(contents(&destination).await, ["1", "2", "3", "4"]);
     at(5300).await;

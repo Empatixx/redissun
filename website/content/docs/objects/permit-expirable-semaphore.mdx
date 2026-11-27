@@ -7,7 +7,7 @@ A `PermitExpirableSemaphore` is a semaphore whose every permit has an id, like R
 
 ```rust
 let slots = client.permit_expirable_semaphore("render-slots");
-slots.try_set_permits(4).await?;
+slots.init_permits(4).await?;
 
 let id = slots.acquire().lease(Duration::from_secs(30)).await?;
 // … render …
@@ -25,7 +25,7 @@ slots.release(&id).await?;
 | `try_release(&id)`, `try_release_many(&ids)` | return whether, or how many, were released |
 | `update_lease(&id, Some(d))` | gives a held permit a new lease from now; `None` removes it |
 | `lease_time(&id)` | the time left, `None` without a lease |
-| `try_set_permits(n)` | only when the semaphore does not exist yet |
+| `init_permits(n)` | only when the semaphore does not exist yet |
 | `set_permits(n)` | the number of permits, free and held together |
 | `add_permits(n)` | adds free permits; a negative number takes them away |
 | `available_permits()`, `acquired_permits()`, `permits()` | free, held, and both together |

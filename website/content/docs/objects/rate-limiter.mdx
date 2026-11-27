@@ -10,7 +10,7 @@ use redissun::RateType;
 use std::time::Duration;
 
 let limiter = client.rate_limiter("api");
-limiter.try_set_rate(RateType::Overall, 100, Duration::from_secs(1)).await?;
+limiter.init_rate(RateType::Overall, 100, Duration::from_secs(1)).await?;
 
 if limiter.try_acquire(1).await? {
     // allowed
@@ -21,8 +21,11 @@ if limiter.try_acquire(1).await? {
 
 | Method | What it does |
 |---|---|
-| `try_set_rate(type, rate, interval)` | sets the rate, only if the limiter is not set yet |
-| `set_rate(type, rate, interval)` | replaces the rate and forgets the permits already used |
+| `init_rate(type, rate, interval)` | sets the rate, only if the limiter is not set yet |
+| `set_rate(type, rate, interval)` | replaces the rate and forgets the permits already used, unless you add `.keep_state(true)` |
+| `update_rate(type, rate, interval)` | like `set_rate`, only if the limiter is set already. Returns `true` if it was. |
+
+All three take `.keep_alive(d)`: the limiter is removed when nobody uses it for `d`. `d` must be at least the interval.
 
 `RateType::Overall` shares the limit between all clients. `RateType::PerClient` counts the permits of each client separately.
 

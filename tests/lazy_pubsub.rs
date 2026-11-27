@@ -42,8 +42,8 @@ async fn a_topic_subscriber_opens_the_subscriber_connection() {
     let name = unique("lazy").replace(':', "-");
     let client = connect_with(|builder| builder.pool_size(1).client_name(name.clone())).await;
     let topic = client.topic::<String>(unique("topic"));
-    assert_eq!(topic.listener_count().await, 0);
-    topic.remove_all_listeners().await;
+    assert_eq!(topic.local_subscriber_count().await, 0);
+    topic.unsubscribe_all().await;
     assert_eq!(connections(&name).await, 1);
 
     let mut subscriber = topic.subscribe().await.unwrap();

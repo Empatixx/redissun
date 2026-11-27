@@ -55,7 +55,7 @@ async fn a_single_server_is_one_master_without_replicas_or_sentinels() {
 }
 
 #[tokio::test]
-async fn a_node_answers_info_time_and_size() {
+async fn a_node_answers_info_time_and_db_size() {
     let client = common::client().await;
     let master = client.nodes().masters().await.remove(0);
     assert!(master.ping().await);
@@ -70,7 +70,7 @@ async fn a_node_answers_info_time_and_size() {
         .set("x")
         .await
         .unwrap();
-    assert!(master.size().await.unwrap() >= 1);
+    assert!(master.db_size().await.unwrap() >= 1);
     let memory = master.memory_statistics().await.unwrap();
     assert!(memory.contains_key("peak.allocated"), "{memory:?}");
 }
@@ -218,10 +218,10 @@ async fn sentinel_lists_its_sentinels_and_answers_for_the_master() {
         .contains_key("redis_version"));
     let master = nodes.masters().await.remove(0);
     assert_eq!(
-        first.master_addr("mymaster").await.unwrap(),
+        first.master_address("mymaster").await.unwrap(),
         Some(master.address().to_string())
     );
-    assert_eq!(first.master_addr("unknown").await.unwrap(), None);
+    assert_eq!(first.master_address("unknown").await.unwrap(), None);
     assert_eq!(
         first
             .master("mymaster")
@@ -248,7 +248,7 @@ async fn sentinel_lists_its_sentinels_and_answers_for_the_master() {
     let old = master.address().to_string();
     first.failover("mymaster").await.unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while first.master_addr("mymaster").await.unwrap() == Some(old.clone()) {
+    while first.master_address("mymaster").await.unwrap() == Some(old.clone()) {
         assert!(tokio::time::Instant::now() < deadline, "no failover");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

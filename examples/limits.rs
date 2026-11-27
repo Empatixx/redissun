@@ -9,16 +9,16 @@ async fn main() -> redissun::Result<()> {
 
     let limiter = client.rate_limiter("example:api");
     limiter
-        .try_set_rate(RateType::Overall, 5, Duration::from_secs(1))
+        .init_rate(RateType::Overall, 5, Duration::from_secs(1))
         .await?;
     for call in 1..=7 {
         println!("call {call} allowed: {}", limiter.try_acquire(1).await?);
     }
 
     let semaphore = client.semaphore("example:workers");
-    semaphore.try_set_permits(2).await?;
-    let first = semaphore.acquire(1).await?;
-    let second = semaphore.acquire(1).await?;
+    semaphore.init_permits(2).await?;
+    let first = semaphore.acquire().await?;
+    let second = semaphore.acquire().await?;
     println!("workers left: {}", semaphore.available_permits().await?);
     first.release().await?;
     second.release().await?;
@@ -27,7 +27,7 @@ async fn main() -> redissun::Result<()> {
     println!("visits: {}", counter.incr().await?);
 
     let latch = client.count_down_latch("example:ready");
-    latch.try_set_count(1).await?;
+    latch.init_count(1).await?;
     latch.count_down().await?;
     latch.wait().await?;
     println!("latch open");

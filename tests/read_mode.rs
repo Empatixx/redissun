@@ -94,7 +94,7 @@ async fn replica_mode_reads_from_replicas_but_keeps_coordination_on_the_master()
     assert_eq!((on_master, on_replicas), (0, READS));
 
     let semaphore = client.semaphore(unique("read-mode-semaphore"));
-    assert!(semaphore.try_set_permits(3).await.unwrap());
+    assert!(semaphore.init_permits(3).await.unwrap());
     let master = cluster_master(&topology, semaphore_name(&semaphore)).await;
     topology.wait_until_replicated(master).await;
     let before = get_calls(&topology, master).await;

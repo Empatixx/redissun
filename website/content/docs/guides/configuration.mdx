@@ -42,7 +42,7 @@ let client = Client::builder()
 | `retry_delay` | `EqualJitter` 1 s to 2 s | `retryDelay` | pause between two retries of a batch or a lock write |
 | `reconnection_delay` | `EqualJitter` 100 ms to 10 s | `reconnectionDelay` | pause between two reconnection attempts |
 | `ping_connection_interval` | 30 s | `pingConnectionInterval` | how often each connection is checked with `PING` |
-| `keep_alive` | false | `keepAlive` | TCP keep-alive |
+| `tcp_keep_alive` | false | `keepAlive` | TCP keep-alive |
 | `tcp_keep_alive_idle` | system | `tcpKeepAliveIdle` | idle time before the first keep-alive probe |
 | `tcp_keep_alive_interval` | system | `tcpKeepAliveInterval` | pause between keep-alive probes |
 | `tcp_no_delay` | true | `tcpNoDelay` | `TCP_NODELAY` |

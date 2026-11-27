@@ -224,8 +224,8 @@ impl<N: Summable> Adder<N> {
             .await?;
         let semaphore = Semaphore::new(part(key, &id, "semaphore"));
         let answered = match wait {
-            Some(wait) => semaphore.acquire(listeners).timeout(wait).await?,
-            None => Some(semaphore.acquire(listeners).await?),
+            Some(wait) => semaphore.acquire_many(listeners).timeout(wait).await?,
+            None => Some(semaphore.acquire_many(listeners).await?),
         };
         let Some(permits) = answered else {
             return Ok(None);

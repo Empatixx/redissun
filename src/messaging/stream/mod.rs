@@ -422,7 +422,8 @@ where
     }
 
     /// Moves the last delivered id of a group to `id` (`XGROUP SETID`), so entries after it are delivered again.
-    pub async fn update_group_message_id(&self, group: &str, id: &StreamId) -> Result<()> {
+    #[doc(alias = "updateGroupMessageId")]
+    pub async fn set_group_id(&self, group: &str, id: &StreamId) -> Result<()> {
         let args = vec![
             Arg::from("SETID"),
             Arg::from(self.key.redis_key()),
@@ -579,7 +580,8 @@ where
     }
 
     /// Like [`claim`](Stream::claim) but returns only the ids (`JUSTID`), and does not count as a delivery.
-    pub async fn fast_claim(
+    #[doc(alias = "fastClaim")]
+    pub async fn claim_ids(
         &self,
         group: &str,
         consumer: &str,
@@ -643,7 +645,8 @@ where
     }
 
     /// Like [`auto_claim`](Stream::auto_claim) but returns only the next id and the claimed ids (`JUSTID`).
-    pub async fn fast_auto_claim(
+    #[doc(alias = "fastAutoClaim")]
+    pub async fn auto_claim_ids(
         &self,
         group: &str,
         consumer: &str,

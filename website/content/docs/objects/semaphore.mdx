@@ -7,9 +7,9 @@ A `Semaphore` holds a number of permits in Redis. A program takes permits before
 
 ```rust
 let semaphore = client.semaphore("workers");
-semaphore.try_set_permits(3).await?;
+semaphore.init_permits(3).await?;
 
-let permits = semaphore.acquire(1).await?;
+let permits = semaphore.acquire().await?;
 // do the work
 permits.release().await?;
 ```
@@ -18,17 +18,17 @@ permits.release().await?;
 
 | Method | What it does |
 |---|---|
-| `try_set_permits(n)` | sets the permits, only if the semaphore does not exist. Returns `true` if it did. |
+| `init_permits(n)` | sets the permits, only if the semaphore does not exist. Returns `true` if it did. Add `.ttl(d)` to remove the semaphore after `d`. |
 | `add_permits(n)` | adds permits and wakes waiters |
 | `available_permits()` | permits free now. A missing semaphore has 0. |
 | `drain_permits()` | takes all free permits and returns how many |
-| `acquire(n)` | waits for `n` permits. Add `.timeout(wait)` to get `None` when `wait` runs out. |
-| `try_acquire(n)` | takes `n` permits or returns `None` at once |
+| `acquire()`, `acquire_many(n)` | waits for one or `n` permits. Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `try_acquire()`, `try_acquire_many(n)` | takes one or `n` permits or returns `None` at once |
 | `release(n)` | gives `n` permits back by hand |
 
 ## The Permits value
 
-`acquire`, `try_acquire` and `acquire(n).timeout(wait)` give `Permits`.
+`acquire`, `acquire_many`, `try_acquire`, `try_acquire_many` and `acquire_many(n).timeout(wait)` give `Permits`.
 
 - `release().await` gives the permits back and shows errors.
 - If you drop it, the permits are given back in the background.

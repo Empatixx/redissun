@@ -27,7 +27,7 @@ async fn try_acquire(s: &PermitExpirableSemaphore, wait: u64, lease: u64) -> Opt
 #[tokio::test]
 async fn update_lease_works_only_for_a_held_permit() {
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     assert!(!s.update_lease("1234", Some(MS(1000))).await.unwrap());
     let id = s.acquire().await.unwrap();
     assert!(s.update_lease(&id, Some(MS(1000))).await.unwrap());
@@ -51,7 +51,7 @@ async fn a_missing_semaphore_has_no_permits() {
 async fn permits_with_a_lease_come_back_by_themselves() {
     // Redisson's testAvailablePermits, testAcquiredPermits and testGetPermits.
     let s = semaphore().await;
-    assert!(s.try_set_permits(2).await.unwrap());
+    assert!(s.init_permits(2).await.unwrap());
     assert_eq!(s.available_permits().await.unwrap(), 2);
     assert_eq!(s.acquired_permits().await.unwrap(), 0);
     assert_eq!(s.permits().await.unwrap(), 2);
@@ -75,7 +75,7 @@ async fn expire_reaches_the_held_permits_too() {
     let client = client().await;
     let name = unique("some-key");
     let s = client.permit_expirable_semaphore(&*name);
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     s.expire(Duration::from_secs(3)).await.unwrap();
     try_acquire(&s, 1000, 1000).await.unwrap();
     assert!(client
@@ -93,7 +93,7 @@ async fn expire_reaches_the_held_permits_too() {
 async fn a_waiter_gets_the_permit_when_the_lease_ends() {
     // Redisson's testExpire and testExpireTryAcquire.
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     let id = s.acquire().lease(MS(2000)).await.unwrap();
     let start = Instant::now();
     let other = s.clone();
@@ -109,11 +109,11 @@ async fn a_waiter_gets_the_permit_when_the_lease_ends() {
 }
 
 #[tokio::test]
-async fn try_set_permits_sets_only_a_missing_semaphore() {
+async fn init_permits_sets_only_a_missing_semaphore() {
     let s = semaphore().await;
-    assert!(s.try_set_permits(10).await.unwrap());
+    assert!(s.init_permits(10).await.unwrap());
     assert_eq!(s.available_permits().await.unwrap(), 10);
-    assert!(!s.try_set_permits(15).await.unwrap());
+    assert!(!s.init_permits(15).await.unwrap());
     assert_eq!(s.available_permits().await.unwrap(), 10);
 }
 
@@ -130,7 +130,7 @@ async fn set_permits_sets_free_and_held_together() {
     let s = semaphore().await;
     s.set_permits(10).await.unwrap();
     assert_eq!(counts(&s).await, (10, 10, 0));
-    assert!(!s.try_set_permits(15).await.unwrap());
+    assert!(!s.init_permits(15).await.unwrap());
     assert_eq!(counts(&s).await, (10, 10, 0));
     s.set_permits(15).await.unwrap();
     assert_eq!(counts(&s).await, (15, 15, 0));
@@ -151,7 +151,7 @@ async fn set_permits_sets_free_and_held_together() {
 #[tokio::test]
 async fn add_permits_may_go_below_zero() {
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     s.add_permits(5).await.unwrap();
     assert_eq!(s.available_permits().await.unwrap(), 15);
     s.add_permits(-10).await.unwrap();
@@ -163,7 +163,7 @@ async fn add_permits_may_go_below_zero() {
 #[tokio::test]
 async fn acquire_waits_for_a_release() {
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     let id = s.acquire().await.unwrap();
     assert_eq!(id.len(), 32);
     let other = s.clone();
@@ -180,7 +180,7 @@ async fn acquire_waits_for_a_release() {
 #[tokio::test]
 async fn acquire_many_and_release_many() {
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     let ids = s.acquire_many(6).await.unwrap();
     assert_eq!(ids.len(), 6);
     assert_eq!(s.available_permits().await.unwrap(), 4);
@@ -197,7 +197,7 @@ async fn acquire_many_and_release_many() {
 #[tokio::test]
 async fn try_acquire_takes_a_permit_only_when_one_is_free() {
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     let id = s.try_acquire().await.unwrap().unwrap();
     assert_eq!(id.len(), 32);
     assert_eq!(s.try_acquire().await.unwrap(), None);
@@ -217,7 +217,7 @@ async fn try_acquire_takes_a_permit_only_when_one_is_free() {
 #[tokio::test]
 async fn try_acquire_many_takes_all_or_none() {
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     assert_eq!(s.try_acquire_many(4).await.unwrap().len(), 4);
     assert_eq!(s.try_acquire_many(5).await.unwrap().len(), 5);
     assert!(s.try_acquire_many(2).await.unwrap().is_empty());
@@ -238,7 +238,7 @@ async fn releasing_a_permit_that_is_not_held_fails() {
 #[tokio::test]
 async fn releasing_an_expired_permit_gives_false() {
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     let id = try_acquire(&s, 100, 100).await.unwrap();
     sleep(MS(200)).await;
     assert!(!s.try_release(&id).await.unwrap());
@@ -249,7 +249,7 @@ async fn one_permit_is_held_by_one_task_at_a_time() {
     // Redisson's testConcurrency_SingleInstance and testConcurrencyLoop_MultiInstance.
     let name = unique("semaphore");
     let first = client().await.permit_expirable_semaphore(&*name);
-    first.try_set_permits(1).await.unwrap();
+    first.init_permits(1).await.unwrap();
     let inside = Arc::new(AtomicU32::new(0));
     let counter = Arc::new(AtomicU32::new(0));
     let mut tasks = Vec::new();
@@ -279,7 +279,7 @@ async fn one_permit_is_held_by_one_task_at_a_time() {
 async fn try_release_many_counts_the_released_permits() {
     // Redisson's testReleaseAsyncMany.
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     let ids = s.acquire_many(6).await.unwrap();
     assert_eq!(s.try_release_many(&ids[..4]).await.unwrap(), 4);
     assert_eq!(s.available_permits().await.unwrap(), 8);
@@ -296,7 +296,7 @@ async fn try_release_many_counts_the_released_permits() {
 async fn expired_permits_come_back_with_the_next_acquire() {
     // Redisson's testReleaseManyExpiredDoesNotThrow.
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     let ids = s.acquire_many(6).lease(MS(100)).await.unwrap();
     assert_eq!(ids.len(), 6);
     assert_eq!(s.available_permits().await.unwrap(), 4);
@@ -314,7 +314,7 @@ async fn expired_permits_come_back_with_the_next_acquire() {
 async fn try_release_many_releases_nothing_when_one_expired() {
     // Redisson's testTryReleaseManyExpired.
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     let timed = s
         .acquire_many(3)
         .lease(MS(100))
@@ -335,7 +335,7 @@ async fn try_release_many_releases_nothing_when_one_expired() {
 async fn release_many_fails_unless_every_permit_is_held() {
     // Redisson's testReleaseManyNotExistOrExpired.
     let s = semaphore().await;
-    s.try_set_permits(10).await.unwrap();
+    s.init_permits(10).await.unwrap();
     let timed = s.acquire_many(2).lease(MS(100)).await.unwrap();
     let ids = s.try_acquire_many(8).await.unwrap();
     assert_eq!(s.try_release_many(&ids[..2]).await.unwrap(), 2);
@@ -356,7 +356,7 @@ async fn release_many_fails_unless_every_permit_is_held() {
 #[tokio::test]
 async fn lease_time_is_what_the_permit_has_left() {
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     assert!(matches!(
         s.lease_time("1234").await,
         Err(Error::PermitNotHeld(_))
@@ -379,7 +379,7 @@ async fn two_waiters_for_two_permits_both_get_them() {
     // Redisson's testConcurrencyMultiPermits and testConcurrencyMultiPermits2.
     for first_wants in [2, 1] {
         let s = semaphore().await;
-        s.try_set_permits(2).await.unwrap();
+        s.init_permits(2).await.unwrap();
         let succeeded = Arc::new(AtomicU32::new(0));
         let run = |wants: usize| {
             let (s, succeeded) = (s.clone(), succeeded.clone());
@@ -409,7 +409,7 @@ async fn two_waiters_for_two_permits_both_get_them() {
 #[tokio::test]
 async fn a_cancelled_acquire_leaves_no_permit_held() {
     let s = semaphore().await;
-    s.try_set_permits(1).await.unwrap();
+    s.init_permits(1).await.unwrap();
     for _ in 0..20 {
         // An acquire that finished in time hands its permit over; only a cancelled one must release it by itself.
         if let Ok(acquired) = tokio::time::timeout(Duration::from_micros(200), s.acquire()).await {
@@ -431,7 +431,7 @@ async fn rename_and_delete_take_the_held_permits_along() {
     let client = client().await;
     let (name, new_name) = (unique("semaphore"), unique("semaphore"));
     let s = client.permit_expirable_semaphore(&*name);
-    s.try_set_permits(2).await.unwrap();
+    s.init_permits(2).await.unwrap();
     let id = s.acquire().await.unwrap();
     s.rename(&new_name).await.unwrap();
     let renamed = client.permit_expirable_semaphore(&*new_name);

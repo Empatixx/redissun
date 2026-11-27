@@ -202,22 +202,22 @@ async fn subscriber_count_follows_subscribe_and_drop() {
 }
 
 #[tokio::test]
-async fn listener_count_is_kept_per_topic_handle() {
+async fn local_subscriber_count_is_kept_per_topic_handle() {
     let client = client().await;
     let first = client.topic::<i64>(unique("topic"));
-    assert_eq!(first.listener_count().await, 0);
+    assert_eq!(first.local_subscriber_count().await, 0);
     let a = first.subscribe().await.unwrap();
-    assert_eq!(first.listener_count().await, 1);
+    assert_eq!(first.local_subscriber_count().await, 1);
 
     let second = client.topic::<i64>(unique("topic"));
-    assert_eq!(second.listener_count().await, 0);
+    assert_eq!(second.local_subscriber_count().await, 0);
     let b = second.subscribe().await.unwrap();
-    assert_eq!(second.listener_count().await, 1);
+    assert_eq!(second.local_subscriber_count().await, 1);
 
     drop(a);
-    assert_eq!(first.listener_count().await, 0);
+    assert_eq!(first.local_subscriber_count().await, 0);
     drop(b);
-    assert_eq!(second.listener_count().await, 0);
+    assert_eq!(second.local_subscriber_count().await, 0);
 }
 
 #[tokio::test]
@@ -275,7 +275,7 @@ async fn a_message_published_after_subscribe_is_received() {
         .unwrap()
         .unwrap();
     assert_eq!(received, 123);
-    topic.remove_all_listeners().await;
+    topic.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -317,7 +317,7 @@ async fn multi_type_connection() {
     assert_eq!(text.unwrap().unwrap(), "testmsg");
     let number = timeout(Duration::from_secs(1), long_subscriber.recv()).await;
     assert_eq!(number.unwrap().unwrap(), 1);
-    strings.remove_all_listeners().await;
+    strings.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -337,7 +337,7 @@ async fn commands_run_from_a_subscriber_task_do_not_block() {
         .await
         .expect("commands from a listener must not block")
         .unwrap();
-    topic.remove_all_listeners().await;
+    topic.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -354,7 +354,7 @@ async fn lambda_optimization_by_jvm() {
     for task in tasks {
         task.await.unwrap();
     }
-    assert_eq!(topic.listener_count().await, 0);
+    assert_eq!(topic.local_subscriber_count().await, 0);
 }
 
 #[tokio::test]
@@ -405,11 +405,11 @@ async fn dropping_one_subscriber_keeps_the_other_receiving() {
     topic.publish(&message("123")).await.unwrap();
     let received = timeout(Duration::from_secs(5), kept.recv()).await;
     assert_eq!(received.unwrap().unwrap(), message("123"));
-    topic.remove_all_listeners().await;
+    topic.unsubscribe_all().await;
 }
 
 #[tokio::test]
-async fn remove_all_listeners() {
+async fn unsubscribe_all() {
     let client = client().await;
     let name = unique("topic1");
     let topic = client.topic::<Message>(name.clone());
@@ -419,8 +419,8 @@ async fn remove_all_listeners() {
     }
 
     let topic = client.topic::<Message>(name.clone());
-    topic.remove_all_listeners().await;
-    assert_eq!(topic.listener_count().await, 0);
+    topic.unsubscribe_all().await;
+    assert_eq!(topic.local_subscriber_count().await, 0);
     eventually_unsubscribed(&name).await;
     assert_eq!(topic.publish(&message("123")).await.unwrap(), 0);
     for subscriber in &mut subscribers {
@@ -450,7 +450,7 @@ async fn dropped_subscribers_of_a_thousand_channels_release_them_all() {
 }
 
 #[tokio::test]
-async fn remove_all_listeners2() {
+async fn unsubscribe_all2() {
     let client = client().await;
     let name = unique("topic1");
     let mut subscribers = Vec::new();
@@ -460,7 +460,7 @@ async fn remove_all_listeners2() {
             subscribers.push(topic.subscribe().await.unwrap());
         }
         let topic = client.topic::<Message>(name.clone());
-        topic.remove_all_listeners().await;
+        topic.unsubscribe_all().await;
         topic.publish(&message("123")).await.unwrap();
     }
     sleep(Duration::from_millis(500)).await;
@@ -510,7 +510,7 @@ async fn subscribers_on_two_clients_both_get_the_message() {
     topic2.publish(&message("123")).await.unwrap();
     assert_eq!(first.recv().await.unwrap(), message("123"));
     assert_eq!(second.recv().await.unwrap(), message("123"));
-    topic1.remove_all_listeners().await;
+    topic1.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -547,7 +547,7 @@ async fn ten_thousand_messages_reach_two_subscribers_exactly_once() {
         .unwrap()
         .unwrap();
     nothing_arrives(&mut first, Duration::from_millis(500)).await;
-    topic1.remove_all_listeners().await;
+    topic1.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -643,7 +643,7 @@ async fn a_pattern_is_released_after_the_last_subscriber_leaves() {
     let pattern = client.pattern_topic::<String>(format!("{prefix}.*"));
     let first = pattern.subscribe().await.unwrap();
     let second = pattern.subscribe().await.unwrap();
-    assert_eq!(pattern.listener_count().await, 2);
+    assert_eq!(pattern.local_subscriber_count().await, 2);
     let publisher = client.topic::<String>(format!("{prefix}.x"));
     assert_eq!(publisher.publish("a").await.unwrap(), 1);
     drop(first);

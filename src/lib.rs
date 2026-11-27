@@ -68,6 +68,16 @@ pub mod bucket {
     pub use crate::values::bucket::{Replace, Set, TrySet, Update};
 }
 
+/// The builders [`Semaphore`] methods return.
+pub mod semaphore {
+    pub use crate::coordination::semaphore::InitPermits;
+}
+
+/// The builders [`RateLimiter`] methods return.
+pub mod rate_limiter {
+    pub use crate::coordination::rate_limiter::{InitRate, SetRate, UpdateRate};
+}
+
 /// The builders [`Buckets`] methods return.
 pub mod buckets {
     pub use crate::values::buckets::{TrySet, Update};
@@ -103,7 +113,7 @@ pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};
 pub use coordination::latch::CountDownLatch;
 pub use coordination::permit_semaphore::{PermitExpirableSemaphore, PermitRequest};
-pub use coordination::rate_limiter::{RateLimiter, RateLimiterArgs, RateLimiterConfig, RateType};
+pub use coordination::rate_limiter::{RateLimiter, RateLimiterConfig, RateType};
 pub use coordination::semaphore::{Permits, Semaphore};
 pub use error::{Error, Result};
 pub use keys::{KeyEvent, KeyEvents, KeyType, Keys, KeysScan, Migrate};

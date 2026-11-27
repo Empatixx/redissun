@@ -761,12 +761,12 @@ async fn per_key_lock_lives_under_the_redisson_name() {
 async fn per_key_semaphore_and_latch_work() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
     let semaphore = map.semaphore("k").unwrap();
-    assert!(semaphore.try_set_permits(2).await.unwrap());
-    let permits = semaphore.acquire(1).await.unwrap();
+    assert!(semaphore.init_permits(2).await.unwrap());
+    let permits = semaphore.acquire().await.unwrap();
     assert_eq!(semaphore.available_permits().await.unwrap(), 1);
     permits.release().await.unwrap();
     let latch = map.count_down_latch("k").unwrap();
-    assert!(latch.try_set_count(1).await.unwrap());
+    assert!(latch.init_count(1).await.unwrap());
     latch.count_down().await.unwrap();
     assert_eq!(latch.count().await.unwrap(), 0);
     let _ = map.fair_lock("k").unwrap();
