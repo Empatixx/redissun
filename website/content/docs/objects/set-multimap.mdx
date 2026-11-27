@@ -23,6 +23,21 @@ let all = tags.get_all("post-1").await?; // "rust" and "redis", in no particular
 | `len()` | `size` | the values under all keys |
 | `key_len()` | `keySize` | the keys (`HLEN`) |
 | `is_empty()` | `isEmpty` | `len() == 0` |
+| `extend(&k, values)` | `putAll(key, values)` | `true` when any value was new |
+| `remove(&k, &v)` | `remove(key, value)` | the key goes with its last value |
+| `remove_all(&k)` | `removeAll` | removes the key and returns its values |
+| `replace_values(&k, values)` | `replaceValues` | returns the old values |
+| `set_values(&k, values)` | `fastReplaceValues` | replaces without reading the old values |
+| `remove_many(&[&k, ..])` | `fastRemove` | how many of the keys were there |
+| `remove_from_all_keys(&[&v, ..])` | `fastRemoveValue` | removes each value from every key, and a key it empties; how many were removed |
+| `contains_value(&v)`, `contains_entry(&k, &v)` | `containsValue`, `containsEntry` | |
+| `keys_to_vec()` | `readAllKeySet` | every key (`HKEYS`) |
+| `clear()` | `clear`, `delete` | deletes the hash and every set |
+| `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` | `getLock(key)`, … | the objects Redisson keeps per key, under the same names |
+
+## Empty inputs
+
+`extend(&k, [])` sends nothing and returns `false`, so no key is left without values (Redisson's script would add the key to the hash). `replace_values(&k, [])` and `set_values(&k, [])` remove the key, the first returning its old values. `remove_many(&[])` and `remove_from_all_keys(&[])` send nothing and return `0`.
 
 ## How it is stored
 

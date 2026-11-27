@@ -23,6 +23,21 @@ let all = tags.get_all("post-1").await?; // ["rust", "redis"]
 | `len()` | `size` | the values under all keys |
 | `key_len()` | `keySize` | the keys (`HLEN`) |
 | `is_empty()` | `isEmpty` | `len() == 0` |
+| `extend(&k, values)` | `putAll(key, values)` | appends in order; `true` unless there were no values |
+| `remove(&k, &v)` | `remove(key, value)` | removes one occurrence; the key goes with its last value |
+| `remove_all(&k)` | `removeAll` | removes the key and returns its values |
+| `replace_values(&k, values)` | `replaceValues` | returns the old values |
+| `set_values(&k, values)` | `fastReplaceValues` | replaces without reading the old values |
+| `remove_many(&[&k, ..])` | `fastRemove` | how many of the keys were there |
+| `remove_from_all_keys(&[&v, ..])` | `fastRemoveValue` | removes one occurrence of each value per key; how many were removed |
+| `contains_value(&v)`, `contains_entry(&k, &v)` | `containsValue`, `containsEntry` | |
+| `keys_to_vec()` | `readAllKeySet` | every key (`HKEYS`) |
+| `clear()` | `clear`, `delete` | deletes the hash and every list |
+| `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` | `getLock(key)`, … | the objects Redisson keeps per key, under the same names |
+
+## Empty inputs
+
+`extend(&k, [])` sends nothing and returns `false`, so no key is left without values (Redisson's script would add the key to the hash). `replace_values(&k, [])` and `set_values(&k, [])` remove the key, the first returning its old values. `remove_many(&[])` and `remove_from_all_keys(&[])` send nothing and return `0`.
 
 ## How it is stored
 
@@ -30,3 +45,5 @@ Redisson's layout:
 
 - A hash at the name maps each encoded key to `Hash.hash128toBase64` of the encoded key (a 22-character string, stored as is, not encoded). With `JsonCodec` the key `"key"` maps to `IKm9EBQhlzpVIBxUXDHBWw`.
 - The values of a key live in the list `{name}:<hash>`, or `name:<hash>` when the name already has a `{`. So every key of the multimap is in the slot of the name, also in a cluster.
+
+`remove_from_all_keys` never removes a key from the hash, as in Redisson, so a key whose list it emptied still counts in `key_len` and `keys_to_vec` until `remove_all` or `remove_many`; `contains_key` is `false` and `get_all` is empty for it.

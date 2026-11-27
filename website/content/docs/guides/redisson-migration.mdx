@@ -471,6 +471,20 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `size()` | `len()` |
 | `keySize()` | `key_len()` |
 | `isEmpty()` | `is_empty()` |
+| `putAll(k, values)` | `extend(&k, values)` → `bool`; no values send nothing |
+| `remove(k, v)` | `remove(&k, &v)` |
+| `removeAll(k)` | `remove_all(&k)` → `Vec<V>` |
+| `replaceValues(k, values)` | `replace_values(&k, values)` → `Vec<V>` |
+| `fastReplaceValues(k, values)` | `set_values(&k, values)` |
+| `fastRemove(k...)` | `remove_many(&[&k, ..])` → `usize` |
+| `fastRemoveValue(v...)` | `remove_from_all_keys(&[&v, ..])` → `usize` |
+| `containsValue(v)`, `containsEntry(k, v)` | `contains_value(&v)`, `contains_entry(&k, &v)` |
+| `readAllKeySet()` | `keys_to_vec()` → `Vec<K>` |
+| `clear()` | `clear()` |
+| `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |
+| `keySet().contains(k)`, `keySet().remove(k)`, `keySet().size()`, `keySet().clear()` | `contains_key(&k)`, `remove_many(&[&k])`, `key_len()`, `clear()` |
+| `entries().contains(e)`, `entries().remove(e)` | `contains_entry(&k, &v)`, `remove(&k, &v)` |
+| `values().contains(v)`, `values().size()` | `contains_value(&v)`, `len()` |
 
 ## LocalCachedMap
 
