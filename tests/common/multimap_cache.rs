@@ -264,10 +264,10 @@ macro_rules! base_multimap_cache_tests {
     };
 }
 
-/// `every_operation_runs_on_a_cluster` (Review Focus 1) for the multimap that `$factory(&Client, &str)` returns: every method, on a plain and a hash-tagged name, on a 3-master Redis 7.4 cluster. With `expire_key`, the native `expire_key` runs too.
+/// `every_operation_runs_on_a_cluster` (Review Focus 1) for the multimap that `$factory(&Client, &str)` returns: every method, on a plain and a hash-tagged name, on a 3-master Redis 7.4 cluster. With `expire_key`, `expire_key` runs too; with `$extra`, `$extra(&client, &topology).await` runs on the same cluster at the end.
 #[macro_export]
 macro_rules! every_operation_runs_on_a_cluster {
-    ($factory:path $(, $expire_key:ident)?) => {
+    ($factory:path $(, $expire_key:ident $(, $extra:path)?)?) => {
         #[tokio::test]
         async fn every_operation_runs_on_a_cluster() {
             use $crate::common::multimap_cache::Values as _;
@@ -335,6 +335,7 @@ macro_rules! every_operation_runs_on_a_cluster {
                 map.clear().await.unwrap();
                 assert_eq!(map.key_len().await.unwrap(), 0);
             }
+            $($($extra(&client, &topology).await;)?)?
         }
     };
 }

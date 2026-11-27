@@ -470,7 +470,8 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 |---|---|
 | `redisson.getListMultimap("x")`, `redisson.getSetMultimap("x")` | `client.list_multimap("x")`, `client.set_multimap("x")` |
 | `redisson.getListMultimapCache("x")`, `redisson.getSetMultimapCache("x")` | `client.list_multimap_cache("x")`, `client.set_multimap_cache("x")` |
-| `expireKey(k, ttl, unit)` (Cache) | `expire_key(&k, ttl)` → `bool`; the deadline goes to the ttl zset, on the client's clock; `Duration::ZERO` removes the key's TTL |
+| `expireKey(k, ttl, unit)`, `expireKeyAsync(..)` (Cache) | `expire_key(&k, ttl)` → `bool`; the deadline goes to the ttl zset, on the client's clock; `Duration::ZERO` removes the key's TTL |
+| `destroy()` (Cache, `RDestroyable`) | nothing to call: the clean-up task stops with the client |
 | `redisson.getListMultimapCacheNative("x")`, `redisson.getSetMultimapCacheNative("x")` | `client.list_multimap_cache_native("x")`, `client.set_multimap_cache_native("x")` |
 | `expireKey(k, ttl, unit)` (CacheNative) | `expire_key(&k, ttl)` → `bool`; `Duration::ZERO` clears the key's TTL (Redisson's `hpexpire 0` deletes the field instead); Redis 7.4 |
 | `put(k, v)` | `insert(&k, &v)` → `bool` |

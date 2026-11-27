@@ -62,6 +62,50 @@ macro_rules! cache_tests {
             suffix_name(name, $ttl)
         }
 
+        /// The cache parts of `every_operation_runs_on_a_cluster`: key TTLs, a cache handle read, `rename` within the tag with the ttl zset (D4), and one clean-up run on a tagged name (D1).
+        async fn cluster_ttls_and_clean_up(client: &Client, topology: &common::topology::Topology) {
+            let name = format!("{{t}}:{}", unique("mmc-cluster"));
+            let renamed = format!("{name}2");
+            let map = $factory(client, &name);
+            map.extend("k", ["a", "b"]).await.unwrap();
+            map.insert("stay", "c").await.unwrap();
+            assert!(map.expire_key("k", Duration::from_secs(60)).await.unwrap());
+            assert_eq!(map.get("k").unwrap().len().await.unwrap(), 2);
+            assert!(map.contains_key("k").await.unwrap());
+            map.rename(&renamed).await.unwrap();
+            let map = $factory(client, &renamed);
+            let port = topology.cluster_master_of(&renamed).await;
+            let score = topology
+                .cli(port, &["ZSCORE", &ttl_set(&renamed), "\"k\""])
+                .await;
+            assert!(score.trim().parse::<f64>().is_ok(), "{score:?}");
+            assert_eq!(
+                topology
+                    .cli(port, &["EXISTS", &ttl_set(&name)])
+                    .await
+                    .trim(),
+                "0"
+            );
+            let values = map.get("k").unwrap().name().to_string();
+            assert!(map
+                .expire_key("k", Duration::from_millis(200))
+                .await
+                .unwrap());
+            // `redisson_scheduler`'s condition: the clean-up runs within 13 s.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(13);
+            while map.len().await.unwrap() != 1 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "not cleaned after 13 s"
+                );
+                sleep(Duration::from_millis(200)).await;
+            }
+            assert_eq!(topology.cli(port, &["EXISTS", &values]).await.trim(), "0");
+            assert_eq!(map.key_len().await.unwrap(), 1);
+            assert_eq!(map.get_all("stay").await.unwrap(), ["c"]);
+            assert!(map.del().await.unwrap());
+        }
+
         #[tokio::test]
         async fn expire_key_records_a_deadline() {
             let name = unique("mmc");
@@ -355,6 +399,7 @@ macro_rules! cache_tests {
 mod list {
     base_multimap_cache_tests!(super::list_cache);
     cache_tests!(super::list_cache, "redissun_list_multimap_ttl");
+    every_operation_runs_on_a_cluster!(super::list_cache, expire_key, cluster_ttls_and_clean_up);
 
     #[tokio::test]
     async fn cache_handle_reads_respect_the_ttl() {
@@ -450,6 +495,7 @@ mod list {
 mod set {
     base_multimap_cache_tests!(super::set_cache);
     cache_tests!(super::set_cache, "redissun_set_multimap_ttl");
+    every_operation_runs_on_a_cluster!(super::set_cache, expire_key, cluster_ttls_and_clean_up);
 
     #[tokio::test]
     async fn cache_handle_reads_respect_the_ttl() {
