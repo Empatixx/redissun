@@ -45,19 +45,16 @@ pub(crate) fn latch(name: &str) -> String {
 }
 
 /// The main hash of redissun 0.23 and earlier: the name with a hash tag.
-#[allow(dead_code)]
 pub(crate) fn old_main(name: &str) -> String {
     tagged(name)
 }
 
 /// The last-access set of redissun 0.23 and earlier.
-#[allow(dead_code)]
 pub(crate) fn old_last_access(name: &str) -> String {
     format!("redissun__map_cache_last_access__set:{}", tagged(name))
 }
 
 /// The options hash of redissun 0.23 and earlier.
-#[allow(dead_code)]
 pub(crate) fn old_options(name: &str) -> String {
     format!("redissun__map_cache_options:{}", tagged(name))
 }

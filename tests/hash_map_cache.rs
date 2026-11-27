@@ -5158,3 +5158,328 @@ async fn every_operation_runs_on_a_cluster() {
         assert_eq!(cache.len().await.unwrap(), 0, "{name}");
     }
 }
+
+// Task 9: migrate_from_0_23 moves data that redissun 0.23 wrote into Redisson's layout.
+
+/// The 0.23 form of a key built from the name: the name with a hash tag added unless it has one.
+fn old_tag(name: &str) -> String {
+    if name.contains('{') {
+        name.to_string()
+    } else {
+        format!("{{{name}}}")
+    }
+}
+
+/// The raw commands that store what redissun 0.23 stored for `name`: `a` with a TTL, `b` with a max idle, `c` plain, `gone` expired, plus `extra` plain entries `k<i>` = `i`.
+fn layout_0_23(name: &str, extra: usize) -> Vec<Vec<String>> {
+    let tag = old_tag(name);
+    let now = client_now();
+    let mut hset: Vec<String> = [
+        "HSET",
+        &tag,
+        "\"a\"",
+        "0:\"x\"",
+        "\"b\"",
+        "300000:\"y\"",
+        "\"c\"",
+        "\"z\"",
+        "\"gone\"",
+        "0:\"old\"",
+    ]
+    .iter()
+    .map(|part| part.to_string())
+    .collect();
+    for i in 0..extra {
+        hset.push(format!("\"k{i}\""));
+        hset.push(format!("0:{i}"));
+    }
+    let s = |parts: &[&str]| parts.iter().map(|part| part.to_string()).collect();
+    vec![
+        hset,
+        s(&[
+            "ZADD",
+            &format!("redissun__timeout__set:{tag}"),
+            &(now + 60_000).to_string(),
+            "\"a\"",
+            &(now - 1).to_string(),
+            "\"gone\"",
+        ]),
+        s(&[
+            "ZADD",
+            &format!("redissun__idle__set:{tag}"),
+            &(now + 300_000).to_string(),
+            "\"b\"",
+        ]),
+        s(&[
+            "ZADD",
+            &format!("redissun__map_cache_last_access__set:{tag}"),
+            &now.to_string(),
+            "\"a\"",
+            &now.to_string(),
+            "\"b\"",
+            &now.to_string(),
+            "\"c\"",
+            &now.to_string(),
+            "\"gone\"",
+        ]),
+        s(&[
+            "HSET",
+            &format!("redissun__map_cache_options:{tag}"),
+            "max-size",
+            "5000",
+            "mode",
+            "LRU",
+        ]),
+    ]
+}
+
+async fn write_0_23_layout(name: &str, extra: usize) {
+    for command in layout_0_23(name, extra) {
+        let parts: Vec<&str> = command.iter().map(String::as_str).collect();
+        let reply = raw_command(&parts).await;
+        assert!(reply.starts_with(':'), "{command:?}: {reply}");
+    }
+}
+
+/// Runs the migration until it returns 0: how many non-zero calls it took and how many entries they handled.
+async fn migrate_all<K, V>(cache: &Cache<K, V>, batch_size: usize) -> (usize, usize)
+where
+    K: Send + Sync,
+    V: Send + Sync,
+{
+    let (mut calls, mut total) = (0, 0);
+    loop {
+        let handled = cache
+            .migrate_from_0_23()
+            .batch_size(batch_size)
+            .await
+            .unwrap();
+        assert!(handled <= batch_size, "{handled} > {batch_size}");
+        if handled == 0 {
+            return (calls, total);
+        }
+        calls += 1;
+        total += handled;
+        assert!(calls < 10_000, "the migration never ends");
+    }
+}
+
+/// The keys of both layouts for `name`.
+fn every_key(name: &str) -> Vec<String> {
+    let tag = old_tag(name);
+    vec![
+        name.to_string(),
+        format!("redissun__timeout__set:{tag}"),
+        format!("redissun__idle__set:{tag}"),
+        format!("redissun__map_cache__last_access__set:{tag}"),
+        format!("{tag}:redissun_options"),
+        tag.clone(),
+        format!("redissun__map_cache_last_access__set:{tag}"),
+        format!("redissun__map_cache_options:{tag}"),
+    ]
+}
+
+async fn idle_header(name: &str, field: &str) -> String {
+    raw_command(&[
+        "EVAL",
+        "local t, v = struct.unpack('dLc0', redis.call('hget', KEYS[1], ARGV[1])) return tostring(t)",
+        "1",
+        name,
+        field,
+    ])
+    .await
+}
+
+#[tokio::test]
+async fn migrate_moves_live_entries_into_redissons_layout() {
+    let name = unique("cache");
+    write_0_23_layout(&name, 0).await;
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    assert_eq!(cache.migrate_from_0_23().await.unwrap(), 4);
+    assert_eq!(cache.migrate_from_0_23().await.unwrap(), 0);
+    assert_eq!(cache.get("a").await.unwrap(), Some("x".to_string()));
+    assert_eq!(cache.get("b").await.unwrap(), Some("y".to_string()));
+    assert_eq!(cache.get("c").await.unwrap(), Some("z".to_string()));
+    assert_eq!(cache.get("gone").await.unwrap(), None);
+    let ttl = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(
+        ttl > Duration::from_secs(55) && ttl <= Duration::from_secs(60),
+        "{ttl:?}"
+    );
+    assert_eq!(idle_header(&name, "\"b\"").await, "$6\r\n300000\r\n");
+    assert_eq!(idle_header(&name, "\"c\"").await, "$1\r\n0\r\n");
+    assert_eq!(
+        raw_command(&["HSTRLEN", &name, "\"a\""]).await.trim(),
+        ":19"
+    );
+    let tag = old_tag(&name);
+    for old in [
+        tag.clone(),
+        format!("redissun__map_cache_last_access__set:{tag}"),
+        format!("redissun__map_cache_options:{tag}"),
+    ] {
+        assert_eq!(raw_command(&["EXISTS", &old]).await.trim(), ":0", "{old}");
+    }
+    assert_eq!(
+        raw_command(&[
+            "ZSCORE",
+            &format!("redissun__timeout__set:{tag}"),
+            "\"gone\""
+        ])
+        .await
+        .trim(),
+        "$-1"
+    );
+    assert_eq!(
+        raw_command(&[
+            "ZCARD",
+            &format!("redissun__map_cache__last_access__set:{tag}")
+        ])
+        .await
+        .trim(),
+        ":3"
+    );
+}
+
+// Review Focus 7: the migration survives being split into batches.
+#[tokio::test]
+async fn migrate_works_in_batches() {
+    let client = client().await;
+    for name in [unique("cache"), format!("{{{}}}:cache", unique("t"))] {
+        write_0_23_layout(&name, 2500).await;
+        let cache = client.hash_map_cache::<String, i64>(name.clone());
+        let (calls, total) = migrate_all(&cache, 1000).await;
+        assert!(calls >= 3, "{name}: {calls} calls");
+        assert_eq!(total, 2504, "{name}");
+        assert_eq!(cache.len().await.unwrap(), 2503, "{name}");
+        let keys: Vec<String> = (0..2500).map(|i| format!("k{i}")).collect();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let values = cache.get_many(&refs).await.unwrap();
+        let expected: Vec<Option<i64>> = (0..2500).map(Some).collect();
+        assert_eq!(values, expected, "{name}");
+        let strings = client.hash_map_cache::<String, String>(name.clone());
+        assert_eq!(
+            strings.get("b").await.unwrap(),
+            Some("y".to_string()),
+            "{name}"
+        );
+        let tag = old_tag(&name);
+        let mut old = vec![
+            format!("redissun__map_cache_last_access__set:{tag}"),
+            format!("redissun__map_cache_options:{tag}"),
+        ];
+        if tag != name {
+            old.push(tag.clone());
+        }
+        for old in old {
+            assert_eq!(raw_command(&["EXISTS", &old]).await.trim(), ":0", "{old}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn migrate_keeps_the_size_limit() {
+    let name = unique("cache");
+    write_0_23_layout(&name, 0).await;
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    migrate_all(&cache, 1000).await;
+    let options = format!("{}:redissun_options", old_tag(&name));
+    assert_eq!(
+        raw_command(&["HGET", &options, "max-size"]).await,
+        "$4\r\n5000\r\n"
+    );
+    assert_eq!(
+        raw_command(&["HGET", &options, "mode"]).await,
+        "$3\r\nLRU\r\n"
+    );
+    cache.set_max_size(10, EvictionMode::Lru).await.unwrap();
+    for i in 0..15 {
+        cache.insert(&format!("n{i}"), "v").await.unwrap();
+    }
+    assert_eq!(cache.len().await.unwrap(), 10);
+}
+
+#[tokio::test]
+async fn a_second_full_run_moves_nothing() {
+    let client = client().await;
+    for name in [unique("cache"), format!("{{{}}}:cache", unique("t"))] {
+        write_0_23_layout(&name, 300).await;
+        let cache = client.hash_map_cache::<String, String>(name.clone());
+        let (_, total) = migrate_all(&cache, 100).await;
+        assert_eq!(total, 304, "{name}");
+        let mut before = Vec::new();
+        for key in every_key(&name) {
+            before.push(raw_command(&["DUMP", &key]).await);
+        }
+        assert_eq!(migrate_all(&cache, 100).await, (0, 0), "{name}");
+        let mut after = Vec::new();
+        for key in every_key(&name) {
+            after.push(raw_command(&["DUMP", &key]).await);
+        }
+        assert_eq!(before, after, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_zero_batch_size_is_a_config_error() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let result = cache.migrate_from_0_23().batch_size(0).await;
+    assert!(matches!(result, Err(Error::Config(_))), "{result:?}");
+}
+
+#[tokio::test]
+async fn migrate_on_an_empty_or_new_cache_gives_zero() {
+    let client = client().await;
+    let empty = client.hash_map_cache::<String, String>(unique("cache"));
+    assert_eq!(empty.migrate_from_0_23().await.unwrap(), 0);
+    for name in [unique("cache"), format!("{{{}}}:cache", unique("t"))] {
+        let cache = client.hash_map_cache::<String, String>(name.clone());
+        cache
+            .insert("a", "x")
+            .max_idle(Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache.insert("b", "y").await.unwrap();
+        assert_eq!(cache.migrate_from_0_23().await.unwrap(), 0, "{name}");
+        assert_eq!(cache.get("a").await.unwrap(), Some("x".to_string()));
+        assert_eq!(cache.get("b").await.unwrap(), Some("y".to_string()));
+        assert_eq!(cache.len().await.unwrap(), 2);
+    }
+}
+
+// Review Focus 5: the migration touches old and new keys in one script, all in one slot.
+#[tokio::test]
+async fn migration_runs_on_a_cluster() {
+    let topology = Topology::cluster().await;
+    let client = redissun::Client::builder()
+        .url(topology.cluster_url())
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    for name in [unique("cache"), format!("{{{}}}:cache", unique("t"))] {
+        let port = topology.cluster_master_of(&old_tag(&name)).await;
+        for command in layout_0_23(&name, 50) {
+            let parts: Vec<&str> = command.iter().map(String::as_str).collect();
+            let reply = topology.cli(port, &parts).await;
+            assert!(reply.trim().parse::<i64>().is_ok(), "{command:?}: {reply}");
+        }
+        let cache = client.hash_map_cache::<String, i64>(name.clone());
+        let (calls, total) = migrate_all(&cache, 20).await;
+        assert!(calls >= 3, "{name}: {calls} calls");
+        assert_eq!(total, 54, "{name}");
+        assert_eq!(cache.len().await.unwrap(), 53, "{name}");
+        assert_eq!(cache.get("k49").await.unwrap(), Some(49), "{name}");
+        let strings = client.hash_map_cache::<String, String>(name.clone());
+        assert_eq!(
+            strings.get("a").await.unwrap(),
+            Some("x".to_string()),
+            "{name}"
+        );
+    }
+}

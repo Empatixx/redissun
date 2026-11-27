@@ -56,7 +56,8 @@ pub mod hash_map {
 /// The builders [`HashMapCache`] methods return.
 pub mod hash_map_cache {
     pub use crate::collections::hash_map_cache::{
-        EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, LeaseInsert, Set, TryInsert,
+        EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, LeaseInsert, Migrate, Set,
+        TryInsert,
     };
 }
 

@@ -2,12 +2,13 @@
 
 use super::scripts::{
     EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF_NOT_SET, EXPIRE_ENTRY, EXPIRE_ENTRY_IF_NOT_SET,
-    PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS,
+    MIGRATE_FROM_0_23, PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS,
 };
-use super::{limits, HashMapCache, Name, PUBLISH};
+use super::{limits, names, HashMapCache, Name, PUBLISH};
 use crate::codec::Codec;
 use crate::collections::map::entry::{Entry, Target};
 use crate::error::{Error, Result};
+use crate::object::now_millis;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -580,6 +581,79 @@ where
             // Checked before the lock is taken, so a bad duration fails at once.
             limits(self.ttl, None)?;
             Entry::acquire(Target::Cache(self.cache, self.ttl), key).await
+        })
+    }
+}
+
+/// A pending [`HashMapCache::migrate_from_0_23`]. Await it, optionally after setting [`Migrate::batch_size`].
+#[must_use = "a migration does nothing until it is awaited"]
+pub struct Migrate<'a, K, V, C: Codec> {
+    cache: &'a HashMapCache<K, V, C>,
+    batch_size: usize,
+}
+
+impl<K, V, C: Codec> fmt::Debug for Migrate<'_, K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Migrate")
+            .field("batch_size", &self.batch_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, K, V, C: Codec> Migrate<'a, K, V, C> {
+    pub(super) fn new(cache: &'a HashMapCache<K, V, C>) -> Self {
+        Self {
+            cache,
+            batch_size: 1000,
+        }
+    }
+
+    /// Handles at most `batch_size` old entries in this call, 1000 by default. A smaller batch blocks Redis for less time per call and takes more calls. Zero is an [`Error::Config`].
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+}
+
+impl<'a, K, V, C> IntoFuture for Migrate<'a, K, V, C>
+where
+    K: Send + Sync + 'a,
+    V: Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<usize>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            if self.batch_size == 0 {
+                return Err(Error::Config("batch_size must be at least 1".into()));
+            }
+            let name = self.cache.key.name();
+            let mut keys = vec![names::old_main(name)];
+            keys.extend(
+                self.cache
+                    .redis_keys(&[Name::Main, Name::Timeout, Name::Idle]),
+            );
+            keys.push(names::old_last_access(name));
+            keys.push(names::last_access(name));
+            keys.push(names::old_options(name));
+            keys.push(names::options(name));
+            let handled: i64 = self
+                .cache
+                .key
+                .core
+                .eval(
+                    &MIGRATE_FROM_0_23,
+                    keys,
+                    vec![
+                        Bytes::from(now_millis().to_string()),
+                        Bytes::from(self.batch_size.to_string()),
+                    ],
+                )
+                .await?;
+            usize::try_from(handled)
+                .map_err(|_| Error::Codec(format!("migration reported {handled} entries")))
         })
     }
 }

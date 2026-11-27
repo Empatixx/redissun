@@ -50,6 +50,7 @@ let found = sessions.get("abc").await?;
 | `init_max_size(n, mode)` | the same, but only when no limit was set before |
 | `events()`, `events_of(kinds)` | start listening to entry events (`EntryEvent`). Unlike on `HashMap`, these are not keyspace notifications. See below. |
 | `keyspace_events()`, `keyspace_events_of(kinds)` | keyspace notifications of the hash (`MapEvent`), what `HashMap::events()` returns. See below. |
+| `migrate_from_0_23()` | moves data that redissun 0.23 and earlier wrote into the current layout, `.batch_size(n)` old entries per call (1000 by default); call it until it returns `0`. See [Upgrading redissun](/docs/guides/upgrading). |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
 
@@ -160,7 +161,9 @@ The keys, the values and the events are Redisson's `RMapCache` layout with the `
 
 Events are published on the channels `redissun_map_cache_created:{name}`, `redissun_map_cache_updated:{name}`, `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`, each as `struct.pack('Lc0Lc0', #key, key, #value, value)`, and an update with the old value as a third part.
 
-Data written by redissun 0.23 and earlier uses another layout and cannot be read until it is migrated with `migrate_from_0_23()`.
+### Upgrading from 0.23
+
+Data written by redissun 0.23 and earlier uses another layout and cannot be read until it is moved with `while cache.migrate_from_0_23().batch_size(1000).await? > 0 {}`. [Upgrading redissun](/docs/guides/upgrading) has the steps.
 
 ## Object methods
 

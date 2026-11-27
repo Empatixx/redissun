@@ -29,7 +29,9 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-pub use builders::{EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Set, TryInsert};
+pub use builders::{
+    EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Migrate, Set, TryInsert,
+};
 pub(crate) use entry_events::LengthPrefix;
 pub use lease::{Lease, LeaseGuard, LeaseInsert};
 
@@ -1194,6 +1196,17 @@ where
 }
 
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
+    /// Moves data that redissun 0.23 or earlier wrote for this cache into the layout this version and Redisson use, at most [`Migrate::batch_size`] old entries (1000 by default) per call. Resolves to how many old entries the call handled: moved, or dropped because they had expired. `0` means nothing old is left, so call it until it returns `0`:
+    ///
+    /// ```ignore
+    /// while cache.migrate_from_0_23().batch_size(1000).await? > 0 {}
+    /// ```
+    ///
+    /// Stop the 0.23 clients first, then run the loop once per cache, from one client, before any client of this version uses that cache. Each call is one atomic script; the whole migration is not: until the loop has returned `0`, part of the data is in each layout, so old and new clients must not mix and new clients should not write to the cache (a 0.23 client cannot read the new layout, and the event formats differ). A live entry keeps its time to live, max idle time and use score; the old last-access set and the size limit move to their new keys in the last call. Running the loop again is harmless: on a name without `{` it returns `0` at once; on a name with a hash tag it scans the hash once more and moves nothing. It leaves data that Redisson wrote alone, as that is already in the new layout. See the "Upgrading redissun" guide.
+    pub fn migrate_from_0_23(&self) -> Migrate<'_, K, V, C> {
+        Migrate::new(self)
+    }
+
     /// Redisson's `PUT`: replaces the entry, clears its limits and frees a lease on the key. Returns the encoded live value it replaced.
     async fn put(&self, limits: &Limits, k: Bytes, v: Bytes) -> Result<Option<Bytes>> {
         self.key
