@@ -25,13 +25,19 @@ Everything you send to Redis is borrowed: `names.push("jirka")` takes a `&str`. 
 | `set(i, &v)` | `LSET` | `Error::OutOfRange` when `i` is past the end |
 | `replace(i, &v)` | Lua script | like `set`, and returns the old value |
 | `insert(i, &v)`, `insert_many(i, values)` | Lua script | atomic, O(n). `Error::OutOfRange` when `i` is past the length. |
+| `insert_before(&pivot, &v)`, `insert_after(&pivot, &v)` | `LINSERT` | next to the first value equal to `pivot`. Returns the new length, or `None` when no value equals `pivot`. |
 | `remove(i)` | Lua script | atomic, O(n). Returns the removed value, `Error::OutOfRange` past the end. |
 | `range(a..b)` | `LRANGE` | any range: `a..b`, `a..=b`, `..` |
 | `trim(a..=b)` | `LTRIM` | keeps only that range |
 | `to_vec()` | `LRANGE` | all values at once |
 | `position(&v)` and `contains(&v)` | `LPOS` | first equal value |
-| `remove_value(&v)` | `LREM` | removes the first equal value |
+| `rposition(&v)` | `LPOS RANK -1` | index of the last equal value |
+| `contains_all(values)` | Lua script | `true` if every value is there; `true` for no values |
+| `remove_value(&v)` | `LREM` | removes the first equal value; returns whether it did |
+| `remove_value_n(&v, n)` | `LREM` | removes up to `n` equal values from the front and returns how many |
 | `remove_value_all(&v)` | `LREM` | removes every equal value and returns how many |
+| `remove_values(values)` | Lua script | removes every value equal to one of `values`; returns whether any was removed |
+| `retain_values(values)` | Lua script | keeps only the values equal to one of `values`; returns whether any was removed. With no values it deletes the list. |
 | `len()` and `is_empty()` | `LLEN` | |
 | `clear()` | `DEL` | |
 

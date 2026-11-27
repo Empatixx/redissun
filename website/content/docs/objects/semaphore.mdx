@@ -24,7 +24,8 @@ permits.release().await?;
 | `drain_permits()` | takes all free permits and returns how many |
 | `acquire()`, `acquire_many(n)` | waits for one or `n` permits. Add `.timeout(wait)` to get `None` when `wait` runs out. |
 | `try_acquire()`, `try_acquire_many(n)` | takes one or `n` permits or returns `None` at once |
-| `release(n)` | gives `n` permits back by hand |
+| `release(n)` | gives `n` permits back by hand, creating the semaphore when needed |
+| `release_if_exists(n)` | gives `n` permits back only when the semaphore exists. Returns whether it did. |
 
 ## The Permits value
 

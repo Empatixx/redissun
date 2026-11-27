@@ -41,6 +41,7 @@ let visits: i64 = script.run(&INCR).key("visits").arg(&1).await?;
 | `.arg(&v)`, `.args(vs)` | arguments, read as `ARGV[n]`, encoded by the client's codec |
 | `.arg_bytes(b)` | an argument as raw bytes, without the codec |
 | `.read_only()` | runs with `EVAL_RO` or `EVALSHA_RO`. Redis refuses a script that writes. On Redis before 7.0 the plain command is used. |
+| `.mode(ScriptMode::ReadOnly)` | the same as `.read_only()`, like Redisson's `RScript.Mode`. `ScriptMode::ReadWrite` is the default. |
 
 Arguments go through the codec, as in Redisson. With the default JSON codec the string `abc` reaches Lua as `"abc"`, with the quotes. Use `client.with_codec(StringCodec).script()` to pass plain text and numbers. See [Codecs](/docs/guides/codecs).
 

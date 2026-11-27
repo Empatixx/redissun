@@ -36,7 +36,7 @@ for found in near {
 | `to_vec()` | all members in geohash order |
 | `len()`, `is_empty()`, `clear()` | |
 
-`args` is a `GeoSearch`: `GeoSearch::radius(r, unit)` or `GeoSearch::rect(width, height, unit)`, then `.order(GeoOrder::Asc)`, `.count(n)` to limit how many members a search returns, and `.store_dist()` for stores. Units are `GeoUnit::{Meters, Kilometers, Miles, Feet}`.
+`args` is a `GeoSearch`: `GeoSearch::radius(r, unit)` or `GeoSearch::rect(width, height, unit)`, then `.order(GeoOrder::Asc)`, `.count(n)` to limit how many members a search returns, `.count_any(n)` to stop as soon as `n` are found (`COUNT ANY`), and `.store_dist()` for stores. Units are `GeoUnit::{Meters, Kilometers, Miles, Feet}`.
 
 Longitude must be within 180 and latitude within 85.05112878 degrees, otherwise the call is `Error::Config`. Positions are stored with a precision of about 0.6 millimeters, so a position you read back can differ in the last digits. Searches need Redis 6.2 or newer.
 

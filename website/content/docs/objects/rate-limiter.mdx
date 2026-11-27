@@ -27,6 +27,8 @@ if limiter.try_acquire(1).await? {
 
 All three take `.keep_alive(d)`: the limiter is removed when nobody uses it for `d`. `d` must be at least the interval.
 
+`config()` reads the settings back as `Option<RateLimiterConfig>` with `rate_type`, `rate` and `interval`. It is `None` when the limiter is not set.
+
 `RateType::Overall` shares the limit between all clients. `RateType::PerClient` counts the permits of each client separately.
 
 ## Taking permits
@@ -37,6 +39,7 @@ All three take `.keep_alive(d)`: the limiter is removed when nobody uses it for 
 | `acquire(n)` | waits until allowed |
 | `acquire(n).timeout(wait)` | waits up to `wait` for the window to move. Gives `None` when the time runs out. |
 | `available_permits()` | permits you can take now |
+| `release(n)` | hands `n` permits back before their window ends, up to the rate |
 
 Asking for more permits than `rate` is an error. A limiter that was never set is an error too. `0` permits and a `0` rate are `Error::Config`.
 
@@ -44,7 +47,7 @@ Asking for more permits than `rate` is an error. A limiter that was never set is
 
 This is the same method Redisson uses. Three Redis keys hold the state: a hash with the settings, a number with the permits left, and a sorted set with the permits that were taken, scored by time. A Lua script removes the entries that are older than the interval and then either records the new permits or returns how many milliseconds to wait.
 
-One difference: the time comes from the Redis server, not from your computer. So clients with different clocks agree.
+As in Redisson, the time comes from the clock of the client that asks, so keep the clocks of your clients in sync, for example with NTP.
 
 ## Things to know
 

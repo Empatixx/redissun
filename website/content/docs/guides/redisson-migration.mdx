@@ -484,6 +484,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `tryAcquire(n, timeout, unit)` | `acquire(n).timeout(timeout)` |
 | `acquire(n)` | `acquire(n)` |
 | `availablePermits()` | `available_permits()` |
+| `getConfig()` | `config()`, `None` when the limiter is not set |
 | `RateType.OVERALL`, `PER_CLIENT` | `RateType::Overall`, `RateType::PerClient` |
 
 ## Config
@@ -546,4 +547,3 @@ Not available: `subscriptionMode` (redissun subscribes on masters only), load ba
 - `Vec::remove(i)` past the end is `Error::OutOfRange`, also for index 0. Redisson returns `null` for index 0.
 - Values use a serde codec rather than Redisson's Java codecs, so data written with Redisson's default codec is not readable by redissun and the other way round. With `StringCodec` on both sides, plain text values are shared.
 - When a semaphore or latch changes, redissun wakes every waiter and each one tries again. Redisson wakes only as many as there are permits.
-- The rate limiter reads the time from the Redis server. Redisson sends the time of the client.

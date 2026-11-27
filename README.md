@@ -13,6 +13,8 @@
 
 With redissun you use a `HashMap`, a `VecDeque` or a `Lock` in your code, with the names and methods you know from `std`. The data lives in Redis, so every program that uses the same name sees the same object. Every call is async on tokio.
 
+The API follows `std` and `tokio` naming (`insert`, `try_insert`, `entry`, `pop_front`, `swap`), and Redisson's method names are doc aliases, so searching docs.rs for `fastPut` or `getAndSet` finds the redissun method.
+
 It uses the same data layout and Lua scripts as Redisson. It runs on [redis-rs](https://crates.io/crates/redis) and talks to a single Redis server, Sentinel or Redis Cluster, with TLS, retries and reads from replicas. Valkey works too.
 
 ## Install
@@ -79,6 +81,7 @@ async fn main() -> redissun::Result<()> {
 | [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash and sorted set | stable |
 | [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |
+| [`PatternTopic`](https://empatixx.github.io/redissun/docs/objects/topic#pattern-topics) | pub/sub | stable |
 | [`ReliableTopic`](https://empatixx.github.io/redissun/docs/objects/reliable-topic) | stream and sorted set | stable |
 | [`ShardedTopic`](https://empatixx.github.io/redissun/docs/objects/sharded-topic) | shard pub/sub | stable |
 | [`Stream`](https://empatixx.github.io/redissun/docs/objects/stream) | stream | stable |
@@ -92,11 +95,12 @@ async fn main() -> redissun::Result<()> {
 | [`CountDownLatch`](https://empatixx.github.io/redissun/docs/objects/count-down-latch) | string and pub/sub | stable |
 | [`RateLimiter`](https://empatixx.github.io/redissun/docs/objects/rate-limiter) | hash, string and sorted set | stable |
 | [`Keys`](https://empatixx.github.io/redissun/docs/objects/keys) | any key, on every master | stable |
+| [`Nodes`](https://empatixx.github.io/redissun/docs/guides/nodes) | the servers of the client | stable |
 | [`Batch`](https://empatixx.github.io/redissun/docs/objects/batch) | the commands it holds | experimental |
 | [`Script`](https://empatixx.github.io/redissun/docs/guides/scripts) | Lua scripts | stable |
 | [`Function`](https://empatixx.github.io/redissun/docs/guides/scripts) | Redis functions | experimental |
 
-Every object follows Redisson's logic and is tested with Redisson's own tests, ported to Rust. **Stable** objects behave like their Redisson counterpart in every ported test; the locks, `Semaphore`, `AtomicI64`, `RateLimiter` and `VecDeque` also pass the fault-injection tests. **Experimental** objects still differ from Redisson in a known way, and their API may still change. Every object also has the common methods `name`, `del`, `exists`, `rename`, `expire`, `ttl` and `persist` (add `use redissun::Object;`).
+Every object follows Redisson's logic and is tested with Redisson's own tests, ported to Rust. **Stable** objects behave like their Redisson counterpart in every ported test; the locks, `Semaphore`, `AtomicI64`, `RateLimiter` and `VecDeque` also pass the fault-injection tests. **Experimental** objects still differ from Redisson in a known way, and their API may still change. Every object that lives under one name also has the `Object` methods `name`, `del`, `exists`, `rename`, `expire`, `ttl` and `persist` (add `use redissun::Object;`). `Buckets`, `MultiLock`, `Topic`, `PatternTopic`, `ShardedTopic`, `Adder`, `Keys`, `Nodes`, `Batch`, `Script` and `Function` do not have them.
 
 ## Benchmarks
 
@@ -127,20 +131,25 @@ Median of five runs (three for Redisson) on an Apple M5 Pro with Redis 8.10 on t
 
 ## Requirements
 
-- Redis or Valkey 6.2 or newer. `Function` needs 7.0.
+- Redis or Valkey 6.2 or newer. `Function`, `ShardedTopic` and a few methods need 7.0 or newer; each page says which.
 - Rust 2021 edition.
 
 ## Development
 
+These are the checks CI runs (`.github/workflows/ci.yml`):
+
 ```bash
 cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo test
+cargo test --features tls-rustls --test tls
+cargo test --features tls-rustls --test batch batches_work_over_tls
 ```
 
 The tests start Redis with Docker (testcontainers). With Colima, set `DOCKER_HOST` to its socket or put `docker.host` in `~/.testcontainers.properties`. To use a Redis you already run, which is faster, set `REDISSUN_TEST_REDIS_URL=redis://localhost:6379`.
 
-No test is skipped: the Sentinel, Cluster and fault-injection tests start their own topology in Docker and run with every `cargo test`, as Redisson's tests do. The whole run takes a few minutes. The TLS tests need a TLS feature: `cargo test --features tls-rustls --test tls`. To reproduce the benchmarks, see [`benches/README.md`](benches/README.md).
+No test is skipped: the Sentinel, Cluster and fault-injection tests start their own topology in Docker and run with every `cargo test`, as Redisson's tests do. The whole run takes a few minutes. The TLS tests need a TLS feature, which is why they run separately. CI runs the tests against a Redis 7.4 service. To reproduce the benchmarks, see [`benches/README.md`](benches/README.md).
 
 ## License
 

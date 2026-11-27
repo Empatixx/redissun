@@ -87,7 +87,7 @@ Entries for the same key taken in one program, even by futures joined in one tas
 
 ## Events
 
-`events()` returns a stream of `MapEvent`: `Put`, `Incremented`, `Removed`, `Deleted` and `Expired`. `events_of(&[MapEventKind::Removed])` listens to some kinds only. Redis sends these events only when `notify-keyspace-events` enables them: `Eh` for field events, `g` for deletes, `x` for expiry. With `T` (Redis 8.8 or newer) the events name the changed key; otherwise `key` is `None`, as in Redisson.
+`events()` returns `MapEvents`. Call `recv()` for the next `MapEvent`, or `into_stream()` for a `Stream` of them. The kinds are `Put`, `Incremented`, `Removed`, `Deleted` and `Expired`. `events_of(&[MapEventKind::Removed])` listens to some kinds only. Redis sends these events only when `notify-keyspace-events` enables them: `Eh` for field events, `g` for deletes, `x` for expiry. With `T` (Redis 8.8 or newer) the events name the changed key; otherwise `key` is `None`, as in Redisson.
 
 ## Missing keys and null values
 

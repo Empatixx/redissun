@@ -33,6 +33,7 @@ Every method is `async` and returns `redissun::Result<T>`. The **Returns** colum
 | `get_persist()` | `GETEX PERSIST` | the value; the time limit is removed |
 | `len()` | `STRLEN` | length of the encoded value in bytes |
 | `compare_and_set(Some(&expected), Some(&new))` | Lua script | `true` if the value was changed. `None` as expected means "only if missing"; `None` as new deletes the key. |
+| `compare_and_delete(&expected)` | Lua script | `true` if the key held `expected` and was deleted |
 
 
 `set`, `try_set`, `update` and `replace` return builders: add `.ttl(..)` (or `.keep_ttl()` on `set`) before `.await`.
@@ -43,7 +44,7 @@ A time limit must be longer than zero. Very small limits are rounded up to one m
 
 ## Methods for the key
 
-Every object (`Bucket`, `HashMap`, `Vec`, `VecDeque`, `HashSet`, `HashMapCache`, `Lock`, `AtomicI64`, `Semaphore`, `CountDownLatch`, `RateLimiter`) has the `Object` methods:
+Every object that lives under one name (`Bucket`, `HashMap`, `Vec`, `Lock`, `AtomicI64`, `Semaphore` and the others) has the `Object` methods. `Buckets`, `MultiLock`, `Topic`, `PatternTopic`, `ShardedTopic`, `Adder`, `Keys`, `Nodes`, `Batch`, `Script` and `Function` do not.
 
 | Method | Redis command |
 |---|---|

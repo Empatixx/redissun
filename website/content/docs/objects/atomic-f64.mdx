@@ -29,6 +29,6 @@ Every method is `async` and returns `redissun::Result<T>`. The **Returns** colum
 | `fetch_add(delta)` | `INCRBYFLOAT` | the value before; `fetch_add(1.0)` is Redisson's `getAndIncrement` |
 | `incr()` and `decr()` | `INCRBYFLOAT` | the new value |
 
-`compare_and_set` treats a missing number as 0, like Redisson.
+`compare_and_set`, `set_if_less` and `set_if_greater` treat a missing number as 0, like Redisson. `compare_and_delete` takes a `Comparison` (`Less`, `LessOrEqual`, `Greater`, `GreaterOrEqual`, `Equal` or `NotEqual`) and never deletes a missing number.
 
 The value is stored as a plain number, not through the codec. Redis refuses `NaN` and infinity, so those calls return an error.
