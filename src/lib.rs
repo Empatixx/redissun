@@ -134,10 +134,11 @@ pub use collections::hash_map_cache::{
 };
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};
-pub use collections::local_cached_map::{
-    CacheProvider, EvictionPolicy, ExpirationEventPolicy, LocalCachedMap, LocalCachedMapBuilder,
-    ReconnectionStrategy, StoreMode, SyncStrategy,
+pub use collections::local_cache::{
+    CacheProvider, EvictionPolicy, ExpirationEventPolicy, ReconnectionStrategy, StoreMode,
+    SyncStrategy,
 };
+pub use collections::local_cached_map::{LocalCachedMap, LocalCachedMapBuilder};
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
 pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
