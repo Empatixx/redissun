@@ -78,7 +78,7 @@ async fn main() -> redissun::Result<()> {
 | [`BitSet`](https://empatixx.github.io/redissun/docs/objects/bit-set) | string | stable |
 | [`HyperLogLog`](https://empatixx.github.io/redissun/docs/objects/hyper-log-log) | HyperLogLog | stable |
 | [`BloomFilter`](https://empatixx.github.io/redissun/docs/objects/bloom-filter) | string and hash | stable |
-| [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash and sorted set | stable |
+| [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash, sorted sets, strings and pub/sub (Redisson's `RMapCache` layout) | stable |
 | [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |
 | [`PatternTopic`](https://empatixx.github.io/redissun/docs/objects/topic#pattern-topics) | pub/sub | stable |

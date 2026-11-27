@@ -3526,3 +3526,1635 @@ async fn a_guard_insert_over_a_live_entry_stores_but_reports_false() {
     assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("y"));
     assert!(!lease_exists(&name, "a").await);
 }
+
+// ---- Ported from Redisson 4.8.0 RedissonMapCacheTest ----
+
+fn between(found: Duration, low_ms: u64, high_ms: u64) -> bool {
+    (Duration::from_millis(low_ms)..=Duration::from_millis(high_ms)).contains(&found)
+}
+
+async fn left(cache: &Cache<String, String>, k: &str) -> Duration {
+    cache.entry_ttl(k).await.unwrap().expect("no ttl")
+}
+
+// Redisson: testExpireEntry
+#[tokio::test]
+async fn redisson_expire_entry() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("map"));
+    cache.insert("key", "value").await.unwrap();
+    assert!(cache
+        .expire_entry("key")
+        .ttl(Duration::ZERO)
+        .max_idle(Duration::from_millis(20_000))
+        .await
+        .unwrap());
+    let found = left(&cache, "key").await;
+    assert!(between(found, 19_800, 20_000), "{found:?}");
+}
+
+// Redisson: testExpireEntryIfNotSet
+#[tokio::test]
+async fn redisson_expire_entry_if_not_set() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("map"));
+    cache.insert("key", "value").await.unwrap();
+    assert!(cache
+        .expire_entry("key")
+        .ttl(Duration::ZERO)
+        .max_idle(Duration::from_millis(20_000))
+        .if_not_set()
+        .await
+        .unwrap());
+    let found = left(&cache, "key").await;
+    assert!(between(found, 19_800, 20_000), "{found:?}");
+}
+
+// Redisson: testExpireEntries
+#[tokio::test]
+async fn redisson_expire_entries() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("map"));
+    cache.insert("key1", "value").await.unwrap();
+    cache.insert("key2", "value").await.unwrap();
+    cache
+        .expire_entries(&["key1", "key2"])
+        .ttl(Duration::ZERO)
+        .max_idle(Duration::from_millis(20_000))
+        .await
+        .unwrap();
+    let found = left(&cache, "key1").await;
+    assert!(between(found, 19_800, 20_000), "{found:?}");
+}
+
+// Redisson: testExpireEntriesIfNotSet
+#[tokio::test]
+async fn redisson_expire_entries_if_not_set() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("map"));
+    cache.insert("key1", "value").await.unwrap();
+    cache.insert("key2", "value").await.unwrap();
+    cache
+        .expire_entries(&["key1", "key2"])
+        .ttl(Duration::ZERO)
+        .max_idle(Duration::from_millis(20_000))
+        .if_not_set()
+        .await
+        .unwrap();
+    let found = left(&cache, "key1").await;
+    assert!(between(found, 19_800, 20_000), "{found:?}");
+}
+
+// Redisson: testGetAllWithTTLOnly
+#[tokio::test]
+async fn redisson_get_all_with_ttl_only() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("testGetAllWithTTLOnly"));
+    cache
+        .insert(&1, &2)
+        .ttl(Duration::from_secs(3))
+        .await
+        .unwrap();
+    cache
+        .insert(&3, &4)
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    cache
+        .insert(&5, &6)
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        cache.peek_many(&[&1, &3, &5]).await.unwrap(),
+        [Some(2), Some(4), Some(6)]
+    );
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        cache.peek_many(&[&1, &3, &5]).await.unwrap(),
+        [Some(2), None, None]
+    );
+}
+
+// Redisson: testGetWithTTLOnly
+#[tokio::test]
+async fn redisson_get_with_ttl_only() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("testUpdateEntryExpiration"));
+    cache
+        .insert(&1, &2)
+        .ttl(Duration::from_secs(3))
+        .await
+        .unwrap();
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(cache.peek(&1).await.unwrap(), Some(2));
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(cache.peek(&1).await.unwrap(), None);
+}
+
+// Redisson: testEntryEntryIfNotSet
+#[tokio::test]
+async fn redisson_entry_entry_if_not_set() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("testUpdateEntryExpiration"));
+    cache.insert(&1, &10).await.unwrap();
+    cache.insert(&2, &20).await.unwrap();
+    cache
+        .insert(&3, &30)
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(cache
+        .expire_entry(&2)
+        .ttl(Duration::from_secs(2))
+        .if_not_set()
+        .await
+        .unwrap());
+    assert!(!cache
+        .expire_entry(&3)
+        .ttl(Duration::from_secs(4))
+        .if_not_set()
+        .await
+        .unwrap());
+    let ttl2 = cache.entry_ttl(&2).await.unwrap().unwrap();
+    assert!(between(ttl2, 1900, 2000), "{ttl2:?}");
+    sleep(Duration::from_millis(1200)).await;
+    assert!(cache.contains_key(&2).await.unwrap());
+    assert!(!cache.contains_key(&3).await.unwrap());
+    sleep(Duration::from_millis(1300)).await;
+    assert!(!cache.contains_key(&2).await.unwrap());
+}
+
+// Redisson: testEntryEntriesIfNotSet
+#[tokio::test]
+async fn redisson_entry_entries_if_not_set() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("testUpdateEntryExpiration"));
+    cache.insert(&1, &10).await.unwrap();
+    cache.insert(&2, &20).await.unwrap();
+    cache
+        .insert(&3, &30)
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        cache
+            .expire_entries(&[&2, &3])
+            .ttl(Duration::from_secs(2))
+            .if_not_set()
+            .await
+            .unwrap(),
+        1
+    );
+    let ttl2 = cache.entry_ttl(&2).await.unwrap().unwrap();
+    assert!(between(ttl2, 1900, 2000), "{ttl2:?}");
+    sleep(Duration::from_millis(2200)).await;
+    assert_eq!(
+        cache
+            .expire_entries(&[&2, &3])
+            .ttl(Duration::from_secs(2))
+            .if_not_set()
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!cache.contains_key(&2).await.unwrap());
+    assert!(!cache.contains_key(&3).await.unwrap());
+}
+
+// Redisson: testEntryEntries
+#[tokio::test]
+async fn redisson_entry_entries() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("testUpdateEntryExpiration"));
+    for (k, v) in [(1, 10), (2, 20), (3, 30)] {
+        cache
+            .insert(&k, &v)
+            .ttl(Duration::from_secs(3))
+            .await
+            .unwrap();
+    }
+    sleep(Duration::from_secs(2)).await;
+    let ttl = cache.entry_ttl(&1).await.unwrap().unwrap();
+    assert!(between(ttl, 900, 1000), "{ttl:?}");
+    assert_eq!(
+        cache
+            .expire_entries(&[&2, &3])
+            .ttl(Duration::from_secs(2))
+            .await
+            .unwrap(),
+        2
+    );
+    let ttl2 = cache.entry_ttl(&2).await.unwrap().unwrap();
+    assert!(between(ttl2, 1900, 2000), "{ttl2:?}");
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        cache
+            .expire_entries(&[&2, &3])
+            .ttl(Duration::from_secs(2))
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+// Redisson: testUpdateEntryExpiration
+#[tokio::test]
+async fn redisson_update_entry_expiration() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, i32>(unique("testUpdateEntryExpiration"));
+    cache
+        .insert(&1, &2)
+        .ttl(Duration::from_secs(3))
+        .await
+        .unwrap();
+    sleep(Duration::from_secs(2)).await;
+    let ttl = cache.entry_ttl(&1).await.unwrap().unwrap();
+    assert!(between(ttl, 900, 1000), "{ttl:?}");
+    assert!(cache
+        .expire_entry(&1)
+        .ttl(Duration::from_secs(2))
+        .await
+        .unwrap());
+    let ttl2 = cache.entry_ttl(&1).await.unwrap().unwrap();
+    assert!(between(ttl2, 1900, 2000), "{ttl2:?}");
+    sleep(Duration::from_secs(2)).await;
+    assert!(!cache
+        .expire_entry(&1)
+        .ttl(Duration::from_secs(2))
+        .await
+        .unwrap());
+}
+
+// Redisson: testGetAllTTL
+#[tokio::test]
+async fn redisson_get_all_ttl() {
+    let cache = client().await.hash_map_cache::<i32, i32>(unique("getAll"));
+    cache.insert(&1, &100).await.unwrap();
+    cache
+        .insert(&2, &200)
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    cache
+        .insert(&3, &300)
+        .ttl(Duration::from_secs(1))
+        .max_idle(Duration::from_secs(1))
+        .await
+        .unwrap();
+    cache.insert(&4, &400).await.unwrap();
+    assert_eq!(
+        cache.get_many(&[&2, &3, &5]).await.unwrap(),
+        [Some(200), Some(300), None]
+    );
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        cache.get_many(&[&2, &3, &5]).await.unwrap(),
+        [None, None, None]
+    );
+}
+
+// Redisson: testGetAllWithStringKeys
+#[tokio::test]
+async fn redisson_get_all_with_string_keys() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i32>(unique("getAllStrings"));
+    for (k, v) in [("A", 100), ("B", 200), ("C", 300), ("D", 400)] {
+        cache.insert(k, &v).await.unwrap();
+    }
+    assert_eq!(
+        cache.get_many(&["B", "C", "E"]).await.unwrap(),
+        [Some(200), Some(300), None]
+    );
+}
+
+async fn string_cache_with_ttl() -> HashMapCache<String, String, StringCodec> {
+    let cache = client()
+        .await
+        .with_codec(StringCodec)
+        .hash_map_cache::<String, String>(unique("simple"));
+    cache.insert("10", "100").await.unwrap();
+    cache
+        .insert("20", "200")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    cache.insert("30", "300").await.unwrap();
+    cache
+}
+
+fn pattern(pattern: &str) -> redissun::MapScan {
+    redissun::MapScan::new().pattern(pattern)
+}
+
+// Redisson: testKeySetByPatternTTL
+#[tokio::test]
+async fn redisson_key_set_by_pattern_ttl() {
+    let cache = string_cache_with_ttl().await;
+    let found: Vec<String> = cache.keys_with(pattern("?0")).try_collect().await.unwrap();
+    assert_eq!(found, ["10", "20", "30"]);
+    let found: Vec<String> = cache.keys_with(pattern("1")).try_collect().await.unwrap();
+    assert!(found.is_empty());
+    let found: Vec<String> = cache.keys_with(pattern("10")).try_collect().await.unwrap();
+    assert_eq!(found, ["10"]);
+}
+
+// Redisson: testValuesByPatternTTL
+#[tokio::test]
+async fn redisson_values_by_pattern_ttl() {
+    let cache = string_cache_with_ttl().await;
+    let found: Vec<String> = cache
+        .values_with(pattern("?0"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(found, ["100", "200", "300"]);
+    let found: Vec<String> = cache.values_with(pattern("1")).try_collect().await.unwrap();
+    assert!(found.is_empty());
+    let found: Vec<String> = cache
+        .values_with(pattern("10"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(found, ["100"]);
+}
+
+// Redisson: testEntrySetByPatternTTL
+#[tokio::test]
+async fn redisson_entry_set_by_pattern_ttl() {
+    let cache = string_cache_with_ttl().await;
+    let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+    let found: Vec<(String, String)> = cache.iter_with(pattern("?0")).try_collect().await.unwrap();
+    assert_eq!(
+        found,
+        [pair("10", "100"), pair("20", "200"), pair("30", "300")]
+    );
+    let found: Vec<(String, String)> = cache.iter_with(pattern("1")).try_collect().await.unwrap();
+    assert!(found.is_empty());
+    let found: Vec<(String, String)> = cache.iter_with(pattern("10")).try_collect().await.unwrap();
+    assert_eq!(found, [pair("10", "100")]);
+}
+
+// Redisson: testContainsValueTTL
+#[tokio::test]
+async fn redisson_contains_value_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple01"));
+    assert!(!cache.contains_value(&simple_value("34")).await.unwrap());
+    cache
+        .insert(&simple_key("33"), &simple_value("44"))
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(cache.contains_value(&simple_value("44")).await.unwrap());
+    assert!(!cache.contains_value(&simple_value("34")).await.unwrap());
+    sleep(Duration::from_secs(1)).await;
+    assert!(!cache.contains_value(&simple_value("44")).await.unwrap());
+}
+
+// Redisson: testRemoveValueTTL
+#[tokio::test]
+async fn redisson_remove_value_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    cache
+        .insert(&simple_key("1"), &simple_value("2"))
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(cache
+        .remove_if_eq(&simple_key("1"), &simple_value("2"))
+        .await
+        .unwrap());
+    assert_eq!(cache.get(&simple_key("1")).await.unwrap(), None);
+    assert_eq!(cache.len().await.unwrap(), 0);
+    cache
+        .insert(&simple_key("3"), &simple_value("4"))
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    sleep(Duration::from_secs(1)).await;
+    assert!(!cache
+        .remove_if_eq(&simple_key("3"), &simple_value("4"))
+        .await
+        .unwrap());
+    assert_eq!(cache.get(&simple_key("3")).await.unwrap(), None);
+}
+
+// Redisson: testRemoveValueFail
+#[tokio::test]
+async fn redisson_remove_value_fail() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    cache
+        .insert(&simple_key("1"), &simple_value("2"))
+        .await
+        .unwrap();
+    assert!(!cache
+        .remove_if_eq(&simple_key("2"), &simple_value("1"))
+        .await
+        .unwrap());
+    assert!(!cache
+        .remove_if_eq(&simple_key("1"), &simple_value("3"))
+        .await
+        .unwrap());
+    assert_eq!(
+        cache.get(&simple_key("1")).await.unwrap(),
+        Some(simple_value("2"))
+    );
+}
+
+// Redisson: testReplaceOldValueFail
+#[tokio::test]
+async fn redisson_replace_old_value_fail() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    cache
+        .insert(&simple_key("1"), &simple_value("2"))
+        .await
+        .unwrap();
+    assert!(!cache
+        .compare_and_set(&simple_key("1"), &simple_value("43"), &simple_value("31"))
+        .await
+        .unwrap());
+    assert_eq!(
+        cache.get(&simple_key("1")).await.unwrap(),
+        Some(simple_value("2"))
+    );
+}
+
+// Redisson: testReplaceOldValueSuccess
+#[tokio::test]
+async fn redisson_replace_old_value_success() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    cache
+        .insert(&simple_key("1"), &simple_value("2"))
+        .await
+        .unwrap();
+    assert!(cache
+        .compare_and_set(&simple_key("1"), &simple_value("2"), &simple_value("3"))
+        .await
+        .unwrap());
+    assert!(!cache
+        .compare_and_set(&simple_key("1"), &simple_value("2"), &simple_value("3"))
+        .await
+        .unwrap());
+    assert_eq!(
+        cache.get(&simple_key("1")).await.unwrap(),
+        Some(simple_value("3"))
+    );
+}
+
+// Redisson: testReplaceValueTTL
+#[tokio::test]
+async fn redisson_replace_value_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    cache
+        .insert(&simple_key("1"), &simple_value("2"))
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        cache
+            .replace(&simple_key("1"), &simple_value("3"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(cache.get(&simple_key("1")).await.unwrap(), None);
+}
+
+// Redisson: testReplaceValueTTLIdleUpdate
+#[tokio::test]
+async fn redisson_replace_value_ttl_idle_update() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    cache
+        .insert(&simple_key("1"), &simple_value("2"))
+        .ttl(Duration::from_secs(2))
+        .max_idle(Duration::from_secs(1))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(750)).await;
+    // The replace starts the idle time again.
+    assert!(cache
+        .replace(&simple_key("1"), &simple_value("3"))
+        .await
+        .unwrap()
+        .is_some());
+    sleep(Duration::from_millis(750)).await;
+    assert!(cache.get(&simple_key("1")).await.unwrap().is_some());
+    sleep(Duration::from_millis(750)).await;
+    // Gone by the ttl.
+    assert_eq!(cache.get(&simple_key("1")).await.unwrap(), None);
+}
+
+fn two_entries() -> [(SimpleKey, SimpleValue); 2] {
+    [
+        (simple_key("33"), simple_value("44")),
+        (simple_key("55"), simple_value("66")),
+    ]
+}
+
+async fn both(cache: &Cache<SimpleKey, SimpleValue>) -> [Option<SimpleValue>; 2] {
+    [
+        cache.get(&simple_key("33")).await.unwrap(),
+        cache.get(&simple_key("55")).await.unwrap(),
+    ]
+}
+
+fn both_present() -> [Option<SimpleValue>; 2] {
+    [Some(simple_value("44")), Some(simple_value("66"))]
+}
+
+// Redisson: testPutAllGetTTL
+#[tokio::test]
+async fn redisson_put_all_get_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple06"));
+    assert_eq!(both(&cache).await, [None, None]);
+    let entries = two_entries();
+    cache
+        .extend(entries.iter().map(|(k, v)| (k, v)))
+        .ttl(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(both(&cache).await, both_present());
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(cache.len().await.unwrap(), 2);
+    assert_eq!(both(&cache).await, both_present());
+    assert_eq!(cache.len().await.unwrap(), 2);
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(both(&cache).await, [None, None]);
+}
+
+// Redisson: testPutAllGetMaxIdle
+#[tokio::test]
+async fn redisson_put_all_get_max_idle() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple06idle"));
+    assert_eq!(both(&cache).await, [None, None]);
+    let entries = two_entries();
+    cache
+        .extend(entries.iter().map(|(k, v)| (k, v)))
+        .max_idle(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(both(&cache).await, both_present());
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(both(&cache).await, both_present());
+    sleep(Duration::from_millis(2500)).await;
+    assert_eq!(both(&cache).await, [None, None]);
+}
+
+// Redisson: testPutAllGetTTLAndMaxIdle
+#[tokio::test]
+async fn redisson_put_all_get_ttl_and_max_idle() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple06ttlidle"));
+    let entries = two_entries();
+    cache
+        .extend(entries.iter().map(|(k, v)| (k, v)))
+        .ttl(Duration::from_secs(2))
+        .max_idle(Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(both(&cache).await, both_present());
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(both(&cache).await, both_present());
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(both(&cache).await, [None, None]);
+}
+
+// Redisson: testPutAllWithListener
+#[tokio::test]
+async fn redisson_put_all_with_listener() {
+    let cache = client()
+        .await
+        .hash_map_cache::<SimpleKey, SimpleValue>(unique("simple"));
+    let mut events = cache.events_of(&[EntryEventKind::Created]).await.unwrap();
+    assert_eq!(both(&cache).await, [None, None]);
+    let entries = two_entries();
+    cache
+        .extend(entries.iter().map(|(k, v)| (k, v)))
+        .await
+        .unwrap();
+    assert_eq!(both(&cache).await, both_present());
+    let mut created = HashMap::new();
+    for _ in 0..2 {
+        match next(&mut events).await {
+            EntryEvent::Created { key, value } => {
+                created.insert(key, value);
+            }
+            other => panic!("expected a created event, got {other:?}"),
+        }
+    }
+    assert_eq!(created, HashMap::from(entries));
+}
+
+// Redisson: testReadAllEntrySet
+#[tokio::test]
+async fn redisson_read_all_entry_set() {
+    let cache = client()
+        .await
+        .hash_map_cache::<i32, String>(unique("simple12"));
+    cache.insert(&1, "12").await.unwrap();
+    cache
+        .insert(&2, "33")
+        .ttl(Duration::from_secs(600))
+        .max_idle(Duration::from_secs(3600))
+        .await
+        .unwrap();
+    cache.insert(&3, "43").await.unwrap();
+    let iterated: HashMap<i32, String> = cache.iter().try_collect().await.unwrap();
+    assert_eq!(cache.to_hash_map().await.unwrap(), iterated);
+    assert_eq!(iterated.len(), 3);
+}
+
+// Redisson: testReadAllValuesTTL
+#[tokio::test]
+async fn redisson_read_all_values_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testRMapCacheAllValues"));
+    cache
+        .insert("1234", "5678")
+        .ttl(Duration::from_secs(60))
+        .max_idle(Duration::from_secs(3600))
+        .await
+        .unwrap();
+    let all = cache.to_hash_map().await.unwrap();
+    assert_eq!(all.into_values().collect::<Vec<_>>(), ["5678"]);
+}
+
+// Redisson: testReadAllEntrySetWithPattern, testReadAllKeySetWithPattern, testReadAllValuesWithPattern
+#[tokio::test]
+async fn redisson_read_all_with_pattern_ttl() {
+    let cache = client()
+        .await
+        .with_codec(StringCodec)
+        .hash_map_cache::<String, String>(unique("simple12"));
+    cache.insert("10", "12").await.unwrap();
+    cache
+        .insert("12", "33")
+        .ttl(Duration::from_secs(5))
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    cache.insert("21", "43").await.unwrap();
+    let entries: Vec<(String, String)> =
+        cache.iter_with(pattern("1?")).try_collect().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    let keys: HashSet<String> = cache.keys_with(pattern("1?")).try_collect().await.unwrap();
+    assert_eq!(keys, HashSet::from(["10".to_string(), "12".to_string()]));
+    let values: HashSet<String> = cache
+        .values_with(pattern("1?"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(values, HashSet::from(["12".to_string(), "33".to_string()]));
+
+    sleep(Duration::from_secs(6)).await;
+
+    let entries: Vec<(String, String)> =
+        cache.iter_with(pattern("1?")).try_collect().await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let keys: Vec<String> = cache.keys_with(pattern("1?")).try_collect().await.unwrap();
+    assert_eq!(keys, ["10"]);
+    let values: Vec<String> = cache
+        .values_with(pattern("1?"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(values, ["12"]);
+}
+
+// Redisson: testAddAndGetTTL
+#[tokio::test]
+async fn redisson_add_and_get_ttl() {
+    let client = client().await;
+    let cache = client.hash_map_cache::<String, i64>(unique("test_put_if_absent"));
+    assert_eq!(
+        cache
+            .try_insert("4", &0)
+            .ttl(Duration::from_secs(10_000))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(cache.incr_by("4", 1).await.unwrap(), 1);
+    assert_eq!(cache.try_insert("4", &0).await.unwrap(), Some(1));
+    assert_eq!(
+        cache.incr_by("key", i64::MAX - 10).await.unwrap(),
+        i64::MAX - 10
+    );
+    assert_eq!(cache.incr_by("key", 10).await.unwrap(), i64::MAX);
+    assert_eq!(cache.get("4").await.unwrap(), Some(1));
+
+    let cache = client.hash_map_cache::<String, i64>(unique("test_put_if_absent_1"));
+    cache.try_insert("4", &0).await.unwrap();
+    cache.incr_by("4", 1).await.unwrap();
+    cache.try_insert("4", &0).await.unwrap();
+    assert_eq!(cache.get("4").await.unwrap(), Some(1));
+
+    let map = client.hash_map::<String, i64>(unique("test_put_if_absent_2"));
+    map.try_insert("4", &0).await.unwrap();
+    map.incr_by("4", 1).await.unwrap();
+    map.try_insert("4", &0).await.unwrap();
+    assert_eq!(map.get("4").await.unwrap(), Some(1));
+
+    let doubles = client.hash_map_cache::<String, f64>(unique("test_put_if_absent_3"));
+    doubles
+        .try_insert("4", &1.23)
+        .ttl(Duration::from_secs(10_000))
+        .await
+        .unwrap();
+    doubles.incr_by_float("4", 1.0).await.unwrap();
+    assert_eq!(doubles.get("4").await.unwrap(), Some(2.23));
+}
+
+// Redisson: testComputeIfAbsentWithTTL
+#[tokio::test]
+async fn redisson_compute_if_absent_with_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testMap"));
+    let ttl = Duration::from_secs(1);
+    let value = cache
+        .entry("key1")
+        .ttl(ttl)
+        .await
+        .unwrap()
+        .or_insert_with(|| "value1".into())
+        .await
+        .unwrap();
+    assert_eq!(value, "value1");
+    let value = cache
+        .entry("key1")
+        .ttl(ttl)
+        .await
+        .unwrap()
+        .or_insert_with(|| "value2".into())
+        .await
+        .unwrap();
+    assert_ne!(value, "value2");
+    sleep(Duration::from_millis(1100)).await;
+    let value = cache
+        .entry("key1")
+        .ttl(ttl)
+        .await
+        .unwrap()
+        .or_insert_with(|| "value3".into())
+        .await
+        .unwrap();
+    assert_eq!(value, "value3");
+}
+
+// Redisson: testComputeWithTTL, testComputeAsyncWithTTL
+#[tokio::test]
+async fn redisson_compute_with_ttl() {
+    use redissun::hash_map::Entry;
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testMap"));
+    let ttl = Duration::from_secs(1);
+    // Redisson's compute(k, ttl, (k, old) -> v): write `v` whatever was there.
+    let compute = |v: &'static str| {
+        let cache = &cache;
+        async move {
+            match cache.entry("key1").ttl(ttl).await.unwrap() {
+                // `insert` returns the replaced value, as in std; compute returns the new one.
+                Entry::Occupied(entry) => {
+                    entry.insert(v.to_string()).await.unwrap();
+                    v.to_string()
+                }
+                Entry::Vacant(entry) => entry.insert(v.to_string()).await.unwrap(),
+            }
+        }
+    };
+    assert_eq!(compute("value1").await, "value1");
+    assert_eq!(cache.get("key1").await.unwrap().as_deref(), Some("value1"));
+    assert_eq!(compute("value2").await, "value2");
+    assert_eq!(cache.get("key1").await.unwrap().as_deref(), Some("value2"));
+    // The function returning null removes the entry.
+    if let Entry::Occupied(entry) = cache.entry("key1").ttl(ttl).await.unwrap() {
+        entry.remove().await.unwrap();
+    }
+    assert!(!cache.contains_key("key1").await.unwrap());
+    assert_eq!(compute("value3").await, "value3");
+    assert_eq!(cache.get("key1").await.unwrap().as_deref(), Some("value3"));
+    sleep(Duration::from_millis(1100)).await;
+    assert!(!cache.contains_key("key1").await.unwrap());
+}
+
+fn token<K, V, C: redissun::Codec>(lease: &Lease<'_, K, V, C>) -> Option<String> {
+    match lease {
+        Lease::Acquired(guard) => Some(guard.token().to_string()),
+        _ => None,
+    }
+}
+
+// Redisson: testLeaseGet (a held lease reports no token in redissun)
+#[tokio::test]
+async fn redisson_lease_get() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseGet"));
+    let r1 = cache.lease("aaa", Duration::from_secs(10)).await.unwrap();
+    assert!(token(&r1).is_some(), "{r1:?}");
+    let r2 = cache.lease("aaa", Duration::from_secs(10)).await.unwrap();
+    assert!(matches!(r2, Lease::Held), "{r2:?}");
+}
+
+// Redisson: testLeasePutTTL
+#[tokio::test]
+async fn redisson_lease_put_ttl() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseGet"));
+    let Lease::Acquired(r1) = cache.lease("aaa", Duration::from_secs(10)).await.unwrap() else {
+        panic!("no lease");
+    };
+    let first = r1.token().to_string();
+    r1.insert("111")
+        .ttl(Duration::from_millis(1000))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(1100)).await;
+    let r2 = cache.lease("aaa", Duration::from_secs(10)).await.unwrap();
+    let second = token(&r2).expect("no new lease");
+    assert_ne!(second, first);
+}
+
+// Redisson: testLeaseStaleSet
+#[tokio::test]
+async fn redisson_lease_stale_set() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseStaleSet"));
+    let Lease::Acquired(r1) = cache.lease("aaa", Duration::from_secs(10)).await.unwrap() else {
+        panic!("no lease");
+    };
+    cache.invalidate("aaa").await.unwrap();
+    assert!(!cache.set("aaa", "111").lease(r1.token()).await.unwrap());
+    assert!(!r1.insert("111").await.unwrap());
+}
+
+// Redisson: testLeaseTimeout
+#[tokio::test]
+async fn redisson_lease_timeout() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseTimeout"));
+    let r1 = cache.lease("aaa", Duration::from_secs(1)).await.unwrap();
+    let first = token(&r1).expect("no lease");
+    sleep(Duration::from_millis(1100)).await;
+    let r2 = cache.lease("aaa", Duration::from_secs(10)).await.unwrap();
+    let second = token(&r2).expect("no new lease");
+    assert_ne!(second, first);
+}
+
+// Redisson: testLeaseDifferentKeys
+#[tokio::test]
+async fn redisson_lease_different_keys() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseDifferentKeys"));
+    let r1 = cache.lease("aaa", Duration::from_secs(1)).await.unwrap();
+    let r2 = cache.lease("bbb", Duration::from_secs(10)).await.unwrap();
+    let first = token(&r1).expect("no lease on aaa");
+    let second = token(&r2).expect("no lease on bbb");
+    assert_ne!(second, first);
+}
+
+// Redisson: testLeaseExpirationWithMaxSize
+#[tokio::test]
+async fn redisson_lease_expiration_with_max_size() {
+    let client =
+        connect_with(|builder| builder.eviction_interval(Duration::from_millis(100))).await;
+    let cache = client
+        .with_codec(StringCodec)
+        .hash_map_cache::<String, String>(unique("test"));
+    assert!(cache.init_max_size(2, EvictionMode::Lru).await.unwrap());
+    for k in ["1", "2", "3", "4"] {
+        let Lease::Acquired(guard) = cache.lease(k, Duration::from_secs(10)).await.unwrap() else {
+            panic!("no lease on {k}");
+        };
+        guard.insert(k).await.unwrap();
+    }
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.len().await.unwrap(), 2);
+}
+
+// Redisson: testLeaseRaceCondition
+#[tokio::test]
+async fn redisson_lease_race_condition() {
+    let cache = client()
+        .await
+        .with_codec(StringCodec)
+        .hash_map_cache::<String, String>(unique("testLeaseRaceCondition"));
+    for i in 0..10 {
+        let key = format!("key:{i}");
+        let leases = (0..16).map(|_| cache.lease(&key, Duration::from_secs(10)));
+        let acquired = futures::future::join_all(leases)
+            .await
+            .into_iter()
+            .filter(|lease| matches!(lease, Ok(Lease::Acquired(_))))
+            .count();
+        assert_eq!(acquired, 1, "{key}");
+    }
+}
+
+// Redisson: testLeaseCreatedListener
+#[tokio::test]
+async fn redisson_lease_created_listener() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseCreatedListener"));
+    let Lease::Acquired(r1) = cache.lease("aaa", Duration::from_secs(1)).await.unwrap() else {
+        panic!("no lease");
+    };
+    let mut events = cache.events_of(&[EntryEventKind::Created]).await.unwrap();
+    r1.insert("111").await.unwrap();
+    assert_eq!(
+        next(&mut events).await,
+        EntryEvent::Created {
+            key: "aaa".into(),
+            value: "111".into()
+        }
+    );
+}
+
+// Redisson: testLeaseRemovedListener
+#[tokio::test]
+async fn redisson_lease_removed_listener() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("testLeaseCreatedListener"));
+    let Lease::Acquired(r1) = cache.lease("aaa", Duration::from_secs(1)).await.unwrap() else {
+        panic!("no lease");
+    };
+    let mut events = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
+    r1.insert("111").await.unwrap();
+    assert!(cache.invalidate("aaa").await.unwrap());
+    assert_eq!(
+        next(&mut events).await,
+        EntryEvent::Removed {
+            key: "aaa".into(),
+            value: "111".into()
+        }
+    );
+}
+
+// ---- Redisson 4.8.0 BaseMapTest on a HashMapCache: 0a's ports of it, run on the cache ----
+
+mod base_map_on_cache {
+    use super::common::{client, unique};
+    use futures::TryStreamExt;
+    use redissun::{HashMapCache, JsonCodec, StringCodec};
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct User {
+        name: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    struct SimpleKey(String);
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    struct SimpleValue(String);
+
+    fn key(value: &str) -> SimpleKey {
+        SimpleKey(value.into())
+    }
+
+    fn value(value: &str) -> SimpleValue {
+        SimpleValue(value.into())
+    }
+
+    async fn simple() -> HashMapCache<SimpleKey, SimpleValue, JsonCodec> {
+        client().await.hash_map_cache(unique("simple"))
+    }
+
+    async fn simple_three() -> HashMapCache<SimpleKey, SimpleValue, JsonCodec> {
+        let map = simple().await;
+        map.insert(&key("1"), &value("2")).await.unwrap();
+        map.insert(&key("33"), &value("44")).await.unwrap();
+        map.insert(&key("5"), &value("6")).await.unwrap();
+        map
+    }
+
+    async fn string_map(prefix: &str) -> HashMapCache<String, String, StringCodec> {
+        client()
+            .await
+            .with_codec(StringCodec)
+            .hash_map_cache(unique(prefix))
+    }
+
+    // Redisson: testPutIfAbsent
+    #[tokio::test]
+    async fn try_insert_returns_the_existing_value_and_keeps_it_on_cache() {
+        let map = simple().await;
+        map.insert(&key("1"), &value("2")).await.unwrap();
+        assert_eq!(
+            map.try_insert(&key("1"), &value("3")).await.unwrap(),
+            Some(value("2"))
+        );
+        assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
+        assert_eq!(map.try_insert(&key("2"), &value("4")).await.unwrap(), None);
+        assert_eq!(map.get(&key("2")).await.unwrap(), Some(value("4")));
+    }
+
+    // Redisson: testFastPutIfExists
+    #[tokio::test]
+    async fn replace_updates_only_an_existing_key_on_cache() {
+        let map = simple().await;
+        assert!(map.replace(&key("1"), &value("3")).await.unwrap().is_none());
+        assert_eq!(map.get(&key("1")).await.unwrap(), None);
+        map.insert(&key("1"), &value("2")).await.unwrap();
+        assert!(map.replace(&key("1"), &value("3")).await.unwrap().is_some());
+        assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
+    }
+
+    // Redisson: testPutIfExists
+    #[tokio::test]
+    async fn replace_returns_the_previous_value_of_an_existing_key_on_cache() {
+        let map = simple().await;
+        assert_eq!(map.replace(&key("1"), &value("3")).await.unwrap(), None);
+        assert_eq!(map.get(&key("1")).await.unwrap(), None);
+        map.insert(&key("1"), &value("2")).await.unwrap();
+        assert_eq!(
+            map.replace(&key("1"), &value("3")).await.unwrap(),
+            Some(value("2"))
+        );
+        assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
+    }
+
+    // Redisson: testReplaceValue
+    #[tokio::test]
+    async fn replace_returns_the_previous_value_and_skips_missing_keys_on_cache() {
+        let map = simple().await;
+        map.insert(&key("1"), &value("2")).await.unwrap();
+        assert_eq!(
+            map.replace(&key("1"), &value("3")).await.unwrap(),
+            Some(value("2"))
+        );
+        assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
+        assert_eq!(map.replace(&key("9"), &value("3")).await.unwrap(), None);
+        assert!(!map.contains_key(&key("9")).await.unwrap());
+    }
+
+    // Redisson: testReplace
+    #[tokio::test]
+    async fn insert_overwrites_the_value_of_an_existing_key_on_cache() {
+        let map = simple_three().await;
+        assert_eq!(map.get(&key("33")).await.unwrap(), Some(value("44")));
+        map.insert(&key("33"), &value("abc")).await.unwrap();
+        assert_eq!(map.get(&key("33")).await.unwrap(), Some(value("abc")));
+    }
+
+    // Redisson: testContainsValue
+    #[tokio::test]
+    async fn contains_value_finds_only_stored_values_on_cache() {
+        let map = simple_three().await;
+        assert!(map.contains_value(&value("2")).await.unwrap());
+        assert!(!map.contains_value(&value("441")).await.unwrap());
+        assert!(!map.contains_value(&value("5")).await.unwrap());
+    }
+
+    // Redisson: testRemoveValue
+    #[tokio::test]
+    async fn remove_if_eq_deletes_the_entry_when_the_value_matches_on_cache() {
+        let map = simple().await;
+        map.insert(&key("1"), &value("2")).await.unwrap();
+        assert!(map.remove_if_eq(&key("1"), &value("2")).await.unwrap());
+        assert_eq!(map.get(&key("1")).await.unwrap(), None);
+        assert_eq!(map.len().await.unwrap(), 0);
+    }
+
+    // Redisson: testFastRemove
+    #[tokio::test]
+    async fn remove_many_returns_the_number_of_removed_keys_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+        map.extend([(&1, &3), (&3, &5), (&4, &6), (&7, &8)])
+            .await
+            .unwrap();
+        assert_eq!(map.remove_many(&[&1, &3, &7]).await.unwrap(), 3);
+        assert_eq!(map.len().await.unwrap(), 1);
+    }
+
+    // Redisson: testFastRemoveEmpty
+    #[tokio::test]
+    async fn remove_many_without_keys_removes_nothing_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+        map.insert(&1, &3).await.unwrap();
+        assert_eq!(map.remove_many::<i32>(&[]).await.unwrap(), 0);
+        assert_eq!(map.len().await.unwrap(), 1);
+    }
+
+    // Redisson: testFastPut
+    #[tokio::test]
+    async fn set_reports_whether_the_key_was_new_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+        assert!(map.set(&1, &2).await.unwrap());
+        assert_eq!(map.get(&1).await.unwrap(), Some(2));
+        assert!(!map.set(&1, &3).await.unwrap());
+        assert_eq!(map.get(&1).await.unwrap(), Some(3));
+        assert_eq!(map.len().await.unwrap(), 1);
+    }
+
+    // Redisson: testFastReplace
+    #[tokio::test]
+    async fn replace_reports_whether_it_updated_only_an_existing_key_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+        map.insert(&1, &2).await.unwrap();
+        assert!(map.replace(&1, &3).await.unwrap().is_some());
+        assert!(map.replace(&2, &0).await.unwrap().is_none());
+        assert_eq!(map.len().await.unwrap(), 1);
+        assert_eq!(map.get(&1).await.unwrap(), Some(3));
+    }
+
+    // Redisson: testEmptyRemove
+    #[tokio::test]
+    async fn remove_if_eq_on_a_missing_key_returns_false_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("simple"));
+        assert!(!map.remove_if_eq(&1, &3).await.unwrap());
+        map.insert(&4, &5).await.unwrap();
+        assert!(map.remove_if_eq(&4, &5).await.unwrap());
+    }
+
+    // Redisson: testValueSize (redissun's value_len leaves out the cache's 16-byte value header)
+    #[tokio::test]
+    async fn value_len_returns_the_encoded_length_or_zero_on_cache() {
+        let map = client()
+            .await
+            .hash_map_cache::<String, String>(unique("getAll"));
+        map.insert("1", "1234").await.unwrap();
+        assert_eq!(map.value_len("4").await.unwrap(), 0);
+        assert_eq!(map.value_len("1").await.unwrap(), 6);
+    }
+
+    // Redisson: testAddAndGet
+    #[tokio::test]
+    async fn incr_by_and_incr_by_float_add_to_the_stored_number_on_cache() {
+        let client = client().await;
+        let ints = client.hash_map_cache::<i32, i64>(unique("getAll"));
+        ints.insert(&1, &100).await.unwrap();
+        assert_eq!(ints.incr_by(&1, 12).await.unwrap(), 112);
+        assert_eq!(ints.get(&1).await.unwrap(), Some(112));
+
+        let doubles = client.hash_map_cache::<i32, f64>(unique("getAll2"));
+        doubles.insert(&1, &100.2).await.unwrap();
+        assert_eq!(doubles.incr_by_float(&1, 12.1).await.unwrap(), 112.3);
+        assert_eq!(doubles.get(&1).await.unwrap(), Some(112.3));
+
+        let strings = client.hash_map_cache::<String, i64>(unique("mapStr"));
+        assert_eq!(strings.insert("1", &100).await.unwrap(), None);
+        assert_eq!(strings.incr_by("1", 12).await.unwrap(), 112);
+        assert_eq!(strings.get("1").await.unwrap(), Some(112));
+    }
+
+    // Redisson: testGetAll
+    #[tokio::test]
+    async fn get_many_returns_none_for_missing_keys_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("getAll"));
+        map.extend([(&1, &100), (&2, &200), (&3, &300), (&4, &400)])
+            .await
+            .unwrap();
+        assert_eq!(
+            map.get_many(&[&2, &3, &5]).await.unwrap(),
+            vec![Some(200), Some(300), None]
+        );
+    }
+
+    // Redisson: testGetAllBig
+    #[tokio::test]
+    async fn get_many_reads_ten_thousand_keys_in_order_on_cache() {
+        let map = client()
+            .await
+            .hash_map_cache::<i32, String>(unique("simple"));
+        let entries: Vec<(i32, String)> = (0..10_000).map(|i| (i, i.to_string())).collect();
+        map.extend(entries.iter().map(|(k, v)| (k, v)))
+            .await
+            .unwrap();
+        let keys: Vec<i32> = (0..10_000).collect();
+        let refs: Vec<&i32> = keys.iter().collect();
+        let found = map.get_many(&refs).await.unwrap();
+        assert_eq!(found.len(), 10_000);
+        assert!(found
+            .iter()
+            .enumerate()
+            .all(|(i, v)| v.as_deref() == Some(i.to_string().as_str())));
+    }
+
+    // Redisson: testPutAll
+    #[tokio::test]
+    async fn extend_adds_entries_to_existing_ones_on_cache() {
+        let map = client()
+            .await
+            .hash_map_cache::<i32, String>(unique("simple"));
+        map.insert(&1, "1").await.unwrap();
+        map.insert(&2, "2").await.unwrap();
+        map.insert(&3, "3").await.unwrap();
+        map.extend([(&4, "4"), (&5, "5"), (&6, "6")]).await.unwrap();
+        let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
+        keys.sort();
+        assert_eq!(keys, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    // Redisson: testPutAllBig
+    #[tokio::test]
+    async fn extend_inserts_a_hundred_thousand_entries_on_cache() {
+        let map = client()
+            .await
+            .hash_map_cache::<i32, String>(unique("simple"));
+        let entries: Vec<(i32, String)> = (0..100_000).map(|i| (i, i.to_string())).collect();
+        map.extend(entries.iter().map(|(k, v)| (k, v)))
+            .await
+            .unwrap();
+        assert_eq!(map.len().await.unwrap(), 100_000);
+    }
+
+    // Redisson: testRandomKeys
+    #[tokio::test]
+    async fn random_keys_returns_distinct_stored_keys_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("map"));
+        assert!(map.random_keys(1).await.unwrap().is_empty());
+        map.extend([(&1, &11), (&2, &21), (&3, &31), (&4, &41)])
+            .await
+            .unwrap();
+        let keys = map.random_keys(2).await.unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|k| (1..=4).contains(k)));
+        assert_ne!(keys[0], keys[1]);
+    }
+
+    // Redisson: testReadAllValues
+    #[tokio::test]
+    async fn values_returns_every_value_on_cache() {
+        let map = simple_three().await;
+        let mut values = map.values().try_collect::<Vec<_>>().await.unwrap();
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(values, vec![value("2"), value("44"), value("6")]);
+    }
+
+    // Redisson: testReadAllKeySet
+    #[tokio::test]
+    async fn keys_returns_every_key_on_cache() {
+        let map = simple_three().await;
+        let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
+        keys.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(keys, vec![key("1"), key("33"), key("5")]);
+    }
+
+    // Redisson: testReadAllKeySetHighAmount
+    #[tokio::test]
+    async fn keys_returns_a_thousand_keys_on_cache() {
+        let map = simple().await;
+        let entries: Vec<(SimpleKey, SimpleValue)> = (0..1000)
+            .map(|i| (key(&i.to_string()), value(&i.to_string())))
+            .collect();
+        map.extend(entries.iter().map(|(k, v)| (k, v)))
+            .await
+            .unwrap();
+        assert_eq!(
+            map.keys().try_collect::<Vec<_>>().await.unwrap().len(),
+            1000
+        );
+    }
+
+    // Redisson: testRandomEntries
+    #[tokio::test]
+    async fn redisson_random_entries_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("map"));
+        assert!(map.random_entries(1).await.unwrap().is_empty());
+        for (k, v) in [(1, 11), (2, 21), (3, 31), (4, 41)] {
+            map.insert(&k, &v).await.unwrap();
+        }
+        let picked = map.random_entries(2).await.unwrap();
+        assert_eq!(picked.len(), 2);
+        assert!(picked.keys().all(|k| (1..=4).contains(k)));
+    }
+
+    // Redisson: testComputeIfPresent
+    #[tokio::test]
+    async fn redisson_compute_if_present_on_cache() {
+        use redissun::hash_map::Entry;
+        let map = client()
+            .await
+            .hash_map_cache::<String, String>(unique("map"));
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            entry.insert("12".to_string()).await.unwrap();
+        }
+        assert_eq!(map.get("1").await.unwrap(), None);
+        map.insert("1", "10").await.unwrap();
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            assert_eq!(entry.get(), "10");
+            entry.insert("12".to_string()).await.unwrap();
+        }
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    }
+
+    // Redisson: testComputeIfPresentMutable
+    #[tokio::test]
+    async fn redisson_compute_if_present_mutable_on_cache() {
+        let map = client().await.hash_map_cache::<String, User>(unique("map"));
+        let user = User {
+            name: "value1".into(),
+        };
+        map.insert("1", &user).await.unwrap();
+        map.entry("1")
+            .await
+            .unwrap()
+            .and_modify(|value| {
+                assert_eq!(value.name, "value1");
+                value.name = "value2".into();
+            })
+            .or_insert(user)
+            .await
+            .unwrap();
+        assert_eq!(
+            map.get("1").await.unwrap(),
+            Some(User {
+                name: "value2".into()
+            })
+        );
+    }
+
+    // Redisson: testComputeIfAbsent
+    #[tokio::test]
+    async fn redisson_compute_if_absent_on_cache() {
+        let map = client()
+            .await
+            .hash_map_cache::<String, String>(unique("map"));
+        map.entry("1")
+            .await
+            .unwrap()
+            .or_insert("12".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+        map.entry("1")
+            .await
+            .unwrap()
+            .or_insert("13".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    }
+
+    // Redisson: testMerge
+    #[tokio::test]
+    async fn redisson_merge_on_cache() {
+        use redissun::hash_map::Entry;
+        let map = client()
+            .await
+            .hash_map_cache::<String, String>(unique("map"));
+        map.entry("1")
+            .await
+            .unwrap()
+            .and_modify(|v| *v = "12".into())
+            .or_insert("2".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("2"));
+        map.entry("1")
+            .await
+            .unwrap()
+            .and_modify(|v| *v = "12".into())
+            .or_insert("2".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            entry.remove().await.unwrap();
+        }
+        assert_eq!(map.get("1").await.unwrap(), None);
+    }
+
+    // Redisson: testCompute, testComputeAsync
+    #[tokio::test]
+    async fn redisson_compute_on_cache() {
+        use redissun::hash_map::Entry;
+        let map = client()
+            .await
+            .hash_map_cache::<String, String>(unique("map"));
+        let first = map
+            .entry("1")
+            .await
+            .unwrap()
+            .or_insert("12".into())
+            .await
+            .unwrap();
+        assert_eq!(first, "12");
+        let second = map
+            .entry("1")
+            .await
+            .unwrap()
+            .and_modify(|old| old.push_str("34"))
+            .or_insert("12".into())
+            .await
+            .unwrap();
+        assert_eq!(second, "1234");
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("1234"));
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            assert_eq!(entry.remove().await.unwrap(), "1234");
+        }
+        assert_eq!(map.get("1").await.unwrap(), None);
+    }
+
+    // Redisson: testGetAll, testGetAllWithStringKeys
+    #[tokio::test]
+    async fn redisson_get_all_on_cache() {
+        let map = client().await.hash_map_cache::<i32, i32>(unique("map"));
+        for (k, v) in [(1, 100), (2, 200), (3, 300), (4, 400)] {
+            map.insert(&k, &v).await.unwrap();
+        }
+        let found = map.get_many(&[&2, &3, &5]).await.unwrap();
+        assert_eq!(found, [Some(200), Some(300), None]);
+    }
+
+    // Redisson: testGetAllBig
+    #[tokio::test]
+    async fn redisson_get_all_big_on_cache() {
+        let map = client().await.hash_map_cache::<i32, String>(unique("map"));
+        let keys: Vec<i32> = (0..10_000).collect();
+        let values: Vec<String> = keys.iter().map(i32::to_string).collect();
+        map.extend(keys.iter().zip(values.iter())).await.unwrap();
+        let wanted: Vec<&i32> = keys.iter().collect();
+        let all = map.get_many(&wanted).await.unwrap();
+        assert_eq!(all.len(), 10_000);
+        assert_eq!(all[9_999].as_deref(), Some("9999"));
+        assert_eq!(map.len().await.unwrap(), 10_000);
+    }
+
+    // Redisson: testPutAllBatched
+    #[tokio::test]
+    async fn redisson_put_all_batched_on_cache() {
+        let map = client().await.hash_map_cache::<i32, String>(unique("map"));
+        for k in 1..=3 {
+            map.insert(&k, &k.to_string()).await.unwrap();
+        }
+        for range in [4..=6, 7..=11, 12..=18] {
+            let keys: Vec<i32> = range.collect();
+            let values: Vec<String> = keys.iter().map(i32::to_string).collect();
+            map.extend(keys.iter().zip(values.iter()))
+                .batch_size(5)
+                .await
+                .unwrap();
+        }
+        let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
+        keys.sort_unstable();
+        assert_eq!(keys, (1..=18).collect::<Vec<_>>());
+    }
+
+    // Redisson: testKeySetByPattern, testValuesByPattern, testEntrySetByPattern
+    #[tokio::test]
+    async fn redisson_scans_by_pattern_on_cache() {
+        let map = string_map("simple").await;
+        for (k, v) in [("10", "100"), ("20", "200"), ("30", "300")] {
+            map.insert(k, v).await.unwrap();
+        }
+        let keys = |pattern: &'static str| {
+            let map = map.clone();
+            async move {
+                let mut keys: Vec<String> = map
+                    .keys_with(redissun::MapScan::new().pattern(pattern))
+                    .try_collect()
+                    .await
+                    .unwrap();
+                keys.sort();
+                keys
+            }
+        };
+        assert_eq!(keys("?0").await, ["10", "20", "30"]);
+        assert!(keys("1").await.is_empty());
+        assert_eq!(keys("10").await, ["10"]);
+        let mut values: Vec<String> = map
+            .values_with(redissun::MapScan::new().pattern("?0"))
+            .try_collect()
+            .await
+            .unwrap();
+        values.sort();
+        assert_eq!(values, ["100", "200", "300"]);
+        let entries: Vec<(String, String)> = map
+            .iter_with(redissun::MapScan::new().pattern("10"))
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(entries, [("10".to_string(), "100".to_string())]);
+    }
+
+    // Redisson: testReadAllEntrySetWithPattern, testReadAllKeySetWithPattern, testReadAllValuesWithPattern
+    #[tokio::test]
+    async fn redisson_read_all_with_pattern_on_cache() {
+        let map = string_map("simple12").await;
+        for (k, v) in [("10", "12"), ("12", "33"), ("21", "43")] {
+            map.insert(k, v).await.unwrap();
+        }
+        let scan = || redissun::MapScan::new().pattern("1?");
+        let entries: HashMap<String, String> = map.iter_with(scan()).try_collect().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        let mut keys: Vec<String> = map.keys_with(scan()).try_collect().await.unwrap();
+        keys.sort();
+        assert_eq!(keys, ["10", "12"]);
+        let mut values: Vec<String> = map.values_with(scan()).try_collect().await.unwrap();
+        values.sort();
+        assert_eq!(values, ["12", "33"]);
+    }
+}
+
+// Review Focus 5: every method family runs on a 3-master cluster, with and without a hash tag in the name.
+#[tokio::test]
+async fn every_operation_runs_on_a_cluster() {
+    let topology = Topology::cluster().await;
+    let client = redissun::Client::builder()
+        .url(topology.cluster_url())
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    for name in [unique("cache"), format!("{{{}}}:cache", unique("t"))] {
+        let cache = client.hash_map_cache::<String, i64>(name.clone());
+        let mut created = cache.events_of(&[EntryEventKind::Created]).await.unwrap();
+        assert_eq!(cache.insert("a", &1).await.unwrap(), None, "{name}");
+        assert_eq!(
+            next(&mut created).await,
+            EntryEvent::Created {
+                key: "a".into(),
+                value: 1
+            },
+            "{name}"
+        );
+        assert!(cache.set("b", &2).await.unwrap(), "{name}");
+        assert!(cache
+            .set("b", &3)
+            .ttl(Duration::from_secs(60))
+            .await
+            .is_ok());
+        assert_eq!(cache.try_insert("c", &3).await.unwrap(), None, "{name}");
+        assert_eq!(cache.replace("c", &4).await.unwrap(), Some(3), "{name}");
+        cache
+            .extend([("d", &5), ("e", &6)])
+            .ttl(Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(cache.incr_by("a", 10).await.unwrap(), 11, "{name}");
+        assert!(cache
+            .expire_entry("a")
+            .ttl(Duration::from_secs(60))
+            .await
+            .unwrap());
+        assert_eq!(
+            cache.get_many(&["a", "c", "missing"]).await.unwrap(),
+            [Some(11), Some(4), None],
+            "{name}"
+        );
+        assert_eq!(cache.peek("d").await.unwrap(), Some(5), "{name}");
+        let scanned: HashMap<String, i64> = cache
+            .iter_with(redissun::MapScan::new().pattern("*"))
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(scanned.len(), 5, "{name}");
+        let value = cache.entry("f").await.unwrap().or_insert(7).await.unwrap();
+        assert_eq!(value, 7, "{name}");
+        let Lease::Acquired(guard) = cache.lease("g", Duration::from_secs(5)).await.unwrap() else {
+            panic!("no lease on {name}");
+        };
+        assert!(guard.insert(&8).await.unwrap(), "{name}");
+        let Lease::Acquired(guard) = cache.lease("h", Duration::from_secs(5)).await.unwrap() else {
+            panic!("no lease on {name}");
+        };
+        let token = guard.token().to_string();
+        assert!(cache.set("h", &9).lease(&token).await.unwrap(), "{name}");
+        assert!(cache.invalidate("h").await.unwrap(), "{name}");
+        assert!(cache.del().await.unwrap(), "{name}");
+        assert_eq!(cache.len().await.unwrap(), 0, "{name}");
+    }
+}

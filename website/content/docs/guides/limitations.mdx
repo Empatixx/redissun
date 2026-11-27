@@ -17,6 +17,15 @@ description: Things to know about this version.
 - **Topic** does not store messages. A slow subscriber that falls more than 256 messages behind gets `Error::Lagged`. Use `ReliableTopic` when every message must arrive.
 - **RwLock** does not prefer writers, and a reader cannot be upgraded to a writer.
 - **FairLock** keeps a place in the queue for about 5 seconds per waiter ahead of it. A waiter that crashed is skipped after that. A waiter that is cancelled at the very moment its first attempt runs can leave a stale place that also ends after that time.
-- **HashMapCache** background clean-up runs on the runtime that first created the cache. `value_len` returns the length of the encoded value without the 16-byte header (12 on a Windows server) that Redisson's `valueSize` counts.
+- **HashMapCache and Redisson's `RMapCache`.**
+  - The background clean-up runs on the runtime that first created the cache.
+  - Expiry uses each client's clock, as in Redisson, so keep the clocks of all clients in sync.
+  - Events are always sent with `PUBLISH`, never with sharded pub/sub.
+  - `set`, `entry` and `extend` without `.ttl()` clear an entry's time limits, like `insert`. Redisson's `fastPut`, `compute` and `putAll` keep them.
+  - `incr_by` on an expired entry that the clean-up has not removed yet keeps the old time limit, so the new value stays hidden, as in Redisson.
+  - `value_len` returns the length of the encoded value without the 16-byte header (12 on a Windows server) that Redisson's `valueSize` counts.
+  - A write with limits into a full cache that overwrites a live key also drops one other entry, because Redisson's size check uses `>=`.
+  - `peek` and the scans read from the master. Redisson may read them from a replica.
+  - Not ported: `mapReduce`, `TrackingListener`, `destroy`, `sizeInMemory`, `expireAt` and `expire` with a condition.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error, except for the entry time limits of `HashMapCache` and `HashSetCache`, where zero means no limit.
 - **Before 1.0**, the API can change between minor versions.
