@@ -6,6 +6,7 @@ mod scripts;
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::map::events::{self as map_events, MapEventKind, MapEvents};
+use crate::collections::map::scan::{decode_pairs, MapScan};
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
 use crate::lua::Lua;
@@ -13,13 +14,15 @@ use crate::object::{millis, now_millis, HasKey, Key};
 use bytes::Bytes;
 use futures::{stream, Stream, TryStreamExt};
 use scripts::{
-    ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, EVICT, EXPIRE, FAST_REMOVE, GET, REMAIN_TTL, REMOVE,
-    REMOVE_IF, REPLACE, REPLACE_IF, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
+    ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, CONTAINS_VALUE, EVICT, EXPIRE, FAST_REMOVE, GET,
+    GET_ALL, RANDOM_ENTRIES, RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE, REMOVE_IF, REPLACE,
+    REPLACE_IF, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -29,8 +32,6 @@ pub(crate) use entry_events::LengthPrefix;
 /// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
 const TEMP_VAL_FIELD: &[u8] = b"redissun__temp_val";
 pub use entry_events::{EntryEvent, EntryEventKind, EntryEvents};
-
-const SCAN_PAGE: u32 = 100;
 
 /// The publish command the scripts take as an argument; Redisson sends `SPUBLISH` when the server supports sharded pub/sub.
 const PUBLISH: &str = "PUBLISH";
@@ -656,6 +657,108 @@ where
         self.decode_value(raw)
     }
 
+    /// Returns the values for several keys, in the order of the keys: `None` for a key that is missing or expired. Like [`HashMapCache::get`], it starts the idle time of each live entry again and counts as a use for the size limit. Nothing is sent for no keys.
+    #[doc(alias = "getAll")]
+    pub async fn get_many<Q>(&self, ks: &[&Q]) -> Result<std::vec::Vec<Option<V>>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if ks.is_empty() {
+            return Ok(std::vec::Vec::new());
+        }
+        let mut args = std::vec::Vec::with_capacity(ks.len() + 1);
+        args.push(now());
+        for k in ks {
+            args.push(self.codec.encode(*k)?);
+        }
+        let raw: std::vec::Vec<Option<Bytes>> = self
+            .key
+            .core
+            .eval(
+                &GET_ALL,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                args,
+            )
+            .await?;
+        raw.into_iter().map(|raw| self.decode_value(raw)).collect()
+    }
+
+    /// Returns whether a live entry holds `v`, compared by its encoded bytes. It reads every value on the server. As in Redisson, only the first entry that holds `v` is looked at: when that one has expired, the answer is `false`.
+    #[doc(alias = "containsValue")]
+    pub async fn contains_value<W>(&self, v: &W) -> Result<bool>
+    where
+        V: Borrow<W>,
+        W: Serialize + ?Sized + Sync,
+    {
+        let found: i64 = self
+            .key
+            .core
+            .eval(
+                &CONTAINS_VALUE,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                vec![now(), self.codec.encode(v)?],
+            )
+            .await?;
+        Ok(found == 1)
+    }
+
+    /// Length in bytes of the encoded value stored under the key, the number [`HashMap::value_len`](crate::HashMap::value_len) gives for the same value; `0` when the key is missing. Redisson's `valueSize` counts the 16-byte header of the stored value too; this does not. Like Redisson, it does not check whether the entry has expired.
+    #[doc(alias = "valueSize")]
+    pub async fn value_len<Q>(&self, k: &Q) -> Result<usize>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let raw: usize = self
+            .key
+            .query({
+                let mut cmd = redis::cmd("HSTRLEN");
+                cmd.arg(self.key.redis_key());
+                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd
+            })
+            .await?;
+        Ok(encoded_value_len(raw, self.length_prefix().await?))
+    }
+
+    /// Returns up to `count` distinct random live keys. Redis picks `count` fields and the expired ones are left out, so fewer can come back while expired entries wait for the clean-up.
+    #[doc(alias = "randomKeys")]
+    pub async fn random_keys(&self, count: usize) -> Result<std::vec::Vec<K>> {
+        let raw: std::vec::Vec<Bytes> = self.random(&RANDOM_KEYS, count).await?;
+        raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
+    }
+
+    async fn random<T: redis::FromRedisValue>(&self, script: &Lua, count: usize) -> Result<T> {
+        let count = i64::try_from(count).unwrap_or(i64::MAX);
+        self.key
+            .core
+            .eval(
+                script,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                vec![now(), Bytes::from(count.to_string())],
+            )
+            .await
+    }
+
     /// Removes the live entry and returns its value. An expired entry is left for the clean-up and `None` is returned.
     pub async fn remove<Q>(&self, k: &Q) -> Result<Option<V>>
     where
@@ -760,18 +863,21 @@ where
         &self,
         script: &Lua,
         cursor: String,
+        pattern: Option<&str>,
+        page: usize,
     ) -> Result<(String, std::vec::Vec<Bytes>)> {
+        let mut args = vec![now(), Bytes::from(cursor)];
+        if let Some(pattern) = pattern {
+            args.push(Bytes::copy_from_slice(pattern.as_bytes()));
+        }
+        args.push(Bytes::from(page.to_string()));
         let (next, items, idle): (String, std::vec::Vec<Bytes>, std::vec::Vec<Bytes>) = self
             .key
             .core
             .eval(
                 script,
                 self.redis_keys(&[Name::Main, Name::Timeout, Name::Idle]),
-                vec![
-                    now(),
-                    Bytes::from(cursor),
-                    Bytes::from(SCAN_PAGE.to_string()),
-                ],
+                args,
             )
             .await?;
         if !idle.is_empty() {
@@ -790,46 +896,144 @@ where
 
     /// Streams the live entries, 100 at a time, in no particular order. Expired entries are skipped page by page, and an entry with an idle limit that is returned starts its idle time again. An entry that is present the whole time is returned at least once and can be returned twice.
     pub fn iter(&self) -> impl Stream<Item = Result<(K, V)>> + '_ {
-        stream::try_unfold(Some("0".to_string()), move |cursor| async move {
-            let Some(cursor) = cursor else {
-                return Ok::<_, Error>(None);
-            };
-            let (next, raw) = self.scan_page(&SCAN_ENTRIES, cursor).await?;
-            let items = raw
-                .chunks(2)
-                .filter(|pair| pair.len() == 2)
-                .map(|pair| Ok((self.codec.decode(&pair[0])?, self.codec.decode(&pair[1])?)))
-                .collect::<Result<std::vec::Vec<(K, V)>>>()?;
-            let next = (next != "0").then_some(next);
-            Ok(Some((stream::iter(items.into_iter().map(Ok)), next)))
-        })
-        .try_flatten()
+        self.iter_with(MapScan::new())
     }
 
     /// Streams the live keys, like [`HashMapCache::iter`].
     pub fn keys(&self) -> impl Stream<Item = Result<K>> + '_ {
-        stream::try_unfold(Some("0".to_string()), move |cursor| async move {
-            let Some(cursor) = cursor else {
-                return Ok::<_, Error>(None);
-            };
-            let (next, raw) = self.scan_page(&SCAN_KEYS, cursor).await?;
-            let items = raw
-                .iter()
-                .map(|key| self.codec.decode(key))
-                .collect::<Result<std::vec::Vec<K>>>()?;
-            let next = (next != "0").then_some(next);
-            Ok(Some((stream::iter(items.into_iter().map(Ok)), next)))
-        })
+        self.keys_with(MapScan::new())
+    }
+
+    /// Streams the live values, like [`HashMapCache::iter`].
+    pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
+        self.values_with(MapScan::new())
+    }
+
+    /// Streams the live entries `scan` selects, like [`HashMapCache::iter`]. Redisson's `entrySet(pattern, count)`.
+    #[doc(alias = "entrySet")]
+    pub fn iter_with(&self, scan: MapScan) -> impl Stream<Item = Result<(K, V)>> + '_ {
+        let page = scan.page();
+        let pattern = scan.match_pattern().map(str::to_string);
+        stream::try_unfold(
+            (Some("0".to_string()), pattern),
+            move |(cursor, pattern)| async move {
+                let Some(cursor) = cursor else {
+                    return Ok::<_, Error>(None);
+                };
+                let (next, raw) = self
+                    .scan_page(&SCAN_ENTRIES, cursor, pattern.as_deref(), page)
+                    .await?;
+                let items = raw
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|[k, v]| Ok((self.codec.decode(k)?, self.codec.decode(v)?)))
+                    .collect::<Result<std::vec::Vec<(K, V)>>>()?;
+                let next = (next != "0").then_some(next);
+                Ok(Some((
+                    stream::iter(items.into_iter().map(Ok)),
+                    (next, pattern),
+                )))
+            },
+        )
         .try_flatten()
     }
 
-    /// Streams the live values.
-    pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
-        self.iter().map_ok(|(_, v)| v)
+    /// Streams the live keys `scan` selects, like [`HashMapCache::iter`]. Redisson's `keySet(pattern, count)`.
+    #[doc(alias = "keySet")]
+    pub fn keys_with(&self, scan: MapScan) -> impl Stream<Item = Result<K>> + '_ {
+        let page = scan.page();
+        let pattern = scan.match_pattern().map(str::to_string);
+        stream::try_unfold(
+            (Some("0".to_string()), pattern),
+            move |(cursor, pattern)| async move {
+                let Some(cursor) = cursor else {
+                    return Ok::<_, Error>(None);
+                };
+                let (next, raw) = self
+                    .scan_page(&SCAN_KEYS, cursor, pattern.as_deref(), page)
+                    .await?;
+                let items = raw
+                    .iter()
+                    .map(|key| self.codec.decode(key))
+                    .collect::<Result<std::vec::Vec<K>>>()?;
+                let next = (next != "0").then_some(next);
+                Ok(Some((
+                    stream::iter(items.into_iter().map(Ok)),
+                    (next, pattern),
+                )))
+            },
+        )
+        .try_flatten()
     }
+
+    /// Streams the live values of the entries `scan` selects, like [`HashMapCache::iter`]. Redisson's `values(pattern, count)`.
+    pub fn values_with(&self, scan: MapScan) -> impl Stream<Item = Result<V>> + '_ {
+        self.iter_with(scan).map_ok(|(_, v)| v)
+    }
+}
+
+impl<K, V, C> HashMapCache<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Eq + Hash + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    /// Up to `count` distinct random live entries, picked like [`HashMapCache::random_keys`]. Redisson's `randomEntries`.
+    #[doc(alias = "randomEntries")]
+    pub async fn random_entries(&self, count: usize) -> Result<std::collections::HashMap<K, V>> {
+        let raw: redis::Value = self.random(&RANDOM_ENTRIES, count).await?;
+        Ok(decode_pairs(&self.codec, raw)?.into_iter().collect())
+    }
+
+    /// Every live entry in one call, a snapshot of one moment; [`iter`](HashMapCache::iter) reads it in pages instead. Like a read, it starts the idle time of each entry with an idle limit again.
+    #[doc(
+        alias = "readAllMap",
+        alias = "readAllEntrySet",
+        alias = "readAllKeySet",
+        alias = "readAllValues"
+    )]
+    pub async fn to_hash_map(&self) -> Result<std::collections::HashMap<K, V>> {
+        let raw: redis::Value = self
+            .key
+            .core
+            .eval(
+                &READ_ALL,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                vec![now()],
+            )
+            .await?;
+        Ok(decode_pairs(&self.codec, raw)?.into_iter().collect())
+    }
+}
+
+/// The length of an encoded value whose stored field is `raw` bytes long: the field minus the `dLc0` header, never below zero.
+fn encoded_value_len(raw: usize, prefix: LengthPrefix) -> usize {
+    raw.saturating_sub(prefix.value_header())
 }
 
 /// The client's clock as a script argument.
 fn now() -> Bytes {
     Bytes::from(now_millis().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_len_never_underflows() {
+        assert_eq!(encoded_value_len(20, LengthPrefix::U64Le), 4);
+        assert_eq!(encoded_value_len(16, LengthPrefix::U64Le), 0);
+        assert_eq!(encoded_value_len(5, LengthPrefix::U64Le), 0);
+        assert_eq!(encoded_value_len(0, LengthPrefix::U64Be), 0);
+        assert_eq!(encoded_value_len(16, LengthPrefix::U32Le), 4);
+        assert_eq!(encoded_value_len(3, LengthPrefix::U32Le), 0);
+    }
 }

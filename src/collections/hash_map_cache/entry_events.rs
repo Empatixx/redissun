@@ -31,7 +31,6 @@ impl LengthPrefix {
     }
 
     /// The size of the `dLc0` header in front of every stored value: the 8-byte double and the length.
-    #[allow(dead_code)]
     pub(crate) fn value_header(self) -> usize {
         8 + self.width()
     }

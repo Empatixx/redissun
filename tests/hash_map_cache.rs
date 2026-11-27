@@ -2617,3 +2617,188 @@ async fn extend_respects_the_size_limit() {
         .unwrap();
     assert_eq!(cache.len().await.unwrap(), 10);
 }
+
+#[tokio::test]
+async fn get_many_skips_expired_and_keeps_order() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache.insert("a", &1i64).await.unwrap();
+    cache
+        .insert("b", &2i64)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        cache.get_many(&["a", "b", "missing"]).await.unwrap(),
+        vec![Some(1), None, None]
+    );
+    assert_eq!(
+        cache.get_many(&["missing", "a"]).await.unwrap(),
+        vec![None, Some(1)]
+    );
+    assert!(cache.get_many::<str>(&[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn get_many_refreshes_the_idle_time() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache
+        .insert("a", &1i64)
+        .max_idle(Duration::from_millis(400))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(cache.get_many(&["a"]).await.unwrap(), vec![Some(1)]);
+    }
+    sleep(Duration::from_millis(600)).await;
+    assert_eq!(cache.get_many(&["a"]).await.unwrap(), vec![None]);
+}
+
+#[tokio::test]
+async fn contains_value_ignores_expired_entries() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache.insert("a", &1i64).await.unwrap();
+    cache
+        .insert("b", &2i64)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    assert!(cache.contains_value(&2i64).await.unwrap());
+    sleep(Duration::from_millis(250)).await;
+    assert!(cache.contains_value(&1i64).await.unwrap());
+    assert!(!cache.contains_value(&2i64).await.unwrap());
+    assert!(!cache.contains_value(&3i64).await.unwrap());
+}
+
+#[tokio::test]
+async fn value_len_counts_the_encoded_value() {
+    let c = client().await;
+    let name = unique("cache");
+    let cache = c.hash_map_cache::<String, String>(name.clone());
+    cache.insert("a", "xy").await.unwrap();
+    assert_eq!(cache.value_len("a").await.unwrap(), 4);
+    let map = c.hash_map::<String, String>(unique("map"));
+    map.insert("a", "xy").await.unwrap();
+    assert_eq!(map.value_len("a").await.unwrap(), 4);
+    let raw = raw_command(&["HSTRLEN", &hash_key(&name), "\"a\""]).await;
+    assert_eq!(raw.trim(), ":20");
+    assert_eq!(cache.value_len("missing").await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn random_keys_and_entries_skip_expired() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    for i in 0..5i64 {
+        cache.insert(&format!("live{i}"), &i).await.unwrap();
+        cache
+            .insert(&format!("dead{i}"), &i)
+            .ttl(Duration::from_millis(100))
+            .await
+            .unwrap();
+    }
+    sleep(Duration::from_millis(250)).await;
+    let keys = cache.random_keys(10).await.unwrap();
+    assert_eq!(keys.len(), 5);
+    assert!(keys.iter().all(|k| k.starts_with("live")));
+    let entries = cache.random_entries(10).await.unwrap();
+    assert_eq!(entries.len(), 5);
+    assert!(entries.keys().all(|k| k.starts_with("live")));
+    assert_eq!(entries["live3"], 3);
+    assert!(cache.random_keys(0).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn to_hash_map_returns_live_entries_only() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    assert!(cache.to_hash_map().await.unwrap().is_empty());
+    cache.insert("a", &1i64).await.unwrap();
+    cache
+        .insert("b", &2i64)
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    cache
+        .insert("c", &3i64)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(250)).await;
+    let all = cache.to_hash_map().await.unwrap();
+    assert_eq!(
+        all,
+        HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)])
+    );
+}
+
+#[tokio::test]
+async fn scan_with_pattern_reads_every_page() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let keys: Vec<String> = (0..1000).map(|i| format!("k{i}")).collect();
+    let values: Vec<i64> = (0..1000).collect();
+    cache
+        .extend(keys.iter().map(String::as_str).zip(values.iter()))
+        .await
+        .unwrap();
+    let found: HashSet<String> = cache
+        .keys_with(redissun::MapScan::new().pattern("\"k1*").page_size(10))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 111);
+    let values: Vec<i64> = cache
+        .values_with(redissun::MapScan::new().pattern("\"k99*"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(values.len(), 11);
+    let entries: Vec<(String, i64)> = cache
+        .iter_with(redissun::MapScan::new().page_size(7))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1000);
+}
+
+#[tokio::test]
+async fn keys_with_uses_the_pattern_and_skips_expired() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache.insert("a1", &1i64).await.unwrap();
+    cache.insert("a2", &2i64).await.unwrap();
+    cache
+        .insert("a3", &3i64)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    cache.insert("b1", &4i64).await.unwrap();
+    sleep(Duration::from_millis(250)).await;
+    let found: HashSet<String> = cache
+        .keys_with(redissun::MapScan::new().pattern("\"a*"))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(found, HashSet::from(["a1".to_string(), "a2".to_string()]));
+    let entries: HashMap<String, i64> = cache
+        .iter_with(redissun::MapScan::new().pattern("\"a*").page_size(1))
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        entries,
+        HashMap::from([("a1".to_string(), 1), ("a2".to_string(), 2)])
+    );
+}

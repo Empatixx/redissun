@@ -30,10 +30,16 @@ let found = sessions.get("abc").await?;
 | `incr_by(&k, n)`, `incr_by_float(&k, x)` | adds to the number stored under the key, creating it, and returns the result. Keeps the limits. |
 | `extend(entries)` | inserts all entries, each as `insert` would. It takes `.ttl(..)`, `.max_idle(..)` and `.batch_size(n)` (one atomic script per batch). |
 | `get(&k)`, `contains_key(&k)` | never show an expired entry. Both start the idle time again and count as a use for the size limit. |
+| `get_many(&[&k, ..])` | the values in key order, `None` for a missing or expired key. Starts the idle time of each live entry again. |
+| `contains_value(&v)` | whether a live entry holds `v`, compared by encoded bytes; reads every value. As in Redisson only the first entry holding `v` counts, so an expired one gives `false`. |
+| `value_len(&k)` | length of the encoded value, the same number `HashMap::value_len` gives; `0` when missing. Does not check expiry. |
+| `random_keys(n)`, `random_entries(n)` | up to `n` random live keys or entries; expired ones are left out of the `n` picked |
+| `to_hash_map()` | every live entry in one call |
 | `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
 | `len()`, `is_empty()`, `clear()` | `len` is the number of entries in Redis; as in Redisson it counts expired entries until the clean-up deletes them |
 | `iter()`, `keys()`, `values()` | streams of live entries, 100 per page. Expired entries are skipped page by page, and returned entries start their idle time again. |
+| `iter_with(scan)`, `keys_with(scan)`, `values_with(scan)` | the same, with a `MapScan` pattern (matched against the encoded key) and page size |
 | `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
 | `init_max_size(n, mode)` | the same, but only when no limit was set before |
 | `events()`, `events_of(kinds)` | start listening to entry events (`EntryEvent`). Unlike on `HashMap`, these are not keyspace notifications. See below. |
