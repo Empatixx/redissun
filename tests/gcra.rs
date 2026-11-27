@@ -3,7 +3,8 @@
 //! Ported from Redisson 4.8.0 `RedissonGcraTest` (named `redisson_<snake_case>`; the runs on the Lua path add `_lua`):
 //! `testTrySetRate`, `testTryAcquire`, `testTryAcquireWithTokens`, `testSetRate`, `testGetConfigNotSet`,
 //! `testTryAcquireRateNotSet`, `testValidation` (as `redisson_validation` and `redisson_validation_of_tokens`; the
-//! negative `maxBurst` case cannot be written in Rust, since `u64` excludes it) and `testDelete`.
+//! negative `maxBurst` case cannot be written through the API, since `u64` excludes it, so
+//! `lua_matches_native_on_invalid_settings` writes it into the hash) and `testDelete`.
 //!
 //! Not ported:
 //! - `testDeprecatedTryAcquire`: the deprecated `tryAcquire(maxBurst, tokensPerPeriod, period[, tokens])` overloads
@@ -583,6 +584,63 @@ async fn lua_matches_native_on_errors() {
         message[start..end].to_string()
     };
     assert_eq!(text(&from_lua), text(&from_native));
+}
+
+/// gcra.c rejects these settings before it reads the clock; the Lua port gives the same texts.
+#[tokio::test]
+async fn lua_matches_native_on_invalid_settings() {
+    let lua = client().await;
+    let native = redis_gcra_client().await;
+    let lua_url = redis_url().await;
+    let native_url = redis_gcra_url().await;
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &["maxBurst", "-1", "rate", "4", "period", "1"],
+            "value is out of range, must be positive",
+        ),
+        (
+            &["maxBurst", "1.5", "rate", "4", "period", "1"],
+            "value is out of range, must be positive",
+        ),
+        (
+            &["maxBurst", "2", "rate", "0", "period", "1"],
+            "value is out of range, value must between 1 and 9223372036854775807",
+        ),
+        (
+            &["maxBurst", "2", "rate", "-3", "period", "1"],
+            "value is out of range, value must between 1 and 9223372036854775807",
+        ),
+        (
+            &["maxBurst", "2", "rate", "1.5", "period", "1"],
+            "value is not an integer or out of range",
+        ),
+    ];
+    for (fields, expected) in cases {
+        let from_lua = raw_config_error(&lua, &lua_url, fields).await;
+        let from_native = raw_config_error(&native, &native_url, fields).await;
+        assert!(
+            from_native.contains(expected),
+            "native {fields:?}: {from_native}"
+        );
+        assert!(from_lua.contains(expected), "Lua {fields:?}: {from_lua}");
+    }
+}
+
+/// gcra.c takes `now` from `commandTimeSnapshot() * 1000`, whole milliseconds, so with an emission interval of
+/// 250 ms every TAT is a multiple of 1000 µs. A µs clock would leave other digits.
+#[tokio::test]
+async fn the_lua_clock_has_the_native_millisecond_grain() {
+    let gcra = gcra(&client().await);
+    gcra.init_rate(2, 4, secs(1)).await.unwrap();
+    for _ in 0..3 {
+        acquire(&gcra).await;
+        let tat: i64 = bulk(&raw_command(&["GET", gcra.name()]).await)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(tat % 1000, 0, "{tat}");
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
 }
 
 // Review Focus 3.

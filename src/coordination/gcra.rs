@@ -44,7 +44,7 @@ static TRY_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
 
 /// Port of gcraCommand (redis/src/gcra.c) for servers without `GCRA`, after Redisson's config prefix from [`TRY_ACQUIRE`].
 ///
-/// It gives the native reply. The state is the theoretical arrival time in microseconds of the server clock, a string at `KEYS[2]` that expires at that time (`PXAT`); the native command keeps the same number in a `gcra` object, so a key used by both gives `WRONGTYPE`.
+/// It gives the native reply, with the native setting checks and clock (the server's, in whole milliseconds counted in microseconds). The state is the theoretical arrival time in microseconds, a string at `KEYS[2]` that expires at that time (`PXAT`); the native command keeps the same number in a `gcra` object, so a key used by both gives `WRONGTYPE`.
 static TRY_ACQUIRE_LUA: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
         r#"local maxBurst = redis.call('hget', KEYS[1], 'maxBurst');
@@ -54,15 +54,34 @@ assert(maxBurst ~= false and rate ~= false and period ~= false, 'GCRA rate is no
 -- Port of gcraCommand, redis/src/gcra.c (unstable, 2026-11-02). Lua numbers are doubles: 2^53 replaces LLONG_MAX.
 local LIMIT = 9007199254740992
 local overflowTokens = 'GCRA limiting uses microsecond accuracy. Combination of period, tokens_per_period and TOKENS would cause an overflow'
-local burst = tonumber(maxBurst) + 1
-local perPeriod = tonumber(rate)
+-- getLongLongFromObject: an integer as string2ll reads it (no sign but '-', no leading zero), within a long long.
+local function long(s)
+    if s ~= '0' and not string.find(s, '^%-?[1-9]%d*$') then return nil end
+    local digits = (string.gsub(s, '^%-', ''))
+    local most = '9223372036854775807'
+    if string.sub(s, 1, 1) == '-' then most = '9223372036854775808' end
+    if #digits > 19 or (#digits == 19 and digits > most) then return nil end
+    return tonumber(s)
+end
+local maxBurstN = long(maxBurst)
+if maxBurstN == nil or maxBurstN < 0 then
+    return redis.error_reply('value is out of range, must be positive')
+end
+local burst = maxBurstN + 1
+local perPeriod = long(rate)
+if perPeriod == nil then return redis.error_reply('value is not an integer or out of range') end
+if perPeriod < 1 then
+    return redis.error_reply('value is out of range, value must between 1 and 9223372036854775807')
+end
 local periodS = tonumber(period)
+if periodS == nil then return redis.error_reply('value is not a valid float') end
 local tokens = tonumber(ARGV[1])
 if periodS <= 0 or periodS >= 1e12 then
     return redis.error_reply('period must be > 0 and < 1e12')
 end
 local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000000 + tonumber(time[2])
+-- commandTimeSnapshot() * 1000: whole milliseconds, in microseconds.
+local now = tonumber(time[1]) * 1000000 + math.floor(tonumber(time[2]) / 1000) * 1000
 local stored = redis.call('GET', KEYS[2])
 local tat = now
 if stored ~= false then tat = tonumber(stored) end
@@ -96,13 +115,19 @@ return {limited, burst, remaining, retry, math.ceil(ttl / 1000000)}"#,
 
 /// Reads the reply to the probe `GCRA <name> 0 1 1 TOKENS`, which a server with the command refuses for its missing `TOKENS` value before it looks at the key.
 ///
-/// "unknown command" means the server has no `GCRA`. Any other error reply, such as `NOPERM`, counts as no too, since Redisson's script would fail the same way; a failure that is not a server reply is passed on, and nothing is kept.
+/// Yes for a reply or "missing tokens"; no for "unknown command" and for `NOPERM`, since Redisson's script would fail the same way. Every other error (a lost connection, `LOADING`, `TRYAGAIN`, `CLUSTERDOWN`, `MASTERDOWN`, ...) says nothing about the command, so it is passed on and nothing is kept: the next acquire asks again.
 fn probe_answer(reply: Result<redis::Value>) -> Result<bool> {
     match reply {
         Ok(_) => Ok(true),
         Err(Error::Redis(message)) => {
-            let message = message.to_lowercase();
-            Ok(!message.contains("unknown command") && message.contains("missing tokens"))
+            let lower = message.to_lowercase();
+            if lower.contains("unknown command") || lower.starts_with("noperm") {
+                Ok(false)
+            } else if lower.contains("missing tokens") {
+                Ok(true)
+            } else {
+                Err(Error::Redis(message))
+            }
         }
         Err(error) => Err(error),
     }
@@ -531,6 +556,60 @@ mod tests {
             probe_answer(Err(Error::Timeout)),
             Err(Error::Timeout)
         ));
+    }
+
+    #[test]
+    fn probe_answer_passes_unclear_errors_on() {
+        for message in [
+            "LOADING Redis is loading the dataset in memory",
+            "broken pipe",
+            "TRYAGAIN Multiple keys request during rehashing of slot",
+            "CLUSTERDOWN The cluster is down",
+            "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.",
+        ] {
+            match probe_answer(server(message)) {
+                Err(Error::Redis(passed)) => assert_eq!(passed, message),
+                other => panic!("{message}: expected the error back, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn probe_answer_matches_noperm_as_a_prefix() {
+        assert!(!probe_answer(server("NOPERM this user has no permissions")).unwrap());
+        assert!(matches!(
+            probe_answer(server("ERR something about noperm")),
+            Err(Error::Redis(_))
+        ));
+    }
+
+    /// The probe is cached only when it answers; an unclear error leaves the cell empty for the next acquire.
+    #[tokio::test]
+    async fn an_unclear_probe_error_is_not_cached() {
+        let cell = tokio::sync::OnceCell::<bool>::new();
+        let first = cell
+            .get_or_try_init(|| async {
+                probe_answer(server("LOADING Redis is loading the dataset in memory"))
+            })
+            .await;
+        assert!(first.is_err());
+        assert!(cell.get().is_none());
+        let unknown = cell
+            .get_or_try_init(|| async { probe_answer(server("ERR unknown command 'GCRA'")) })
+            .await;
+        assert!(matches!(unknown, Ok(false)));
+        assert_eq!(cell.get(), Some(&false));
+    }
+
+    #[test]
+    fn the_lua_clock_is_the_native_millisecond_snapshot() {
+        let script = TRY_ACQUIRE_LUA.source();
+        assert!(
+            script.contains(
+                "local now = tonumber(time[1]) * 1000000 + math.floor(tonumber(time[2]) / 1000) * 1000"
+            ),
+            "{script}"
+        );
     }
 
     fn reply(items: &[i64]) -> redis::Value {

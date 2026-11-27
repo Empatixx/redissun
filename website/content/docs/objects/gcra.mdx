@@ -44,6 +44,8 @@ if result.limited {
 
 The times are whole seconds, rounded up by the server. They come from the server's clock, so the clocks of your clients do not matter, unlike `RateLimiter`. `.tokens(0)` is `Error::Config`. A limiter without a rate is an `Error::Redis` containing "GCRA rate is not set".
 
+`try_acquire` and `init_rate` are sent once and never retried, whatever the client's retry settings: a request whose reply was lost may already have taken its tokens or set the rate, and sending it again would take them twice. Redisson sends `trySetRate` once too, but retries `tryAcquire`; redissun does not, on purpose. `set_rate` and `config` retry as usual.
+
 ## Which server
 
 Redis has a `GCRA` command, but it held the command out of 8.8.0 and every later release. Today only the `redis:8.8-m03` preview image has it.
@@ -51,9 +53,9 @@ Redis has a `GCRA` command, but it held the command out of 8.8.0 and every later
 - **A Redis build with `GCRA`** gets the command, exactly as Redisson sends it: Redisson's script reads the settings and calls `GCRA`. Redisson and redissun clients share the limiter there.
 - **Every other server**, Redis 6.2 or newer and Valkey, gets a Lua port of the same algorithm (`gcraCommand` from Redis's `gcra.c`), with the same replies and the same error messages. Redisson does not run there: its script fails with "unknown command".
 
-A client asks the server once, at its first `try_acquire`, with `GCRA <name> 0 1 1 TOKENS`. The server refuses that for its missing `TOKENS` value before it looks at the key, so the probe writes nothing. The client keeps the answer for its whole life, so restart clients after moving to a server with `GCRA`.
+A client asks the server once, at its first `try_acquire`, with `GCRA <name> 0 1 1 TOKENS`. The server refuses that for its missing `TOKENS` value before it looks at the key, so the probe writes nothing. The client keeps the answer for its whole life, so restart clients after moving to a server with `GCRA`. An error that says nothing about the command, such as a lost connection or `LOADING`, is returned from that `try_acquire` and kept by no one: the next acquire asks again.
 
-The two paths store the state differently: the command keeps it in a `gcra` object, the Lua port as a string with the time in microseconds. Do not let both kinds of server, or a server upgrade, share live keys: `try_acquire` then fails with `WRONGTYPE` until the state key expires (at the latest after the time to a full bucket) or `set_rate` resets it.
+The two paths store the state differently: the command keeps it in a `gcra` object, the Lua port as a string with the time in microseconds. Do not let both kinds of server, or a server upgrade, share live keys: `try_acquire` then fails with `WRONGTYPE` until the state key expires (at the latest after the time to a full bucket), or `set_rate` or `del` resets it. `persist()`, or an `expire()` longer than that time, keeps the state key alive, and the error then stays until `set_rate` or `del`.
 
 ## How it is stored
 

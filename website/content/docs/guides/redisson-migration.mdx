@@ -573,7 +573,7 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | Redisson | redissun |
 |---|---|
 | `getGcra(name)` | `client.gcra(name)` |
-| `getGcra(CommonOptions)` | `client.gcra(name)`; the timeouts and retries are the client's |
+| `getGcra(CommonOptions)` | `client.gcra(name)`; the timeouts and retries are the client's, except that `try_acquire` and `init_rate` are sent once and never retried. Redisson also sends `trySetRate` once, but retries `tryAcquire`: redissun does not, since a retried acquire whose first reply was lost takes its tokens twice |
 | `trySetRate(maxBurst, tokensPerPeriod, period)` | `init_rate(max_burst, tokens_per_period, period)` → `bool` |
 | `setRate(maxBurst, tokensPerPeriod, period)` | `set_rate(max_burst, tokens_per_period, period)` |
 | `getConfig()` | `config()`, `None` instead of `null` when no rate is set |
