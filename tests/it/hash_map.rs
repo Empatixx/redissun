@@ -100,10 +100,10 @@ async fn extend_and_get_many_accept_empty_input() {
 }
 
 #[tokio::test]
-async fn insert_nx_only_inserts_missing_keys() {
+async fn try_insert_only_inserts_missing_keys() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
-    assert!(map.insert_nx("a", &1i64).await.unwrap());
-    assert!(!map.insert_nx("a", &2i64).await.unwrap());
+    assert!(map.try_insert("a", &1i64).await.unwrap().is_none());
+    assert!(!map.try_insert("a", &2i64).await.unwrap().is_none());
     assert_eq!(map.get("a").await.unwrap(), Some(1));
 }
 
@@ -177,61 +177,57 @@ async fn null_values_are_distinct_from_missing_keys() {
 
 // Redisson: testPutIfAbsent
 #[tokio::test]
-async fn insert_if_absent_returns_the_existing_value_and_keeps_it() {
+async fn try_insert_returns_the_existing_value_and_keeps_it() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert_eq!(
-        map.insert_if_absent(&key("1"), &value("3")).await.unwrap(),
+        map.try_insert(&key("1"), &value("3")).await.unwrap(),
         Some(value("2"))
     );
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
-    assert_eq!(
-        map.insert_if_absent(&key("2"), &value("4")).await.unwrap(),
-        None
-    );
+    assert_eq!(map.try_insert(&key("2"), &value("4")).await.unwrap(), None);
     assert_eq!(map.get(&key("2")).await.unwrap(), Some(value("4")));
 }
 
 // Redisson: testFastPutIfAbsent
 #[tokio::test]
-async fn insert_nx_does_not_overwrite_an_existing_key() {
+async fn try_insert_does_not_overwrite_an_existing_key() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
-    assert!(!map.insert_nx(&key("1"), &value("3")).await.unwrap());
+    assert!(!map
+        .try_insert(&key("1"), &value("3"))
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
-    assert!(map.insert_nx(&key("2"), &value("4")).await.unwrap());
+    assert!(map
+        .try_insert(&key("2"), &value("4"))
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(map.get(&key("2")).await.unwrap(), Some(value("4")));
 }
 
 // Redisson: testFastPutIfExists
 #[tokio::test]
-async fn fast_insert_if_exists_updates_only_an_existing_key() {
+async fn replace_updates_only_an_existing_key() {
     let map = simple().await;
-    assert!(!map
-        .fast_insert_if_exists(&key("1"), &value("3"))
-        .await
-        .unwrap());
+    assert!(!map.replace(&key("1"), &value("3")).await.unwrap().is_some());
     assert_eq!(map.get(&key("1")).await.unwrap(), None);
     map.insert(&key("1"), &value("2")).await.unwrap();
-    assert!(map
-        .fast_insert_if_exists(&key("1"), &value("3"))
-        .await
-        .unwrap());
+    assert!(map.replace(&key("1"), &value("3")).await.unwrap().is_some());
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
 }
 
 // Redisson: testPutIfExists
 #[tokio::test]
-async fn insert_if_exists_returns_the_previous_value_of_an_existing_key() {
+async fn replace_returns_the_previous_value_of_an_existing_key() {
     let map = simple().await;
-    assert_eq!(
-        map.insert_if_exists(&key("1"), &value("3")).await.unwrap(),
-        None
-    );
+    assert_eq!(map.replace(&key("1"), &value("3")).await.unwrap(), None);
     assert_eq!(map.get(&key("1")).await.unwrap(), None);
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert_eq!(
-        map.insert_if_exists(&key("1"), &value("3")).await.unwrap(),
+        map.replace(&key("1"), &value("3")).await.unwrap(),
         Some(value("2"))
     );
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
@@ -256,11 +252,11 @@ async fn a_value_of_another_type_fails_with_a_codec_error() {
 
 // Redisson: testReplaceOldValueFail
 #[tokio::test]
-async fn replace_if_keeps_the_value_when_the_old_value_differs() {
+async fn compare_and_set_keeps_the_value_when_the_old_value_differs() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(!map
-        .replace_if(&key("1"), &value("43"), &value("31"))
+        .compare_and_set(&key("1"), &value("43"), &value("31"))
         .await
         .unwrap());
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
@@ -268,15 +264,15 @@ async fn replace_if_keeps_the_value_when_the_old_value_differs() {
 
 // Redisson: testReplaceOldValueSuccess
 #[tokio::test]
-async fn replace_if_swaps_the_value_when_the_old_value_matches() {
+async fn compare_and_set_swaps_the_value_when_the_old_value_matches() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
     assert!(map
-        .replace_if(&key("1"), &value("2"), &value("3"))
+        .compare_and_set(&key("1"), &value("2"), &value("3"))
         .await
         .unwrap());
     assert!(!map
-        .replace_if(&key("1"), &value("2"), &value("3"))
+        .compare_and_set(&key("1"), &value("2"), &value("3"))
         .await
         .unwrap());
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("3")));
@@ -324,20 +320,20 @@ async fn contains_key_finds_only_stored_keys() {
 
 // Redisson: testRemoveValueFail
 #[tokio::test]
-async fn remove_if_keeps_the_entry_when_key_or_value_differs() {
+async fn remove_if_eq_keeps_the_entry_when_key_or_value_differs() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
-    assert!(!map.remove_if(&key("2"), &value("1")).await.unwrap());
-    assert!(!map.remove_if(&key("1"), &value("3")).await.unwrap());
+    assert!(!map.remove_if_eq(&key("2"), &value("1")).await.unwrap());
+    assert!(!map.remove_if_eq(&key("1"), &value("3")).await.unwrap());
     assert_eq!(map.get(&key("1")).await.unwrap(), Some(value("2")));
 }
 
 // Redisson: testRemoveValue
 #[tokio::test]
-async fn remove_if_deletes_the_entry_when_the_value_matches() {
+async fn remove_if_eq_deletes_the_entry_when_the_value_matches() {
     let map = simple().await;
     map.insert(&key("1"), &value("2")).await.unwrap();
-    assert!(map.remove_if(&key("1"), &value("2")).await.unwrap());
+    assert!(map.remove_if_eq(&key("1"), &value("2")).await.unwrap());
     assert_eq!(map.get(&key("1")).await.unwrap(), None);
     assert_eq!(map.len().await.unwrap(), 0);
 }
@@ -367,62 +363,62 @@ async fn remove_returns_the_value_or_none_for_a_missing_key() {
 
 // Redisson: testFastRemove
 #[tokio::test]
-async fn fast_remove_returns_the_number_of_removed_keys() {
+async fn remove_many_returns_the_number_of_removed_keys() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.extend([(&1, &3), (&3, &5), (&4, &6), (&7, &8)])
         .await
         .unwrap();
-    assert_eq!(map.fast_remove(&[&1, &3, &7]).await.unwrap(), 3);
+    assert_eq!(map.remove_many(&[&1, &3, &7]).await.unwrap(), 3);
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
 // Redisson: testFastRemoveEmpty
 #[tokio::test]
-async fn fast_remove_without_keys_removes_nothing() {
+async fn remove_many_without_keys_removes_nothing() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.insert(&1, &3).await.unwrap();
-    assert_eq!(map.fast_remove::<i32>(&[]).await.unwrap(), 0);
+    assert_eq!(map.remove_many::<i32>(&[]).await.unwrap(), 0);
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
 // Redisson: testFastPut
 #[tokio::test]
-async fn fast_insert_reports_whether_the_key_was_new() {
+async fn set_reports_whether_the_key_was_new() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
-    assert!(map.fast_insert(&1, &2).await.unwrap());
+    assert!(map.set(&1, &2).await.unwrap());
     assert_eq!(map.get(&1).await.unwrap(), Some(2));
-    assert!(!map.fast_insert(&1, &3).await.unwrap());
+    assert!(!map.set(&1, &3).await.unwrap());
     assert_eq!(map.get(&1).await.unwrap(), Some(3));
     assert_eq!(map.len().await.unwrap(), 1);
 }
 
 // Redisson: testFastReplace
 #[tokio::test]
-async fn fast_replace_updates_only_an_existing_key() {
+async fn replace_reports_whether_it_updated_only_an_existing_key() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
     map.insert(&1, &2).await.unwrap();
-    assert!(map.fast_replace(&1, &3).await.unwrap());
-    assert!(!map.fast_replace(&2, &0).await.unwrap());
+    assert!(map.replace(&1, &3).await.unwrap().is_some());
+    assert!(!map.replace(&2, &0).await.unwrap().is_some());
     assert_eq!(map.len().await.unwrap(), 1);
     assert_eq!(map.get(&1).await.unwrap(), Some(3));
 }
 
 // Redisson: testEmptyRemove
 #[tokio::test]
-async fn remove_if_on_a_missing_key_returns_false() {
+async fn remove_if_eq_on_a_missing_key_returns_false() {
     let map = client().await.hash_map::<i32, i32>(unique("simple"));
-    assert!(!map.remove_if(&1, &3).await.unwrap());
+    assert!(!map.remove_if_eq(&1, &3).await.unwrap());
     map.insert(&4, &5).await.unwrap();
-    assert!(map.remove_if(&4, &5).await.unwrap());
+    assert!(map.remove_if_eq(&4, &5).await.unwrap());
 }
 
 // Redisson: testValueSize
 #[tokio::test]
-async fn value_size_returns_the_encoded_length_or_zero() {
+async fn value_len_returns_the_encoded_length_or_zero() {
     let map = client().await.hash_map::<String, String>(unique("getAll"));
     map.insert("1", "1234").await.unwrap();
-    assert_eq!(map.value_size("4").await.unwrap(), 0);
-    assert_eq!(map.value_size("1").await.unwrap(), 6);
+    assert_eq!(map.value_len("4").await.unwrap(), 0);
+    assert_eq!(map.value_len("1").await.unwrap(), 6);
 }
 
 // Redisson: testAddAndGet
@@ -559,7 +555,7 @@ async fn extend_adds_entries_to_existing_ones() {
     map.insert(&2, "2").await.unwrap();
     map.insert(&3, "3").await.unwrap();
     map.extend([(&4, "4"), (&5, "5"), (&6, "6")]).await.unwrap();
-    let mut keys = map.read_all_keys().await.unwrap();
+    let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
     keys.sort();
     assert_eq!(keys, vec![1, 2, 3, 4, 5, 6]);
 }
@@ -591,25 +587,25 @@ async fn random_keys_returns_distinct_stored_keys() {
 
 // Redisson: testReadAllValues
 #[tokio::test]
-async fn read_all_values_returns_every_value() {
+async fn values_returns_every_value() {
     let map = simple_three().await;
-    let mut values = map.read_all_values().await.unwrap();
+    let mut values = map.values().try_collect::<Vec<_>>().await.unwrap();
     values.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(values, vec![value("2"), value("44"), value("6")]);
 }
 
 // Redisson: testReadAllKeySet
 #[tokio::test]
-async fn read_all_keys_returns_every_key() {
+async fn keys_returns_every_key() {
     let map = simple_three().await;
-    let mut keys = map.read_all_keys().await.unwrap();
+    let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
     keys.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(keys, vec![key("1"), key("33"), key("5")]);
 }
 
 // Redisson: testReadAllKeySetHighAmount
 #[tokio::test]
-async fn read_all_keys_returns_a_thousand_keys() {
+async fn keys_returns_a_thousand_keys() {
     let map = simple().await;
     let entries: Vec<(SimpleKey, SimpleValue)> = (0..1000)
         .map(|i| (key(&i.to_string()), value(&i.to_string())))
@@ -617,17 +613,26 @@ async fn read_all_keys_returns_a_thousand_keys() {
     map.extend(entries.iter().map(|(k, v)| (k, v)))
         .await
         .unwrap();
-    assert_eq!(map.read_all_keys().await.unwrap().len(), 1000);
+    assert_eq!(
+        map.keys().try_collect::<Vec<_>>().await.unwrap().len(),
+        1000
+    );
 }
 
 // Redisson: testReadAllEntrySet
 #[tokio::test]
-async fn read_all_entries_returns_every_entry() {
+async fn iter_returns_every_entry() {
     let map = client().await.hash_map::<i32, String>(unique("simple12"));
     map.insert(&1, "12").await.unwrap();
     map.insert(&2, "33").await.unwrap();
     map.insert(&3, "43").await.unwrap();
-    let entries: HashMap<i32, String> = map.read_all_entries().await.unwrap().into_iter().collect();
+    let entries: HashMap<i32, String> = map
+        .iter()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
     let expected: HashMap<i32, String> = [(1, "12"), (2, "33"), (3, "43")]
         .into_iter()
         .map(|(k, v)| (k, v.to_string()))
@@ -723,11 +728,11 @@ async fn small_map_reads_keep_the_insertion_order() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     assert_eq!(map.keys().try_collect::<Vec<_>>().await.unwrap(), keys);
-    assert_eq!(map.read_all_keys().await.unwrap(), keys);
+    assert_eq!(map.keys().try_collect::<Vec<_>>().await.unwrap(), keys);
     assert_eq!(map.values().try_collect::<Vec<_>>().await.unwrap(), values);
-    assert_eq!(map.read_all_values().await.unwrap(), values);
+    assert_eq!(map.values().try_collect::<Vec<_>>().await.unwrap(), values);
     assert_eq!(map.iter().try_collect::<Vec<_>>().await.unwrap(), pairs);
-    let mut all = map.read_all_entries().await.unwrap();
+    let mut all = map.iter().try_collect::<Vec<_>>().await.unwrap();
     let mut sorted = pairs.clone();
     all.sort();
     sorted.sort();
@@ -770,126 +775,100 @@ async fn per_key_semaphore_and_latch_work() {
 }
 
 #[tokio::test]
-async fn compute_inserts_updates_and_removes() {
+async fn entry_inserts_updates_and_removes() {
+    use redissun::hash_map::Entry;
     let map = client().await.hash_map::<String, i64>(unique("map"));
+    assert_eq!(map.entry("k").await.unwrap().or_insert(1).await.unwrap(), 1);
     assert_eq!(
-        map.compute("k", |_| async { Some(1) }).await.unwrap(),
-        Some(1)
-    );
-    assert_eq!(
-        map.compute("k", |v| async move { v.map(|x| x + 1) })
+        map.entry("k")
+            .await
+            .unwrap()
+            .and_modify(|v| *v += 1)
+            .or_insert(1)
             .await
             .unwrap(),
-        Some(2)
+        2
     );
     assert_eq!(map.get("k").await.unwrap(), Some(2));
-    assert_eq!(map.compute("k", |_| async { None }).await.unwrap(), None);
+    let Entry::Occupied(entry) = map.entry("k").await.unwrap() else {
+        panic!("k is present");
+    };
+    assert_eq!(*entry.get(), 2);
+    assert_eq!(entry.remove().await.unwrap(), 2);
     assert!(!map.contains_key("k").await.unwrap());
 }
 
 #[tokio::test]
-async fn compute_none_on_missing_writes_nothing() {
+async fn a_dropped_entry_writes_nothing() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
-    assert_eq!(map.compute("k", |_| async { None }).await.unwrap(), None);
+    let entry = map.entry("k").await.unwrap();
+    assert!(matches!(entry, redissun::hash_map::Entry::Vacant(_)));
+    drop(entry);
     assert_eq!(map.len().await.unwrap(), 0);
 }
 
 #[tokio::test]
-async fn compute_if_absent_keeps_existing() {
+async fn or_insert_with_keeps_the_present_value() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
     map.insert("a", &1).await.unwrap();
-    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = called.clone();
-    let result = map
-        .compute_if_absent("a", || async move {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            Some(5)
+    let called = std::cell::Cell::new(false);
+    let value = map
+        .entry("a")
+        .await
+        .unwrap()
+        .or_insert_with(|| {
+            called.set(true);
+            5
         })
         .await
         .unwrap();
-    assert_eq!(result, Some(1));
-    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(
-        map.compute_if_absent("b", || async { Some(7) })
-            .await
-            .unwrap(),
-        Some(7)
-    );
-    assert_eq!(map.get("b").await.unwrap(), Some(7));
+    assert_eq!(value, 1);
+    assert!(!called.get());
+    assert_eq!(map.entry("b").await.unwrap().or_default().await.unwrap(), 0);
+    assert_eq!(map.get("b").await.unwrap(), Some(0));
 }
 
 #[tokio::test]
-async fn compute_if_present_skips_missing() {
+async fn and_modify_leaves_a_vacant_key_to_or_insert() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
-    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = called.clone();
-    let result = map
-        .compute_if_present("a", |v| async move {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            Some(v + 1)
-        })
+    let value = map
+        .entry("a")
+        .await
+        .unwrap()
+        .and_modify(|v| *v += 100)
+        .or_insert(7)
         .await
         .unwrap();
-    assert_eq!(result, None);
-    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(value, 7);
+}
+
+#[tokio::test]
+async fn occupied_insert_returns_the_old_value() {
+    use redissun::hash_map::Entry;
+    let map = client().await.hash_map::<String, i64>(unique("map"));
     map.insert("a", &1).await.unwrap();
-    assert_eq!(
-        map.compute_if_present("a", |v| async move { Some(v + 1) })
-            .await
-            .unwrap(),
-        Some(2)
-    );
-    assert_eq!(
-        map.compute_if_present("a", |_| async { None })
-            .await
-            .unwrap(),
-        None
-    );
-    assert!(!map.contains_key("a").await.unwrap());
+    match map.entry("a").await.unwrap() {
+        Entry::Occupied(entry) => assert_eq!(entry.insert(5).await.unwrap(), 1),
+        Entry::Vacant(_) => panic!("a is present"),
+    }
+    assert_eq!(map.get("a").await.unwrap(), Some(5));
+    match map.entry("b").await.unwrap() {
+        Entry::Vacant(entry) => assert_eq!(entry.insert(3).await.unwrap(), 3),
+        Entry::Occupied(_) => panic!("b is missing"),
+    }
+    assert_eq!(map.get("b").await.unwrap(), Some(3));
 }
 
 #[tokio::test]
-async fn merge_inserts_then_combines() {
-    let map = client().await.hash_map::<String, i64>(unique("map"));
-    assert_eq!(
-        map.merge("k", 5, |a, b| async move { Some(a + b) })
-            .await
-            .unwrap(),
-        Some(5)
-    );
-    assert_eq!(
-        map.merge("k", 5, |a, b| async move { Some(a + b) })
-            .await
-            .unwrap(),
-        Some(10)
-    );
-    assert_eq!(map.get("k").await.unwrap(), Some(10));
-}
-
-#[tokio::test]
-async fn merge_none_removes() {
-    let map = client().await.hash_map::<String, i64>(unique("map"));
-    map.insert("k", &1).await.unwrap();
-    assert_eq!(
-        map.merge("k", 2, |_, _| async { None }).await.unwrap(),
-        None
-    );
-    assert!(!map.contains_key("k").await.unwrap());
-}
-
-#[tokio::test]
-async fn merge_is_atomic_across_tasks() {
+async fn entry_is_atomic_across_tasks() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
     let tasks: Vec<_> = (0..20)
         .map(|_| {
             let map = map.clone();
             tokio::spawn(async move {
-                map.merge("k", 1, |a, b| async move {
-                    tokio::task::yield_now().await;
-                    Some(a + b)
-                })
-                .await
-                .unwrap();
+                let entry = map.entry("k").await.unwrap();
+                tokio::task::yield_now().await;
+                entry.and_modify(|v| *v += 1).or_insert(1).await.unwrap();
             })
         })
         .collect();
@@ -900,17 +879,9 @@ async fn merge_is_atomic_across_tasks() {
 }
 
 #[tokio::test]
-async fn cancelled_compute_releases_the_lock() {
+async fn a_dropped_entry_releases_the_lock() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
-    let pending = map.compute("k", |_| async {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        Some(1)
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), pending)
-            .await
-            .is_err()
-    );
+    drop(map.entry("k").await.unwrap());
     let lock = map.lock("k").unwrap();
     for _ in 0..40 {
         if !lock.is_locked().await.unwrap() {
@@ -918,7 +889,7 @@ async fn cancelled_compute_releases_the_lock() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("the per-key lock stayed held after the compute future was dropped");
+    panic!("the per-key lock stayed held after the entry was dropped");
 }
 
 async fn thousand_keys() -> redissun::HashMap<String, i64, redissun::JsonCodec> {
@@ -966,34 +937,14 @@ async fn scan_pattern_without_matches_is_empty() {
 }
 
 #[tokio::test]
-async fn read_all_keys_matching_is_not_limited_to_one_page() {
-    let map = thousand_keys().await;
-    assert_eq!(
-        map.read_all_keys_matching("\"k1*").await.unwrap().len(),
-        111
-    );
-    assert_eq!(
-        map.read_all_values_matching("\"k1*").await.unwrap().len(),
-        111
-    );
-    let entries = map.read_all_entries_matching("\"k99*").await.unwrap();
-    assert_eq!(entries.len(), 11);
-    assert!(entries.iter().all(|(k, v)| *k == format!("k{v}")));
-}
-
-#[tokio::test]
-async fn read_all_map_and_get_all() {
+async fn to_hash_map_reads_the_whole_map() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
     map.insert("a", &1).await.unwrap();
     map.insert("b", &2).await.unwrap();
-    let all = map.read_all_map().await.unwrap();
     assert_eq!(
-        all,
+        map.to_hash_map().await.unwrap(),
         HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)])
     );
-    let some = map.get_all(&["a", "missing"]).await.unwrap();
-    assert_eq!(some, HashMap::from([("a".to_string(), 1)]));
-    assert!(map.get_all::<str>(&[]).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1146,18 +1097,17 @@ async fn redisson_random_entries() {
 // Redisson: testComputeIfPresent
 #[tokio::test]
 async fn redisson_compute_if_present() {
+    use redissun::hash_map::Entry;
     let map = client().await.hash_map::<String, String>(unique("map"));
-    map.compute_if_present("1", |_| async { Some("12".to_string()) })
-        .await
-        .unwrap();
+    if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+        entry.insert("12".to_string()).await.unwrap();
+    }
     assert_eq!(map.get("1").await.unwrap(), None);
     map.insert("1", "10").await.unwrap();
-    map.compute_if_present("1", |value| async move {
-        assert_eq!(value, "10");
-        Some("12".to_string())
-    })
-    .await
-    .unwrap();
+    if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+        assert_eq!(entry.get(), "10");
+        entry.insert("12".to_string()).await.unwrap();
+    }
     assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
 }
 
@@ -1165,21 +1115,20 @@ async fn redisson_compute_if_present() {
 #[tokio::test]
 async fn redisson_compute_if_present_mutable() {
     let map = client().await.hash_map::<String, User>(unique("map"));
-    map.insert(
-        "1",
-        &User {
-            name: "value1".into(),
-        },
-    )
-    .await
-    .unwrap();
-    map.compute_if_present("1", |mut value| async move {
-        assert_eq!(value.name, "value1");
-        value.name = "value2".into();
-        Some(value)
-    })
-    .await
-    .unwrap();
+    let user = User {
+        name: "value1".into(),
+    };
+    map.insert("1", &user).await.unwrap();
+    map.entry("1")
+        .await
+        .unwrap()
+        .and_modify(|value| {
+            assert_eq!(value.name, "value1");
+            value.name = "value2".into();
+        })
+        .or_insert(user)
+        .await
+        .unwrap();
     assert_eq!(
         map.get("1").await.unwrap(),
         Some(User {
@@ -1192,11 +1141,17 @@ async fn redisson_compute_if_present_mutable() {
 #[tokio::test]
 async fn redisson_compute_if_absent() {
     let map = client().await.hash_map::<String, String>(unique("map"));
-    map.compute_if_absent("1", || async { Some("12".to_string()) })
+    map.entry("1")
+        .await
+        .unwrap()
+        .or_insert("12".into())
         .await
         .unwrap();
     assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
-    map.compute_if_absent("1", || async { Some("13".to_string()) })
+    map.entry("1")
+        .await
+        .unwrap()
+        .or_insert("13".into())
         .await
         .unwrap();
     assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
@@ -1205,43 +1160,56 @@ async fn redisson_compute_if_absent() {
 // Redisson: testMerge
 #[tokio::test]
 async fn redisson_merge() {
+    use redissun::hash_map::Entry;
     let map = client().await.hash_map::<String, String>(unique("map"));
-    map.merge("1", "2".to_string(), |_, _| async {
-        Some("12".to_string())
-    })
-    .await
-    .unwrap();
-    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("2"));
-    map.merge("1", "2".to_string(), |_, _| async {
-        Some("12".to_string())
-    })
-    .await
-    .unwrap();
-    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
-    map.merge("1", "2".to_string(), |_, _| async { None })
+    map.entry("1")
+        .await
+        .unwrap()
+        .and_modify(|v| *v = "12".into())
+        .or_insert("2".into())
         .await
         .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("2"));
+    map.entry("1")
+        .await
+        .unwrap()
+        .and_modify(|v| *v = "12".into())
+        .or_insert("2".into())
+        .await
+        .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+        entry.remove().await.unwrap();
+    }
     assert_eq!(map.get("1").await.unwrap(), None);
 }
 
 // Redisson: testCompute, testComputeAsync
 #[tokio::test]
 async fn redisson_compute() {
+    use redissun::hash_map::Entry;
     let map = client().await.hash_map::<String, String>(unique("map"));
     let first = map
-        .compute("1", |_| async { Some("12".to_string()) })
+        .entry("1")
+        .await
+        .unwrap()
+        .or_insert("12".into())
         .await
         .unwrap();
-    assert_eq!(first.as_deref(), Some("12"));
+    assert_eq!(first, "12");
     let second = map
-        .compute("1", |old| async move {
-            Some(old.map_or_else(|| "12".to_string(), |old| old + "34"))
-        })
+        .entry("1")
+        .await
+        .unwrap()
+        .and_modify(|old| old.push_str("34"))
+        .or_insert("12".into())
         .await
         .unwrap();
-    assert_eq!(second.as_deref(), Some("1234"));
+    assert_eq!(second, "1234");
     assert_eq!(map.get("1").await.unwrap().as_deref(), Some("1234"));
-    assert_eq!(map.compute("1", |_| async { None }).await.unwrap(), None);
+    if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+        assert_eq!(entry.remove().await.unwrap(), "1234");
+    }
     assert_eq!(map.get("1").await.unwrap(), None);
 }
 
@@ -1252,8 +1220,8 @@ async fn redisson_get_all() {
     for (k, v) in [(1, 100), (2, 200), (3, 300), (4, 400)] {
         map.insert(&k, &v).await.unwrap();
     }
-    let filtered = map.get_all(&[&2, &3, &5]).await.unwrap();
-    assert_eq!(filtered, HashMap::from([(2, 200), (3, 300)]));
+    let found = map.get_many(&[&2, &3, &5]).await.unwrap();
+    assert_eq!(found, [Some(200), Some(300), None]);
 }
 
 // Redisson: testGetAllBig
@@ -1264,9 +1232,9 @@ async fn redisson_get_all_big() {
     let values: Vec<String> = keys.iter().map(i32::to_string).collect();
     map.extend(keys.iter().zip(values.iter())).await.unwrap();
     let wanted: Vec<&i32> = keys.iter().collect();
-    let all = map.get_all(&wanted).await.unwrap();
+    let all = map.get_many(&wanted).await.unwrap();
     assert_eq!(all.len(), 10_000);
-    assert_eq!(all.get(&9_999).map(String::as_str), Some("9999"));
+    assert_eq!(all[9_999].as_deref(), Some("9999"));
     assert_eq!(map.len().await.unwrap(), 10_000);
 }
 
@@ -1285,7 +1253,7 @@ async fn redisson_put_all_batched() {
             .await
             .unwrap();
     }
-    let mut keys = map.read_all_keys().await.unwrap();
+    let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
     keys.sort_unstable();
     assert_eq!(keys, (1..=18).collect::<Vec<_>>());
 }
@@ -1334,11 +1302,13 @@ async fn redisson_read_all_with_pattern() {
     for (k, v) in [("10", "12"), ("12", "33"), ("21", "43")] {
         map.insert(k, v).await.unwrap();
     }
-    assert_eq!(map.read_all_entries_matching("1?").await.unwrap().len(), 2);
-    let mut keys = map.read_all_keys_matching("1?").await.unwrap();
+    let scan = || redissun::MapScan::new().pattern("1?");
+    let entries: Vec<(String, String)> = map.iter_with(scan()).try_collect().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    let mut keys: Vec<String> = map.keys_with(scan()).try_collect().await.unwrap();
     keys.sort();
     assert_eq!(keys, ["10", "12"]);
-    let mut values = map.read_all_values_matching("1?").await.unwrap();
+    let mut values: Vec<String> = map.values_with(scan()).try_collect().await.unwrap();
     values.sort();
     assert_eq!(values, ["12", "33"]);
 }
@@ -1437,34 +1407,32 @@ async fn redisson_put_listener_with_keyevent_and_subkeyevent() {
     );
 }
 
-// Futures joined in one task share the task's lock owner; merge must still not lose updates.
+// Futures joined in one task share the task's lock owner; entries must still not lose updates.
 #[tokio::test]
-async fn merge_is_atomic_within_one_task() {
+async fn entry_is_atomic_within_one_task() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
-    let merges = (0..20).map(|_| {
-        map.merge("k", 1, |a, b| async move {
-            tokio::task::yield_now().await;
-            Some(a + b)
-        })
+    let increments = (0..20).map(|_| async {
+        let entry = map.entry("k").await?;
+        tokio::task::yield_now().await;
+        entry.and_modify(|v| *v += 1).or_insert(1).await
     });
-    for result in futures::future::join_all(merges).await {
+    for result in futures::future::join_all(increments).await {
         result.unwrap();
     }
     assert_eq!(map.get("k").await.unwrap(), Some(20));
 }
 
-// Redisson's lock is reentrant: a compute under the key's lock held by the same task must not wait for itself.
+// Redisson's lock is reentrant: an entry taken under the key's lock held by the same task must not wait for itself.
 #[tokio::test]
-async fn compute_inside_the_held_key_lock_does_not_deadlock() {
+async fn entry_inside_the_held_key_lock_does_not_deadlock() {
     let map = client().await.hash_map::<String, i64>(unique("map"));
     let guard = map.lock("k").unwrap().lock().await.unwrap();
-    let computed = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        map.compute("k", |_| async { Some(1) }),
-    )
+    let value = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        map.entry("k").await?.or_insert(1).await
+    })
     .await
-    .expect("compute waited for the lock its own task holds")
+    .expect("entry waited for the lock its own task holds")
     .unwrap();
-    assert_eq!(computed, Some(1));
+    assert_eq!(value, 1);
     guard.unlock().await.unwrap();
 }

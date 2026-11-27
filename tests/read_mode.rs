@@ -204,9 +204,9 @@ async fn a_read_goes_to_the_master_while_its_replica_is_down() {
     assert_eq!(after - before, READS);
 }
 
-/// The value that `merge` and `compute` change must come from the master: a lagging replica would make them lose updates.
+/// The value an entry changes must come from the master: a lagging replica would make them lose updates.
 #[tokio::test]
-async fn replica_mode_computes_from_the_master() {
+async fn replica_mode_entries_read_the_master() {
     let topology = Topology::cluster().await;
     let client = cluster_client(&topology, ReadMode::Replica).await;
     let map = client.hash_map::<String, i64>(unique("read-mode-map"));
@@ -218,10 +218,13 @@ async fn replica_mode_computes_from_the_master() {
         on_replicas_before += calls(&topology, replica, "hget").await;
     }
     for _ in 0..READS {
-        map.merge("k", 1, |a, b| async move { Some(a + b) })
+        map.entry("k")
+            .await
+            .unwrap()
+            .and_modify(|v| *v += 1)
+            .or_insert(1)
             .await
             .unwrap();
-        map.compute("k", |v| async move { v }).await.unwrap();
     }
     let mut on_replicas_after = 0;
     for replica in replicas_of(&topology, master).await {

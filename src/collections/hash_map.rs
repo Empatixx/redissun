@@ -1,7 +1,7 @@
 use crate::codec::Codec;
+pub use crate::collections::map::entry::{Entry, OccupiedEntry, VacantEntry};
 use crate::collections::map::events::{self, MapEventKind, MapEvents};
 use crate::collections::map::key_hash::map_key_name;
-use crate::collections::map::ops::{self, AtomicMap};
 use crate::collections::map::scan::{decode_pairs, hscan, MapScan};
 use crate::coordination::latch::CountDownLatch;
 use crate::coordination::permit_semaphore::PermitExpirableSemaphore;
@@ -13,7 +13,7 @@ use crate::locks::Lock;
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -49,28 +49,6 @@ static PUT_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
     )
 });
 
-static PUT_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
-    Lua::from_lua(
-        "local value = redis.call('HGET', KEYS[1], ARGV[1])
-        if value ~= false then
-            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-            return value
-        end
-        return nil",
-    )
-});
-
-static FAST_PUT_IF_EXISTS: LazyLock<Lua> = LazyLock::new(|| {
-    Lua::from_lua(
-        "local value = redis.call('HGET', KEYS[1], ARGV[1])
-        if value ~= false then
-            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-            return 1
-        end
-        return 0",
-    )
-});
-
 static REPLACE: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
         "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
@@ -79,16 +57,6 @@ static REPLACE: LazyLock<Lua> = LazyLock::new(|| {
             return value
         end
         return nil",
-    )
-});
-
-static FAST_REPLACE: LazyLock<Lua> = LazyLock::new(|| {
-    Lua::from_lua(
-        "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
-            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-            return 1
-        end
-        return 0",
     )
 });
 
@@ -172,50 +140,29 @@ where
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
-    /// Redisson's `compute`: under the key's [`lock`](HashMap::lock), the closure gets the current value; `Some` stores what it returns, `None` removes the entry. Returns the new value.
+    /// The value of `k`, taken under the key's lock to read and change it, like [`std::collections::hash_map::Entry`]: Redisson's `compute`, `computeIfAbsent`, `computeIfPresent` and `merge`.
     ///
-    /// Calls for the same key from this client run one at a time, also when they are futures joined in one task. The closure must not call the compute family for the same key, which would wait for itself.
-    pub async fn compute<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
+    /// The lock is the one [`lock`](HashMap::lock) returns, the lock Redisson's compute family takes, so programs do not change the key at once. Calls for the same key from this client wait for each other, also futures joined in one task: while you hold an entry, taking another one for the same key in the same task waits forever.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// let visits = client.hash_map::<String, i64>("visits");
+    /// visits.entry("home").await?.and_modify(|n| *n += 1).or_insert(1).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(
+        alias = "compute",
+        alias = "computeIfAbsent",
+        alias = "computeIfPresent",
+        alias = "merge"
+    )]
+    pub async fn entry<Q>(&self, k: &Q) -> Result<Entry<'_, K, V, C>>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
-        F: FnOnce(Option<V>) -> Fut + Send,
-        Fut: Future<Output = Option<V>> + Send,
     {
-        ops::compute(self, self.codec.encode(k)?, f).await
-    }
-
-    /// Redisson's `computeIfAbsent`: returns the present value without calling the closure; for a missing key it stores and returns what the closure gives, under the key's lock. `None` stores nothing.
-    pub async fn compute_if_absent<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = Option<V>> + Send,
-    {
-        ops::compute_if_absent(self, self.codec.encode(k)?, f).await
-    }
-
-    /// Redisson's `computeIfPresent`: under the key's lock, the closure gets the present value; `Some` replaces it, `None` removes it. A missing key returns `None` without calling the closure.
-    pub async fn compute_if_present<Q, F, Fut>(&self, k: &Q, f: F) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-        F: FnOnce(V) -> Fut + Send,
-        Fut: Future<Output = Option<V>> + Send,
-    {
-        ops::compute_if_present(self, self.codec.encode(k)?, f).await
-    }
-
-    /// Redisson's `merge`: under the key's lock, stores `value` for a missing key, or what the closure makes of the old value and `value`; `None` removes the entry. Returns the new value.
-    pub async fn merge<Q, F, Fut>(&self, k: &Q, value: V, f: F) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-        F: FnOnce(V, V) -> Fut + Send,
-        Fut: Future<Output = Option<V>> + Send,
-    {
-        ops::merge(self, self.codec.encode(k)?, value, f).await
+        Entry::acquire(self, self.codec.encode(k)?).await
     }
 
     /// Starts listening to every kind of change of the map, Redisson's `addListener` with the map and object listeners. See [`MapEvents`] for the server setting it needs.
@@ -456,28 +403,6 @@ where
         raw.into_iter().map(|r| self.decode_value(r)).collect()
     }
 
-    /// Inserts the entry only when the key is missing (`HSETNX`); returns whether it was inserted. Like Redisson `fastPutIfAbsent`.
-    #[doc(alias = "fastPutIfAbsent")]
-    pub async fn insert_nx<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        let inserted: bool = self
-            .key
-            .query_once({
-                let mut cmd = redis::cmd("HSETNX");
-                cmd.arg(self.key.redis_key());
-                cmd.arg(&self.codec.encode(k)?[..]);
-                cmd.arg(&self.codec.encode(v)?[..]);
-                cmd
-            })
-            .await?;
-        Ok(inserted)
-    }
-
     /// Adds `delta` to the integer stored under the key, creating it at zero, and returns the result.
     pub async fn incr_by<Q>(&self, k: &Q, delta: i64) -> Result<i64>
     where
@@ -534,8 +459,9 @@ where
         Ok(flag == 1)
     }
 
-    /// Inserts an entry and returns whether the key was new (`HSET`). Like Redisson `fastPut`.
-    pub async fn fast_insert<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
+    /// Stores the entry without reading the old value (`HSET`); returns whether the key was new.
+    #[doc(alias = "fastPut")]
+    pub async fn set<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
@@ -554,8 +480,9 @@ where
         Ok(added == 1)
     }
 
-    /// Inserts the entry only when the key is missing and returns the current value otherwise. Like Redisson `putIfAbsent`.
-    pub async fn insert_if_absent<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    /// Stores the entry only when the key is missing. Returns `None` when it stored it, or the present value, which it left as it is.
+    #[doc(alias = "putIfAbsent", alias = "fastPutIfAbsent")]
+    pub async fn try_insert<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
@@ -574,37 +501,12 @@ where
         self.decode_value(raw)
     }
 
-    /// Replaces the value only when the key is present and returns the value it replaced. Like Redisson `putIfExists`.
-    pub async fn insert_if_exists<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        self.eval_value(
-            &PUT_IF_EXISTS,
-            vec![self.codec.encode(k)?, self.codec.encode(v)?],
-        )
-        .await
-    }
-
-    /// Replaces the value only when the key is present; returns whether it did. Like Redisson `fastPutIfExists`.
-    pub async fn fast_insert_if_exists<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        self.eval_flag(
-            &FAST_PUT_IF_EXISTS,
-            vec![self.codec.encode(k)?, self.codec.encode(v)?],
-        )
-        .await
-    }
-
-    /// Replaces the value of a present key and returns the value it replaced. Like Redisson `replace(key, value)`.
+    /// Replaces the value of a present key and returns the value it replaced; a missing key stays missing and gives `None`.
+    #[doc(
+        alias = "putIfExists",
+        alias = "fastPutIfExists",
+        alias = "fastReplace"
+    )]
     pub async fn replace<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
     where
         K: Borrow<Q>,
@@ -616,23 +518,8 @@ where
             .await
     }
 
-    /// Replaces the value of a present key; returns whether it did. Like Redisson `fastReplace`.
-    pub async fn fast_replace<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        self.eval_flag(
-            &FAST_REPLACE,
-            vec![self.codec.encode(k)?, self.codec.encode(v)?],
-        )
-        .await
-    }
-
-    /// Replaces the value only when it currently equals `old`; returns whether it did. Like Redisson `replace(key, old, new)`.
-    pub async fn replace_if<Q, W>(&self, k: &Q, old: &W, new: &W) -> Result<bool>
+    /// Replaces the value only when it currently equals `old`; returns whether it did. Redisson's `replace(key, old, new)`.
+    pub async fn compare_and_set<Q, W>(&self, k: &Q, old: &W, new: &W) -> Result<bool>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
@@ -650,8 +537,8 @@ where
         .await
     }
 
-    /// Removes the entry only when its value equals `v`; returns whether it did. Like Redisson `remove(key, value)`.
-    pub async fn remove_if<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
+    /// Removes the entry only when its value equals `v`; returns whether it did. Redisson's `remove(key, value)`.
+    pub async fn remove_if_eq<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
@@ -665,8 +552,9 @@ where
         .await
     }
 
-    /// Removes the keys and returns how many were present (`HDEL`). Like Redisson `fastRemove`.
-    pub async fn fast_remove<Q>(&self, ks: &[&Q]) -> Result<usize>
+    /// Removes the keys and returns how many were present (`HDEL`).
+    #[doc(alias = "fastRemove")]
+    pub async fn remove_many<Q>(&self, ks: &[&Q]) -> Result<usize>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -701,7 +589,8 @@ where
     }
 
     /// Length in bytes of the encoded value stored under the key; 0 when missing (`HSTRLEN`).
-    pub async fn value_size<Q>(&self, k: &Q) -> Result<usize>
+    #[doc(alias = "valueSize")]
+    pub async fn value_len<Q>(&self, k: &Q) -> Result<usize>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -725,44 +614,6 @@ where
         cmd.arg(count);
         let raw: Vec<Bytes> = self.key.read(cmd).await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
-    }
-
-    /// Returns every key in one call (`HKEYS`).
-    pub async fn read_all_keys(&self) -> Result<Vec<K>> {
-        let raw: Vec<Bytes> = self
-            .key
-            .read({
-                let mut cmd = redis::cmd("HKEYS");
-                cmd.arg(self.key.redis_key());
-                cmd
-            })
-            .await?;
-        raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
-    }
-
-    /// Returns every value in one call (`HVALS`).
-    pub async fn read_all_values(&self) -> Result<Vec<V>> {
-        let raw: Vec<Bytes> = self
-            .key
-            .read({
-                let mut cmd = redis::cmd("HVALS");
-                cmd.arg(self.key.redis_key());
-                cmd
-            })
-            .await?;
-        raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
-    }
-
-    /// Returns every entry in one call (`HGETALL`).
-    pub async fn read_all_entries(&self) -> Result<Vec<(K, V)>> {
-        let mut cmd = redis::cmd("HGETALL");
-        cmd.arg(self.key.redis_key());
-        let raw: redis::Value = self.key.read(cmd).await?;
-        self.decode_pairs(raw)
-    }
-
-    fn decode_pairs(&self, raw: redis::Value) -> Result<Vec<(K, V)>> {
-        decode_pairs(&self.codec, raw)
     }
 
     /// Streams all entries, reading the hash in pages of 100 with `HSCAN`.
@@ -796,29 +647,6 @@ where
     pub fn values_with(&self, scan: MapScan) -> impl Stream<Item = Result<V>> + '_ {
         self.iter_with(scan).map(|entry| entry.map(|(_, v)| v))
     }
-
-    /// Every entry whose encoded key matches `pattern`, Redisson's `readAllEntrySet(pattern)`. See [`MapScan`] for how patterns match.
-    ///
-    /// Unlike Redisson, which reads only the first `HSCAN` page, this scans the whole hash.
-    pub async fn read_all_entries_matching(&self, pattern: &str) -> Result<Vec<(K, V)>> {
-        self.iter_with(MapScan::new().pattern(pattern))
-            .try_collect()
-            .await
-    }
-
-    /// Every key that matches `pattern`, Redisson's `readAllKeySet(pattern)`, scanning the whole hash.
-    pub async fn read_all_keys_matching(&self, pattern: &str) -> Result<Vec<K>> {
-        self.keys_with(MapScan::new().pattern(pattern))
-            .try_collect()
-            .await
-    }
-
-    /// The values of the keys that match `pattern`, Redisson's `readAllValues(pattern)`, scanning the whole hash.
-    pub async fn read_all_values_matching(&self, pattern: &str) -> Result<Vec<V>> {
-        self.values_with(MapScan::new().pattern(pattern))
-            .try_collect()
-            .await
-    }
 }
 
 impl<K, V, C> HashMap<K, V, C>
@@ -827,41 +655,17 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    /// The whole map in one call (`HGETALL`), Redisson's `readAllMap`.
-    #[doc(alias = "readAllMap")]
-    pub async fn read_all_map(&self) -> Result<std::collections::HashMap<K, V>> {
-        Ok(self.read_all_entries().await?.into_iter().collect())
-    }
-
-    /// The entries of the given keys that exist, in one `HMGET`, Redisson's `getAll`.
-    #[doc(alias = "getAll")]
-    pub async fn get_all<Q>(&self, ks: &[&Q]) -> Result<std::collections::HashMap<K, V>>
-    where
-        K: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        if ks.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let fields = ks
-            .iter()
-            .map(|k| self.codec.encode(*k))
-            .collect::<Result<Vec<Bytes>>>()?;
-        let raw: Vec<Option<Bytes>> = self
-            .key
-            .read({
-                let mut cmd = redis::cmd("HMGET");
-                cmd.arg(self.key.redis_key());
-                cmd.arg(crate::client::request::binary(&fields));
-                cmd
-            })
-            .await?;
-        fields
-            .iter()
-            .zip(raw)
-            .filter_map(|(field, value)| value.map(|value| (field, value)))
-            .map(|(field, value)| Ok((self.codec.decode(field)?, self.codec.decode(&value)?)))
-            .collect()
+    /// The whole map in one `HGETALL`, a snapshot of one moment. [`iter`](HashMap::iter) reads it in pages instead.
+    #[doc(
+        alias = "readAllMap",
+        alias = "readAllEntrySet",
+        alias = "readAllKeySet",
+        alias = "readAllValues"
+    )]
+    pub async fn to_hash_map(&self) -> Result<std::collections::HashMap<K, V>> {
+        let cmd = self.key.key_cmd("HGETALL");
+        let raw: redis::Value = self.key.read(cmd).await?;
+        Ok(decode_pairs(&self.codec, raw)?.into_iter().collect())
     }
 
     /// Up to `count` distinct random entries (`HRANDFIELD … WITHVALUES`), Redisson's `randomEntries`.
@@ -875,58 +679,32 @@ where
     }
 }
 
-impl<K, V, C> AtomicMap<V> for HashMap<K, V, C>
+impl<K, V, C> HashMap<K, V, C>
 where
     K: Serialize + DeserializeOwned + Send + Sync,
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    fn map_key(&self) -> &Key {
+    pub(crate) fn redis_key(&self) -> &Key {
         &self.key
     }
 
-    async fn get_encoded(&self, k: &Bytes) -> Result<Option<V>> {
+    /// Reads an encoded key from the master: an entry writes what it read, and a lagging replica would lose updates.
+    pub(crate) async fn read_encoded(&self, k: &Bytes) -> Result<Option<V>> {
         let mut cmd = self.key.key_cmd("HGET");
         cmd.arg(&k[..]);
-        // Always the master: the compute family writes what it read, and a lagging replica would lose updates.
         let raw: Option<Bytes> = self.key.query(cmd).await?;
         self.decode_value(raw)
     }
 
-    async fn fast_insert_encoded(&self, k: &Bytes, v: &V) -> Result<()> {
+    pub(crate) async fn write_encoded(&self, k: &Bytes, v: &V) -> Result<()> {
         let mut cmd = self.key.key_cmd("HSET");
         cmd.arg((&k[..], &self.codec.encode(v)?[..]));
         let _: i64 = self.key.query(cmd).await?;
         Ok(())
     }
 
-    async fn insert_if_absent_encoded(&self, k: &Bytes, v: &V) -> Result<Option<V>> {
-        let raw: Option<Bytes> = self
-            .key
-            .core
-            .eval_once(
-                &PUT_IF_ABSENT,
-                vec![self.key.redis_key()],
-                vec![k.clone(), self.codec.encode(v)?],
-            )
-            .await?;
-        self.decode_value(raw)
-    }
-
-    async fn fast_insert_if_exists_encoded(&self, k: &Bytes, v: &V) -> Result<bool> {
-        self.eval_flag(&FAST_PUT_IF_EXISTS, vec![k.clone(), self.codec.encode(v)?])
-            .await
-    }
-
-    fn encode_value(&self, v: &V) -> Result<Bytes> {
-        self.codec.encode(v)
-    }
-
-    async fn remove_if_encoded(&self, k: &Bytes, v: &Bytes) -> Result<bool> {
-        self.eval_flag(&REMOVE_IF, vec![k.clone(), v.clone()]).await
-    }
-
-    async fn fast_remove_encoded(&self, k: &Bytes) -> Result<()> {
+    pub(crate) async fn delete_encoded(&self, k: &Bytes) -> Result<()> {
         let mut cmd = self.key.key_cmd("HDEL");
         cmd.arg(&k[..]);
         let _: i64 = self.key.query(cmd).await?;
@@ -934,7 +712,7 @@ where
     }
 }
 
-/// The insert of [`HashMap::extend`]; await it to run. Exported as `HashMapExtend`.
+/// The insert of [`HashMap::extend`]; await it to run.
 #[must_use = "an extend does nothing until it is awaited"]
 pub struct Extend<'m, K, V, C: Codec> {
     map: &'m HashMap<K, V, C>,

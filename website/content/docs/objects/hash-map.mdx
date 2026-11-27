@@ -27,14 +27,21 @@ This differs from `HashMap::insert`, which takes ownership. redissun only encode
 | `len()` and `is_empty()` | `HLEN` | |
 | `clear()` | `DEL` | |
 | `extend(entries)` | `HSET` | entries are `(&key, &value)` pairs, for example `map.extend(other.iter())`. One request, or one per `n` entries with `.batch_size(n)`. An empty list does nothing. |
-| `get_all(&[&k])` | `HMGET` | a `HashMap` of the keys that exist |
-| `read_all_map()` | `HGETALL` | |
+| `to_hash_map()` | `HGETALL` | the whole map at one moment |
 | `random_entries(n)` | `HRANDFIELD … WITHVALUES` | |
-| `compute`, `compute_if_absent`, `compute_if_present`, `merge` | under the key's lock | async closures, see below |
+| `entry(&k)` | under the key's lock | see below |
 | `lock(&k)` and the other per-key objects | | see below |
 | `events()` | keyspace notifications | see below |
 | `get_many(&[&k])` | `HMGET` | same order as the keys |
-| `insert_nx(k, v)` | `HSETNX` | `true` if the entry was added |
+| `set(k, v)` | `HSET` | does not read the old value; `true` if the key was new |
+| `try_insert(k, v)` | Lua script | stores only a missing key; `None` if it stored it, else the present value |
+| `replace(k, v)` | Lua script | changes only a present key; returns the old value |
+| `compare_and_set(k, old, new)` | Lua script | changes the value only while it is `old` |
+| `remove_if_eq(k, v)` | Lua script | removes the entry only while its value is `v` |
+| `remove_many(&[&k])` | `HDEL` | how many were present |
+| `contains_value(&v)` | Lua script | reads every value on the server |
+| `value_len(&k)` | `HSTRLEN` | bytes of the encoded value |
+| `random_keys(n)` | `HRANDFIELD` | |
 | `incr_by(&k, delta)` | `HINCRBY` | a missing entry starts at zero |
 | `incr_by_float(&k, delta)` | `HINCRBYFLOAT` | |
 
@@ -61,14 +68,18 @@ let some: Vec<String> = users
     .await?;
 ```
 
-## Compute and merge
+## Entries
 
-`compute`, `compute_if_absent`, `compute_if_present` and `merge` work like Redisson's. They take an async closure and run it under the key's lock, the same lock a Redisson client takes, so two programs never compute the same key at once. The closure returns `Some(value)` to store it or `None` to remove the entry. Calls for the same key made in one program, even futures joined in one task, also run one after the other. A closure must not call `compute` or `merge` for its own key: that call would wait for itself.
+`entry(&k)` takes the key's lock, reads the value and returns an `Entry`, like `std::collections::hash_map::Entry`. It replaces Redisson's `compute`, `computeIfAbsent`, `computeIfPresent` and `merge`. The lock is the one a Redisson client takes for those, so two programs never change the same key at once.
 
 ```rust
 let visits = client.hash_map::<String, i64>("visits");
-visits.merge("home", 1, |old, one| async move { Some(old + one) }).await?;
+visits.entry("home").await?.and_modify(|n| *n += 1).or_insert(1).await?;
 ```
+
+`and_modify` changes the value in memory and `or_insert`, `or_insert_with` or `or_default` writes it. Match on `Entry::Occupied` and `Entry::Vacant` (from `redissun::hash_map`) to `insert` or `remove` instead. The lock is released when the entry is consumed; an entry you drop writes nothing and releases it in the background.
+
+Entries for the same key taken in one program, even by futures joined in one task, wait for each other. Do not take a second entry for a key while you hold one in the same task: it waits forever.
 
 ## Per-key locks and synchronizers
 

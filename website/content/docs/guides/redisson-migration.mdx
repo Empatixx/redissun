@@ -117,35 +117,30 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | Redisson | redissun |
 |---|---|
 | `put(k, v)` | `insert(&k, &v)`, returns the old value |
-| `fastPut(k, v)` | `fast_insert(&k, &v)`, returns whether the key was new |
+| `fastPut(k, v)` | `set(&k, &v)`, returns whether the key was new |
 | `get(k)` | `get(&k)` |
 | `remove(k)` | `remove(&k)` |
-| `remove(k, v)` | `remove_if(&k, &v)` |
-| `fastRemove(keys...)` | `fast_remove(&keys)` |
+| `remove(k, v)` | `remove_if_eq(&k, &v)` |
+| `fastRemove(keys...)` | `remove_many(&keys)` |
 | `containsKey(k)` | `contains_key(&k)` |
 | `containsValue(v)` | `contains_value(&v)` |
 | `size()` | `len()` |
-| `valueSize(k)` | `value_size(&k)` |
+| `valueSize(k)` | `value_len(&k)` |
 | `putAll(m)` | `extend(entries)` |
 | `putAll(m, batchSize)` | `extend(entries).batch_size(n)` |
-| `getAll(keys)` | `get_all(&keys)`, a `HashMap` of the keys that exist; `get_many(&keys)` gives values in the order of the keys |
-| `readAllMap()` | `read_all_map()` |
+| `getAll(keys)` | `get_many(&keys)`, the values in the order of the keys |
+| `readAllMap()`, `readAllKeySet()`, `readAllValues()`, `readAllEntrySet()` | `to_hash_map()`, or the streams `keys()`, `values()`, `iter()` with `try_collect()` |
 | `randomEntries(n)` | `random_entries(n)` |
-| `compute`, `computeIfAbsent`, `computeIfPresent`, `merge` | the same names in snake case, with an async closure, under the key's lock |
+| `compute`, `computeIfAbsent`, `computeIfPresent`, `merge` | `entry(&k)`, under the key's lock: `map.entry(&k).await?.and_modify(\|v\| ..).or_insert(v).await?`, or match `Entry::Occupied` / `Entry::Vacant` |
 | `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)`, under Redisson's names |
 | `keySet(pattern, count)`, `values(pattern, count)`, `entrySet(pattern, count)` | `keys_with`, `values_with`, `iter_with` with `MapScan::new().pattern(p).page_size(n)` |
-| `readAllKeySet(pattern)`, `readAllValues(pattern)`, `readAllEntrySet(pattern)` | `read_all_keys_matching(p)`, `read_all_values_matching(p)`, `read_all_entries_matching(p)` |
+| `readAllKeySet(pattern)`, `readAllValues(pattern)`, `readAllEntrySet(pattern)` | `keys_with`, `values_with`, `iter_with` with `MapScan::new().pattern(p)` and `try_collect()` |
 | `addListener(MapPutListener / MapIncrListener / MapRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `events()` or `events_of(&kinds)`, a stream of `MapEvent`; dropping it is `removeListener` |
-| `putIfAbsent(k, v)` | `insert_if_absent(&k, &v)`, returns the existing value |
-| `fastPutIfAbsent(k, v)` | `insert_nx(&k, &v)` |
-| `putIfExists(k, v)` | `insert_if_exists(&k, &v)` |
-| `fastPutIfExists(k, v)` | `fast_insert_if_exists(&k, &v)` |
-| `replace(k, v)` | `replace(&k, &v)` |
-| `replace(k, old, new)` | `replace_if(&k, &old, &new)` |
-| `fastReplace(k, v)` | `fast_replace(&k, &v)` |
+| `putIfAbsent(k, v)`, `fastPutIfAbsent(k, v)` | `try_insert(&k, &v)`: `None` if it stored the value, else the present value |
+| `putIfExists(k, v)`, `fastPutIfExists(k, v)`, `replace(k, v)`, `fastReplace(k, v)` | `replace(&k, &v)`: the old value, `None` for a missing key |
+| `replace(k, old, new)` | `compare_and_set(&k, &old, &new)` |
 | `addAndGet(k, d)` | `incr_by(&k, d)` or `incr_by_float(&k, d)` |
 | `randomKeys(n)` | `random_keys(n)` |
-| `readAllKeySet()`, `readAllValues()`, `readAllEntrySet()` | `read_all_keys()`, `read_all_values()`, `read_all_entries()` |
 | `keySet()`, `values()`, `entrySet()` | `keys()`, `values()`, `iter()` as streams |
 
 ## Vec

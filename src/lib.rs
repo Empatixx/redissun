@@ -48,6 +48,11 @@ mod shield;
 mod values;
 mod wait;
 
+/// The types [`HashMap`] methods return, like `std::collections::hash_map`.
+pub mod hash_map {
+    pub use crate::collections::hash_map::{Entry, Extend, OccupiedEntry, VacantEntry};
+}
+
 pub use batch::{
     Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchResult,
     BatchSortedSet, BatchTopic, BatchVec, BatchVecDeque,
@@ -61,7 +66,7 @@ pub use client::retry::DelayStrategy;
 pub use client::tls::TlsVerification;
 pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
-pub use collections::hash_map::{Extend as HashMapExtend, HashMap};
+pub use collections::hash_map::HashMap;
 pub use collections::hash_map_cache::{
     Event, EventKind, Events, EvictionMode, HashMapCache, Insert, InsertNx,
 };
