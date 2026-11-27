@@ -3,7 +3,10 @@
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
 use crate::collections::hash_map_cache::HashMapCache;
+use crate::collections::local_cached_map::LocalCachedMap;
+use crate::collections::map::load::load_value_locked;
 use crate::collections::map::ops::KeyLock;
+use crate::collections::map::store::Store;
 use crate::error::Result;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
@@ -42,6 +45,8 @@ pub(crate) enum Target<'m, K, V, C: Codec> {
     Map(&'m HashMap<K, V, C>),
     /// A cache and the time to live its writes get; `None` writes like `insert`, which clears the entry's limits.
     Cache(&'m HashMapCache<K, V, C>, Option<Duration>),
+    /// A local cached map, for loading only: reads look at the local cache first, and writes go through its plain put.
+    Local(&'m LocalCachedMap<K, V, C>),
 }
 
 impl<K, V, C> Target<'_, K, V, C>
@@ -50,31 +55,56 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    fn key(&self) -> &Key {
+    pub(crate) fn key(&self) -> &Key {
         match self {
             Target::Map(map) => map.redis_key(),
             Target::Cache(cache, _) => HasKey::key(*cache),
+            Target::Local(map) => HasKey::key(*map),
         }
     }
 
-    async fn read(&self, k: &Bytes) -> Result<Option<V>> {
+    /// Reads an encoded key from the master.
+    pub(crate) async fn read(&self, k: &Bytes) -> Result<Option<V>> {
         match self {
             Target::Map(map) => map.read_encoded(k).await,
             Target::Cache(cache, _) => cache.read_encoded(k).await,
+            Target::Local(map) => map.read_encoded(k).await,
         }
     }
 
-    async fn write(&self, k: &Bytes, v: &V) -> Result<()> {
+    /// Stores the value with the map's plain put, without the writer.
+    pub(crate) async fn write(&self, k: &Bytes, v: &V) -> Result<()> {
         match self {
             Target::Map(map) => map.write_encoded(k, v).await,
             Target::Cache(cache, ttl) => cache.write_encoded(k, v, *ttl).await,
+            Target::Local(map) => map.put_encoded(k, v).await,
         }
     }
 
-    async fn delete(&self, k: &Bytes) -> Result<()> {
+    /// Removes the key, without the writer.
+    pub(crate) async fn delete(&self, k: &Bytes) -> Result<()> {
         match self {
             Target::Map(map) => map.delete_encoded(k).await,
             Target::Cache(cache, _) => cache.delete_encoded(k).await,
+            Target::Local(map) => map.delete_encoded(k).await,
+        }
+    }
+
+    /// The map's loader and writer; `None` when it has neither.
+    pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
+        match self {
+            Target::Map(map) => map.store(),
+            Target::Cache(cache, _) => cache.store(),
+            Target::Local(map) => map.store(),
+        }
+    }
+
+    /// Stores a loaded value with the map's plain put, Redisson's `loadValue`: `HSET` on a map, `PUT` without limits on a cache, also inside an entry with a time to live.
+    pub(crate) async fn write_loaded(&self, k: &Bytes, v: &V) -> Result<()> {
+        match self {
+            Target::Map(map) => map.write_encoded(k, v).await,
+            Target::Cache(cache, _) => cache.write_encoded(k, v, None).await,
+            Target::Local(map) => map.put_encoded(k, v).await,
         }
     }
 }
@@ -91,8 +121,16 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
+    /// Writes the value, hands it to the writer, then releases the lock.
     async fn write(self, value: &V) -> Result<()> {
-        let body = self.target.write(&self.key, value).await;
+        let body = async {
+            self.target.write(&self.key, value).await?;
+            match self.target.store() {
+                Some(store) => store.written_value(&self.key, value).await,
+                None => Ok(()),
+            }
+        }
+        .await;
         self.lock.release(body).await
     }
 }
@@ -106,6 +144,13 @@ where
     pub(crate) async fn acquire(target: Target<'m, K, V, C>, key: Bytes) -> Result<Self> {
         let lock = KeyLock::acquire(target.key(), &key).await?;
         let value = match target.read(&key).await {
+            // A miss asks the loader under the lock this entry already holds; taking it again would wait forever.
+            Ok(None) if target.store().is_some_and(Store::has_loader) => {
+                load_value_locked(&target, &key, true).await
+            }
+            other => other,
+        };
+        let value = match value {
             Ok(value) => value,
             Err(e) => return lock.release(Err(e)).await,
         };
@@ -180,7 +225,15 @@ where
 
     /// Removes the entry and returns its value. Releases the lock.
     pub async fn remove(self) -> Result<V> {
-        let body = self.held.target.delete(&self.held.key).await;
+        let held = &self.held;
+        let body = async {
+            held.target.delete(&held.key).await?;
+            match held.target.store() {
+                Some(store) => store.deleted(std::slice::from_ref(&held.key)).await,
+                None => Ok(()),
+            }
+        }
+        .await;
         self.held.lock.release(body).await?;
         Ok(self.value)
     }

@@ -30,6 +30,8 @@ pub(crate) struct Startup {
     pub(crate) credentials_refresh: Option<Duration>,
     /// How often to look for replicas while reads may go to them; `None` takes the default of the topology.
     pub(crate) replica_scan_interval: Option<Duration>,
+    /// The database number the connections select, 0 by default.
+    pub(crate) database: i64,
 }
 
 pub(crate) struct Core {
@@ -41,6 +43,8 @@ pub(crate) struct Core {
     pub(crate) eviction_interval: Duration,
     pub(crate) reliable_topic_watchdog_timeout: Duration,
     pub(crate) retry: Retry,
+    /// The database number the connections select, 0 by default; keyspace channels name it.
+    pub(crate) database: i64,
     pub(crate) read_only_scripts: std::sync::atomic::AtomicBool,
     background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pubsub: tokio::sync::OnceCell<Arc<PubSub>>,
@@ -52,6 +56,8 @@ pub(crate) struct Core {
     pub(crate) sharded: crate::messaging::sharded_topic::Registry,
     /// The adders of this client by name, so that one name is one counter.
     pub(crate) adders: crate::coordination::adder::Registry,
+    /// The write-behind of each map name this client drains, so that one name has one drainer.
+    pub(crate) write_behind: crate::collections::map::write_behind::Registry,
     /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
     pub(crate) batch_connections: Arc<tokio::sync::Semaphore>,
     /// How the server writes lengths in `struct.pack` payloads, read with `INFO server` when the first map cache listener is added.
@@ -83,6 +89,7 @@ impl Core {
             eviction_interval: startup.eviction_interval,
             reliable_topic_watchdog_timeout: startup.reliable_topic_watchdog_timeout,
             retry: startup.retry,
+            database: startup.database,
             read_only_scripts: std::sync::atomic::AtomicBool::new(true),
             background: std::sync::Mutex::new(Vec::new()),
             pubsub: tokio::sync::OnceCell::new(),
@@ -90,6 +97,7 @@ impl Core {
             exclusive: std::sync::Mutex::new(std::collections::HashMap::new()),
             sharded: Default::default(),
             adders: Default::default(),
+            write_behind: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
             map_cache_length_prefix: tokio::sync::OnceCell::new(),
         });

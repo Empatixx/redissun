@@ -69,6 +69,7 @@ where
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
+            let entry = [(key.clone(), value.clone())];
             let previous: Option<Bytes> = if limits.any() {
                 cache
                     .key
@@ -91,6 +92,7 @@ where
             } else {
                 cache.put(&limits, key, value).await?
             };
+            cache.written(&entry).await?;
             cache.decode_value(previous)
         })
     }
@@ -149,6 +151,7 @@ where
             let value = cache.codec.encode(self.v)?;
             // Always the script with limits, with zeros when there are none: Redisson's script without limits leaves the old deadline of an expired entry in place.
             // Sent at most once: a second run would find this call's own value and return it as the existing one.
+            let entry = [(key.clone(), value.clone())];
             let live: Option<Bytes> = cache
                 .key
                 .core
@@ -167,6 +170,9 @@ where
                     limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
                 )
                 .await?;
+            if live.is_none() {
+                cache.written(&entry).await?;
+            }
             cache.decode_value(live)
         })
     }
@@ -246,15 +252,19 @@ where
                     )
                     .await;
             }
-            if limits.any() {
+            // A write with a lease token above bypasses the writer, as Redisson's `putWithLease` does.
+            let entry = [(key.clone(), value.clone())];
+            let inserted = if limits.any() {
                 // An empty lease token: the script then behaves exactly as `PUT_WITH_LIMITS`.
                 cache
                     .fast_put_with_limits(&limits, key, value, Bytes::new())
-                    .await
+                    .await?
             } else {
                 // The script of `insert`; the previous value comes back but is not decoded.
-                Ok(cache.put(&limits, key, value).await?.is_none())
-            }
+                cache.put(&limits, key, value).await?.is_none()
+            };
+            cache.written(&entry).await?;
+            Ok(inserted)
         })
     }
 }
@@ -314,8 +324,8 @@ impl<'m, K, V, C: Codec> Extend<'m, K, V, C> {
 
 impl<'m, K, V, C> IntoFuture for Extend<'m, K, V, C>
 where
-    K: Send + Sync + 'm,
-    V: Send + Sync + 'm,
+    K: Serialize + DeserializeOwned + Send + Sync + 'm,
+    V: Serialize + DeserializeOwned + Send + Sync + 'm,
     C: Codec,
 {
     type Output = Result<()>;
@@ -359,6 +369,7 @@ where
                         limits.arguments(rest),
                     )
                     .await?;
+                self.cache.written(batch).await?;
             }
             Ok(())
         })

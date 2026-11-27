@@ -1,3 +1,4 @@
+use crate::collections::map::store::BoxError;
 use thiserror::Error;
 
 /// Errors returned by redissun operations.
@@ -34,6 +35,12 @@ pub enum Error {
     /// No replica confirmed a lock write within `replicas_sync_timeout` although replicas are connected.
     #[error("none of the replicas were synced; increase replicas_sync_timeout or disable check_lock_synced_replicas")]
     NoSyncedReplicas,
+    /// The map's [`MapLoader`](crate::MapLoader) failed; the map stored nothing.
+    #[error("map loader failed: {0}")]
+    Loader(#[source] BoxError),
+    /// The map's [`MapWriter`](crate::MapWriter) failed after its retries; Redis keeps the change.
+    #[error("map writer failed: {0}")]
+    Writer(#[source] BoxError),
 }
 
 /// Result alias used by every fallible redissun call.
@@ -74,5 +81,11 @@ mod tests {
         );
         assert_eq!(Error::OutOfRange.to_string(), "index out of range");
         assert_eq!(Error::Lagged(3).to_string(), "subscriber missed 3 messages");
+        let loader = Error::Loader("db down".into());
+        assert_eq!(loader.to_string(), "map loader failed: db down");
+        assert!(std::error::Error::source(&loader).is_some());
+        let writer = Error::Writer("db down".into());
+        assert_eq!(writer.to_string(), "map writer failed: db down");
+        assert!(std::error::Error::source(&writer).is_some());
     }
 }

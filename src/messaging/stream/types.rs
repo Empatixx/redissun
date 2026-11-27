@@ -33,12 +33,12 @@ impl StreamId {
         Self(format!("{millis}-{sequence}"))
     }
 
-    /// The id `millis-*` for [`StreamAdd::id`]: Redis picks the next sequence number for that time.
+    /// The id `millis-*` for [`StreamAdd::id`](super::StreamAdd::id): Redis picks the next sequence number for that time.
     pub fn auto_sequence(millis: u64) -> Self {
         Self(format!("{millis}-*"))
     }
 
-    /// This id as an exclusive end of a [`Stream::range`] (`(id`). [`StreamId::min`] and [`StreamId::max`] stay as they are.
+    /// This id as an exclusive end of a [`Stream::range`](super::Stream::range) (`(id`). [`StreamId::min`] and [`StreamId::max`] stay as they are.
     pub fn exclusive(&self) -> Self {
         match self.0.as_str() {
             "-" | "+" => self.clone(),
@@ -79,7 +79,7 @@ impl FromStr for StreamId {
     }
 }
 
-/// One entry of a [`Stream`]: its id and its fields in the order they were added.
+/// One entry of a [`Stream`](super::Stream): its id and its fields in the order they were added.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamEntry<K, V> {
     /// The id of the entry.
@@ -114,7 +114,7 @@ pub struct PendingEntry {
     pub deliveries: u64,
 }
 
-/// The result of [`Stream::auto_claim`].
+/// The result of [`Stream::auto_claim`](super::Stream::auto_claim).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutoClaim<K, V> {
     /// The id to continue the scan from; `0-0` when the scan is complete.

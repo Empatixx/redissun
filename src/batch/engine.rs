@@ -71,7 +71,7 @@ impl Op {
     }
 }
 
-/// The reply to one command of a [`Batch`]. Await it after [`Batch::execute`]. Awaiting it earlier waits for an execution that has not started.
+/// The reply to one command of a [`Batch`](super::Batch). Await it after [`Batch::execute`](super::Batch::execute). Awaiting it earlier waits for an execution that has not started.
 ///
 /// If the batch is dropped, discarded or skips its results, the handle resolves to `Error::Config`.
 #[must_use = "the reply is only available through this handle"]
@@ -93,12 +93,12 @@ impl<T> Future for BatchFuture<T> {
     }
 }
 
-/// What a [`Batch`] did.
+/// What a [`Batch`](super::Batch) did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchResult {
     /// Number of commands that were sent, not counting the ones the batch adds itself.
     pub commands: usize,
-    /// How many replicas had the writes when [`Batch::sync`] or [`Batch::sync_aof`] was set, summed over the nodes the batch wrote to; otherwise 0.
+    /// How many replicas had the writes when [`Batch::sync`](super::Batch::sync) or [`Batch::sync_aof`](super::Batch::sync_aof) was set, summed over the nodes the batch wrote to; otherwise 0.
     pub synced_slaves: usize,
 }
 

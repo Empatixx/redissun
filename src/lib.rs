@@ -50,7 +50,7 @@ mod wait;
 
 /// The types [`HashMap`] methods return, like `std::collections::hash_map`.
 pub mod hash_map {
-    pub use crate::collections::hash_map::{Entry, Extend, OccupiedEntry, VacantEntry};
+    pub use crate::collections::hash_map::{Entry, Extend, LoadAll, OccupiedEntry, VacantEntry};
 }
 
 /// The builders [`HashMapCache`] methods return.
@@ -59,6 +59,7 @@ pub mod hash_map_cache {
         EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, LeaseInsert, Migrate, Set,
         TryInsert,
     };
+    pub use crate::collections::map::load::LoadAll;
 }
 
 /// The builders [`SortedSet`] methods return.
@@ -104,17 +105,20 @@ pub use client::retry::DelayStrategy;
 pub use client::tls::TlsVerification;
 pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
-pub use collections::hash_map::HashMap;
+pub use collections::hash_map::{HashMap, HashMapBuilder};
 pub use collections::hash_map_cache::{
-    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, Lease, LeaseGuard,
+    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, HashMapCacheBuilder,
+    Lease, LeaseGuard,
 };
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};
 pub use collections::local_cached_map::{
-    EvictionPolicy, LocalCachedMap, LocalCachedMapBuilder, ReconnectionStrategy, SyncStrategy,
+    CacheProvider, EvictionPolicy, ExpirationEventPolicy, LocalCachedMap, LocalCachedMapBuilder,
+    ReconnectionStrategy, StoreMode, SyncStrategy,
 };
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
+pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
 pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;

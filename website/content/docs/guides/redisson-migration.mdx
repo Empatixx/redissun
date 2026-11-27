@@ -142,6 +142,9 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `addAndGet(k, d)` | `incr_by(&k, d)` or `incr_by_float(&k, d)` |
 | `randomKeys(n)` | `random_keys(n)` |
 | `keySet()`, `values()`, `entrySet()` | `keys()`, `values()`, `iter()` as streams |
+| `getMap(name, MapOptions)` | `client.hash_map_builder(name).loader(l).writer(w)….build().await` |
+| `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)` |
+| `destroy()` (write-behind) | `flush().await`, and dropping the last handle drains once more |
 
 ## Vec
 
@@ -411,10 +414,25 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 | `keySet(pattern, count)`, `values(pattern, count)`, `entrySet(pattern, count)` | `keys_with(MapScan::new().pattern(p).page_size(n))`, `values_with(..)`, `iter_with(..)` |
 | `addListener(MapEntryListener)` (`EntryCreatedListener`, …) | `events()`, `events_of(&[EntryEventKind])` → `EntryEvents` |
 | `addListener(MapPutListener / MapIncrListener / MapRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `keyspace_events()`, `keyspace_events_of(&[MapEventKind])` → `MapEvents` (what `HashMap::events()` returns) |
+| `getMapCache(name, MapCacheOptions)` | `client.hash_map_cache_builder(name).loader(l).writer(w)….build().await` |
+| `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)`; loaded values get no limits |
+| `destroy()` (write-behind) | `flush().await`, and dropping the last handle drains once more |
 
 Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, `trySetMaxSize(n, mode)` is `init_max_size(n, mode)`, and listeners are read with `recv()`. Both take expiry times from the client clock.
 
 Since this version, `HashMapCache` uses Redisson's scripts, key names, value layout and event payload, so Redisson and redissun clients can share a cache. Data written by redissun 0.23 and earlier is in another layout and must be moved with `migrate_from_0_23()` before the new version reads it; listeners of the two versions do not understand each other's events. [Upgrading redissun](/docs/guides/upgrading) has the steps.
+
+## LocalCachedMap
+
+| Redisson | redissun |
+|---|---|
+| `getLocalCachedMap(LocalCachedMapOptions)` | `client.local_cached_map(name)….build().await` |
+| `LocalCachedMapOptions.loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)`, `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
+| `LocalCachedMapOptions.cacheProvider(REDISSON / CAFFEINE)` | `.cache_provider(CacheProvider::Builtin / CacheProvider::Moka)`, Moka with the `moka` feature |
+| `LocalCachedMapOptions.storeMode(LOCALCACHE_REDIS / LOCALCACHE)` | `.store_mode(StoreMode::LocalRedis / StoreMode::Local)` |
+| `expirationEventPolicy(SUBSCRIBE_WITH_KEYEVENT_PATTERN / SUBSCRIBE_WITH_KEYSPACE_CHANNEL / DONT_SUBSCRIBE)`, `useKeyEventsPattern(bool)` | `.expiration_event_policy(ExpirationEventPolicy::KeyeventPattern / KeyspaceChannel / None)` |
+| `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)` |
+| `destroy()` (write-behind) | `flush().await`, and dropping the map drains once more |
 
 ## VecDeque blocking
 

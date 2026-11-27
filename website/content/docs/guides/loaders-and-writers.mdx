@@ -1,0 +1,189 @@
+---
+title: Loaders and writers
+description: Read-through with a MapLoader and write-through with a MapWriter.
+---
+
+A map can sit in front of another store, such as a SQL database. A `MapLoader` fills the map on a miss: read-through. A `MapWriter` hands every change of the map to the store: write-through. This is Redisson's `MapOptions`; redissun has one trait for `MapLoader` and `MapLoaderAsync`, and one for `MapWriter` and `MapWriterAsync`.
+
+## A loader
+
+Implement `MapLoader` with plain `async fn`s. A blocking store calls `tokio::task::spawn_blocking` inside them.
+
+```rust
+use futures::Stream;
+use redissun::{BoxError, MapLoader};
+
+struct Users(sqlx::PgPool);
+
+impl MapLoader<String, User> for Users {
+    async fn load(&self, key: &String) -> Result<Option<User>, BoxError> {
+        Ok(sqlx::query_as("SELECT * FROM users WHERE id = $1")
+            .bind(key)
+            .fetch_optional(&self.0)
+            .await?)
+    }
+
+    fn load_all_keys(&self) -> impl Stream<Item = Result<String, BoxError>> + Send {
+        futures::stream::iter(Vec::<Result<String, BoxError>>::new())
+    }
+}
+```
+
+Give it to the map's builder:
+
+```rust
+let users = client
+    .hash_map_builder::<String, User>("users")
+    .loader(Users(pool))
+    .build()
+    .await?;
+
+let user = users.get("jirka").await?; // a miss asks the loader
+```
+
+`client.hash_map(name)` is the same map without options.
+
+`client.hash_map_cache_builder::<K, V>(name)` takes the same options for a `HashMapCache`; [HashMapCache](/docs/objects/hash-map-cache) lists where its loader and writer are called.
+
+`client.local_cached_map::<K, V>(name)` takes them for a `LocalCachedMap`; [LocalCachedMap](/docs/objects/local-cached-map) lists where its loader and writer are called.
+
+## When the loader is asked
+
+| Method | The loader is asked |
+|---|---|
+| `get` | on a miss |
+| `get_many` | for each missing key, one at a time, in the order of the keys |
+| `contains_key` | on a miss; `true` when it loaded a value |
+| `entry(&k)` | on a miss, under the lock the entry holds |
+| `load_all()`, `load_many(&ks)` | always |
+| iteration, `len`, `to_hash_map`, `random_*`, `contains_value`, `incr_by`, every write | never |
+
+## The lock
+
+A miss takes the key's lock, the lock `entry(&k)` and Redisson's `getLock(key)` take. It reads the key again and returns a value that arrived meanwhile. Otherwise it asks the loader and stores a `Some` value with the map's plain put. So ten gets of one missing key at once ask the loader once, and all of them see the value. A Redisson client loading the same key of the same map takes the same lock.
+
+A loaded value is not handed to the map's writer: it came from the store. `None` stores nothing, and the next miss asks again.
+
+A plain write does not take the key's lock. So a value loaded on a miss can overwrite an `insert` or `set` of the same key that lands while the loader runs, and the map keeps the older, loaded value until the next write. Redisson has the same race. Writes made through `entry(&k)` hold the lock, so they never race a load; use them when a key can be loaded and written at the same time.
+
+## Errors
+
+A failing loader gives `Err(Error::Loader(_))` with its error as the source. The map stores nothing and the lock is released, so the next call asks again. Redisson returns `null` instead.
+
+## Load all keys
+
+`load_all()` loads every key `load_all_keys` streams, Redisson's `loadAll(replaceExistingValues, parallelism)`. `load_many(&keys)` loads only those keys.
+
+```rust
+users.load_all().parallelism(4).await?;
+users.load_many(&["jirka", "petr"]).replace_existing().await?;
+```
+
+| Option | Default | Redisson |
+|---|---|---|
+| `.parallelism(n)` | 1 | `parallelism` |
+| `.replace_existing()` | keys the map holds keep their value | `replaceExistingValues = true` |
+
+Each key is loaded as a miss is, under its lock. The load stops at the first error. Without a loader, or with `parallelism(0)`, it is an `Error::Config`.
+
+## A writer
+
+Implement `MapWriter` with plain `async fn`s and give it to the builder with `.writer(w)`. A map can have a loader and a writer, also the same value for both.
+
+```rust
+use redissun::{BoxError, MapWriter};
+
+impl MapWriter<String, User> for Users {
+    async fn write(&self, entries: &[(String, User)]) -> Result<(), BoxError> {
+        for (id, user) in entries {
+            sqlx::query("INSERT INTO users VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2")
+                .bind(id)
+                .bind(&user.name)
+                .execute(&self.0)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, keys: &[String]) -> Result<(), BoxError> {
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(keys)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+}
+```
+
+The keys within one call are unique and keep the order of the map call.
+
+## When the writer is called
+
+| Method | Writer call | When |
+|---|---|---|
+| `insert`, `set` | `write([(k, v)])` | always |
+| `try_insert` | `write([(k, v)])` | it stored the value |
+| `replace` | `write([(k, v)])` | the key was present |
+| `compare_and_set` | `write([(k, new)])` | it returned `true` |
+| `incr_by`, `incr_by_float` | `write([(k, new value)])` | always; the new number decoded as `V` |
+| `remove` | `delete([k])` | always, also for a missing key, as in Redisson |
+| `remove_if_eq` | `delete([k])` | it returned `true` |
+| `remove_many` | `delete(removed keys)` | at least one key was removed |
+| `extend` | `write(batch)` | once per `.batch_size(n)` batch |
+| `entry(&k)` writes | `write([(k, v)])` or `delete([k])` | the entry writes or removes, under its lock |
+| `clear`, `del`, loaded values | none | |
+
+`remove_many` with a writer runs Redisson's `fastRemoveOperationBatchAsync` script to learn which keys it removed. Redisson calls `delete([])` when none was removed; redissun calls nothing.
+
+With a writer, the commands whose answer decides the writer call are sent at most once, even with `retry_attempts`: `compare_and_set`, `remove_if_eq`, `remove_many`, the write-behind push and the poll of the queue. Run again after its connection failed and its reply was lost, such a command would find its own change and answer "nothing changed", and the writer would miss the change. Instead the call returns the connection error, and Redis may hold the change. Without a writer these commands retry as before.
+
+## Write-through
+
+Redis changes first, then the writer is called, as in Redisson. If the writer still fails after its attempts, the call returns `Err(Error::Writer(_))` with the writer's error as the source, and Redis keeps the change.
+
+| Option | Default | Redisson |
+|---|---|---|
+| `.writer_retry_attempts(n)` | 1: the writer is called at most `n` times for one change | `writerRetryAttempts` (Redisson's `0` is one call) |
+| `.writer_retry_interval(d)` | 100 ms between two calls | `writerRetryInterval` |
+
+`writer_retry_attempts(0)` is an `Error::Config` at `build()`. Each failed attempt but the last is logged at `warn` with the map name.
+
+## Write-behind
+
+With `.write_mode(WriteMode::write_behind())` a write returns as soon as Redis has the change and the change is queued. A background task hands the queue to the writer later, Redisson's `WriteMode.WRITE_BEHIND`.
+
+```rust
+use redissun::WriteMode;
+use std::time::Duration;
+
+let users = client
+    .hash_map_builder::<String, User>("users")
+    .writer(Users(pool))
+    .write_mode(WriteMode::WriteBehind { batch_size: 100, delay: Duration::from_millis(500) })
+    .build()
+    .await?;
+```
+
+| Option | Default (`WriteMode::write_behind()`) | Redisson |
+|---|---|---|
+| `batch_size` | 50: the most entries one writer call gets | `writeBehindBatchSize` |
+| `delay` | 1 s between two polls of the queue | `writeBehindDelay` |
+
+Every `delay` the task takes everything from the queue and calls the writer each time `batch_size` writes or `batch_size` deletes have piled up, then once more for the rest: the deletes first, then the writes. Each call gets the retries of `writer_retry_attempts` and `writer_retry_interval`. A call that still fails is logged and its batch is dropped, as in Redisson.
+
+The writer sees only the latest operation of each key within one poll. `insert(k)` followed by `remove(k)` gives `delete([k])` and no write. Redisson sends the deletes of a poll before its writes, so there `k` ends written; redissun's order is the map's.
+
+`build()` needs a running tokio runtime for the task. `WriteBehind` without a writer, with `batch_size: 0` or with a zero `delay` is an `Error::Config` at `build()`.
+
+### Flush and lifecycle
+
+- `map.flush().await` drains the queue now and returns the first writer error. It plays the part Redisson's `destroy()` plays for pending writes. Without write-behind it does nothing.
+- When the last handle of the built map is dropped (clones share one task), the task drains the queue once more and stops. The map's connection stays open until that drain is done. No `Drop` blocks.
+- While handles live, the task polls every `delay`. If the runtime shuts down first, the queue stays in Redis.
+- The queue lives in Redis, so any write-behind map of the same name, in any process, picks up what another one left: the next one to poll writes it.
+- Every build of one name in one client shares one background task and one writer, as Redisson's `WriteBehindService` keeps one task per name: a later build keeps the first build's writer, `batch_size`, `delay` and retries while the first lives. One key's changes reach the writer in the order they were queued only while one drainer polls the queue. Clients in several processes (or several clients in one process) with write-behind on the same name each drain it, and can hand one key's changes to their writers out of order, as in Redisson.
+- A poll pops a task from the queue before the writer is called. If the process crashes between the two, or the reply of the pop is lost, that task is lost, as in Redisson; a lost reply makes `flush()` return the error.
+
+### The queue
+
+The queue is the Redis list `{name}:redissun_write-behind-queue` (`name:redissun_write-behind-queue` when the name has a hash tag), in the map's hash slot. Redisson's queue `{name}:write-behind-queue` holds Java-serialized tasks that a Rust client cannot read, so redissun keeps its own. An entry redissun cannot read, such as one a Redisson client pushed to this key, is logged and skipped.

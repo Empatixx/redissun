@@ -90,6 +90,27 @@ match cache.lease("a", Duration::from_secs(5)).await? {
 - `invalidate(&k)` is for a caller without a lease, when the source changed: it deletes the entry and the lease, so a pending `guard.insert` stores nothing.
 - A plain `insert`/`set` frees the lease on its key; a write with `.ttl()`/`.max_idle()` and `extend` do not, as in Redisson.
 
+## Loader and writer
+
+`client.hash_map_cache_builder::<K, V>(name)` takes the options `HashMap`'s builder takes, then `.build().await` returns the cache; it schedules the clean-up like `hash_map_cache(name)`. See [Loaders and writers](/docs/guides/loaders-and-writers).
+
+| Option | Default | Redisson |
+|---|---|---|
+| `.loader(l)` | none | `MapCacheOptions.loader`, `loaderAsync` |
+| `.writer(w)` | none | `MapCacheOptions.writer`, `writerAsync` |
+| `.write_mode(m)` | `WriteMode::WriteThrough`; `WriteMode::write_behind()` is 50 entries every second | `writeMode`, `writeBehindBatchSize`, `writeBehindDelay` |
+| `.writer_retry_attempts(n)` | 1 | `writerRetryAttempts` |
+| `.writer_retry_interval(d)` | 100 ms | `writerRetryInterval` |
+
+| Method | Notes |
+|---|---|
+| `load_all()`, `load_many(&[&k])` | load every key of the loader, or those keys; `.parallelism(n)`, `.replace_existing()` |
+| `flush()` | hands the queued write-behind changes to the writer now |
+
+- With a loader, `get`, `get_many`, `peek`, `peek_many`, `contains_key` and `entry` ask it on a miss, and an expired entry is a miss. A loaded value is stored with Redisson's plain `PUT`: no limits, also inside `entry(&k).ttl(d)`, and it publishes `Created`.
+- With a writer, `insert`, `set` and `extend` (once per batch, with or without limits), `try_insert` when it stored, `replace` and `compare_and_set` when they changed a value, `remove` (always), `remove_if_eq` when it removed, `remove_many` with the removed keys, `incr_by` with the new number, and entry writes call it after Redis changed.
+- Leases (`lease`, `guard.insert`, `guard.remove`, `set(..).lease(token)`), `invalidate`, `expire_entry*`, `clear`, `del` and the clean-up call neither.
+
 ## How expiry works
 
 - As in Redisson, time comes from the clock of the client that runs the command: a write stores `now + ttl` from its own clock, and a read hides an entry whose deadline has passed by its own clock. Keep the clocks of your clients in sync.

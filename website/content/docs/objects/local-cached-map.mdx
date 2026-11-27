@@ -33,6 +33,14 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `sync_strategy(..)` | `Invalidate` (default): other instances drop the entry. `Update`: they receive the new value. `None`: nothing is sent. |
 | `reconnection_strategy(..)` | what happens after the pub/sub connection comes back: `None` (default) keeps the cache, `Clear` empties it, `Load` drops the keys changed meanwhile, read from a 10 minute log in Redis, or everything when the instance was away longer |
 | `store_cache_miss(bool)` | also cache that a key is missing. Off by default. |
+| `cache_provider(..)` | which cache holds the local entries, Redisson's `cacheProvider`: `Builtin` (default, Redisson's `REDISSON`) or `Moka` (Redisson's `CAFFEINE`), which needs the `moka` feature; see [Cache provider](#cache-provider) |
+| `expiration_event_policy(..)` | how the map learns that it expired in Redis, Redisson's `expirationEventPolicy` (formerly `useKeyEventsPattern`): `KeyeventPattern` (default) subscribes to the pattern `__keyevent@*:expired` and needs `notify-keyspace-events` with `Ex`; `KeyspaceChannel` subscribes to the map's own channel `__keyspace@<database>__:<name>` and needs `Kx`; `None` subscribes to nothing, so the local cache is not cleared when the map expires |
+| `store_mode(..)` | `LocalRedis` (default): entries live in Redis and in the local cache. `Local`: in the local cache only; see [Store mode](#store-mode). |
+| `loader(l)` | a `MapLoader` asked on a miss; see [Loaders and writers](/docs/guides/loaders-and-writers). None by default. |
+| `writer(w)` | a `MapWriter` that `insert` and `remove` call. None by default. |
+| `write_mode(m)` | `WriteMode::WriteThrough` (default), or `WriteMode::write_behind()`: 50 entries every second |
+| `writer_retry_attempts(n)` | at most `n` writer calls for one change, 1 by default |
+| `writer_retry_interval(d)` | the time between two writer calls, 100 ms by default |
 
 ## Methods
 
@@ -47,6 +55,55 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `local_len()`, `local_entries()`, `clear_local()` | the local cache of this instance only |
 | `clear_local_everywhere()` | empties the local cache of every instance without changing Redis, like Redisson's `clearLocalCache` (it does not wait for the others) |
 | `iter()`, `keys()`, `values()` | stream from Redis and do not use the cache |
+| `load_all()`, `load_many(&[&k])` | load every key of the loader, or those keys; `.parallelism(n)`, `.replace_existing()` |
+| `flush()` | hands the queued write-behind changes to the writer now |
+
+## Loader and writer
+
+As in Redisson's `RedissonLocalCachedMap`:
+
+- With a loader, `get` and `contains_key` ask it when neither the local cache nor Redis has the key. A loaded value is stored like an `insert` (Redis, the local cache, and the message to the others) without calling the writer. A key the loader does not have is cached as missing only with `store_cache_miss(true)`; otherwise the loader is asked again next time.
+- With a writer, `insert` always calls `write`, and `remove` always calls `delete`, also for a missing key. `clear` and `del` call neither.
+- The writer is called after Redis changed. A write-through writer that still fails after its attempts gives `Error::Writer`, and Redis keeps the change.
+
+## Cache provider
+
+`CacheProvider::Moka` keeps the local entries in a [moka](https://docs.rs/moka) cache instead of redissun's own, as Redisson's `CacheProvider.CAFFEINE` uses Caffeine. Turn on the `moka` feature:
+
+```toml
+redissun = { version = "0.23", features = ["moka"] }
+```
+
+```rust
+use redissun::CacheProvider;
+
+let users = client
+    .local_cached_map::<String, String>("users")
+    .cache_provider(CacheProvider::Moka)
+    .cache_size(10_000)
+    .ttl(Duration::from_secs(300))
+    .build()
+    .await?;
+```
+
+Moka honours the options the way Redisson's Caffeine branch does:
+
+- `ttl` is moka's time to live and `max_idle` its time to idle.
+- `cache_size` above zero is its capacity, whatever the `eviction_policy`: moka picks the entries to drop itself, so `Lru` and `Lfu` make no difference.
+- Moka evicts in the background, so the cache can hold a few more entries than `cache_size` for a short time. `local_len()` and `local_entries()` let moka catch up first.
+
+Everything else (sync, reconnection, store mode, loader and writer) works the same with either provider.
+
+## Store mode
+
+With `store_mode(StoreMode::Local)`, Redisson's `StoreMode.LOCALCACHE`, the entries live only in the local cache of each instance. Redis carries the sync messages, the per-key lock while a loader is asked, and the write-behind queue, but holds no entry.
+
+- `get` and `contains_key` look at the local cache only, and ask the loader on a miss.
+- `insert` writes locally and returns the previous local value; `remove` forgets locally. Then each publishes the sync message of the `sync_strategy` (unless it is `None` and there is no `Load` reconnection), then calls the writer.
+- `len` and `is_empty` count the local entries that hold a value; cached misses do not count (Redisson counts them).
+- `iter`, `keys` and `values` stream a snapshot of the local entries.
+- `clear` and `del` empty the local cache, tell the others, and return whether the local cache held anything.
+- With `SyncStrategy::Invalidate`, a change on one instance drops the copy the others have, and that copy was their only one: they read `None` until they write the key themselves or a loader loads it. Use `SyncStrategy::Update` to hand them the new value instead.
 
 ## What it guarantees
 
@@ -58,6 +115,6 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 
 Only changes made through a `LocalCachedMap` are announced. A plain `HashMap` of the same name changes Redis without telling the others. Their cached entries stay until they expire (`ttl`, `max_idle`), are pushed out, or you call `clear()`. `del()` works like `clear()`: it deletes the map and tells the other clients to clear their local caches.
 
-When the map itself expires in Redis (`expire`), every client clears its local cache, as in Redisson. For this the Redis server must send expired events: set `notify-keyspace-events` to at least `Ex`.
+When the map itself expires in Redis (`expire`), every client clears its local cache, as in Redisson. For this the Redis server must send expired events: set `notify-keyspace-events` to at least `Ex` for the default `ExpirationEventPolicy::KeyeventPattern`, or `Kx` for `KeyspaceChannel`. With `ExpirationEventPolicy::None` the map does not listen at all.
 
 The data in Redis is a normal hash, so a `HashMap` with the same name and codec reads the same entries.
