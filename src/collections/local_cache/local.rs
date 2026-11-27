@@ -13,33 +13,47 @@ use uuid::Uuid;
 /// The local cache and the reads from Redis in flight, under one lock: a change that arrives while a key is read marks the read, so its stale result is not cached.
 pub(crate) struct Cache {
     pub(crate) store: LocalStore,
-    /// Per key: the reads in flight, and whether a change arrived meanwhile.
-    reads: StdHashMap<Bytes, (usize, bool)>,
+    /// Per key: the reads in flight, and the sequence number of the last change while any was in flight.
+    reads: StdHashMap<Bytes, (usize, u64)>,
+    /// Numbers the starts of reads and the changes, so a read is spoiled only by a change after it began.
+    sequence: u64,
 }
 
 impl Cache {
+    fn next_sequence(&mut self) -> u64 {
+        self.sequence += 1;
+        self.sequence
+    }
+
     fn invalidate(&mut self, key: &Bytes) {
         self.store.remove(key);
-        if let Some(read) = self.reads.get_mut(key) {
-            read.1 = true;
+        if self.reads.contains_key(key) {
+            let changed = self.next_sequence();
+            if let Some(read) = self.reads.get_mut(key) {
+                read.1 = changed;
+            }
         }
     }
 
     fn clear(&mut self) {
         self.store.clear();
-        self.reads.values_mut().for_each(|read| read.1 = true);
+        let changed = self.next_sequence();
+        self.reads.values_mut().for_each(|read| read.1 = changed);
     }
 
-    fn begin_read(&mut self, key: &Bytes) {
-        self.reads.entry(key.clone()).or_insert((0, false)).0 += 1;
+    /// Opens a read of `key`; returns its start number.
+    fn begin_read(&mut self, key: &Bytes) -> u64 {
+        let started = self.next_sequence();
+        self.reads.entry(key.clone()).or_insert((0, 0)).0 += 1;
+        started
     }
 
-    fn finish_read(&mut self, key: Bytes, value: Option<(Option<Bytes>, Lifetime)>) {
+    fn finish_read(&mut self, key: Bytes, started: u64, value: Option<(Option<Bytes>, Lifetime)>) {
         let Some(read) = self.reads.get_mut(&key) else {
             return;
         };
         read.0 -= 1;
-        let dirty = read.1;
+        let dirty = read.1 > started;
         if read.0 == 0 {
             self.reads.remove(&key);
         }
@@ -54,13 +68,15 @@ pub(crate) struct ReadGuard<'a> {
     local: &'a Local,
     /// `None` once the read is finished.
     key: Option<Bytes>,
+    /// The start number: only a change after it spoils the read.
+    started: u64,
 }
 
 impl ReadGuard<'_> {
     /// Ends the read; `Some((value, lifetime))` caches `value` for `lifetime` unless the key changed meanwhile.
     pub(crate) fn finish(mut self, value: Option<(Option<Bytes>, Lifetime)>) {
         if let Some(key) = self.key.take() {
-            self.local.cache().finish_read(key, value);
+            self.local.cache().finish_read(key, self.started, value);
         }
     }
 }
@@ -68,7 +84,7 @@ impl ReadGuard<'_> {
 impl Drop for ReadGuard<'_> {
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {
-            self.local.cache().finish_read(key, None);
+            self.local.cache().finish_read(key, self.started, None);
         }
     }
 }
@@ -93,6 +109,7 @@ impl Local {
             cache: Mutex::new(Cache {
                 store,
                 reads: StdHashMap::new(),
+                sequence: 0,
             }),
             id: *Uuid::new_v4().as_bytes(),
             reconnection,
@@ -123,10 +140,11 @@ impl Local {
 
     /// Opens a read of `key` from Redis. The guard ends it: [`ReadGuard::finish`] with what was read, or its drop, caching nothing, when the read is cancelled or fails.
     pub(crate) fn begin_read(&self, key: &Bytes) -> ReadGuard<'_> {
-        self.cache().begin_read(key);
+        let started = self.cache().begin_read(key);
         ReadGuard {
             local: self,
             key: Some(key.clone()),
+            started,
         }
     }
 
