@@ -1,0 +1,32 @@
+---
+title: ListMultimap
+description: A map whose keys each hold a list of values, Redisson's RListMultimap. Experimental.
+---
+
+**Experimental.** A `ListMultimap` maps each key to a list of values. Values keep the order they were added in, and a key can hold the same value more than once. It is Redisson's `RListMultimap`, with the same data in Redis, so Java and Rust clients share it.
+
+```rust
+let tags = client.list_multimap::<String, String>("tags");
+
+tags.insert("post-1", "rust").await?;
+tags.insert("post-1", "redis").await?;
+let all = tags.get_all("post-1").await?; // ["rust", "redis"]
+```
+
+## Methods
+
+| Method | Redisson | Notes |
+|---|---|---|
+| `insert(&k, &v)` | `put` | appends the value; always `true` |
+| `get_all(&k)` | `getAll` | the values in order, empty for a missing key |
+| `contains_key(&k)` | `containsKey` | whether the key has any values |
+| `len()` | `size` | the values under all keys |
+| `key_len()` | `keySize` | the keys (`HLEN`) |
+| `is_empty()` | `isEmpty` | `len() == 0` |
+
+## How it is stored
+
+Redisson's layout:
+
+- A hash at the name maps each encoded key to `Hash.hash128toBase64` of the encoded key (a 22-character string, stored as is, not encoded). With `JsonCodec` the key `"key"` maps to `IKm9EBQhlzpVIBxUXDHBWw`.
+- The values of a key live in the list `{name}:<hash>`, or `name:<hash>` when the name already has a `{`. So every key of the multimap is in the slot of the name, also in a cluster.

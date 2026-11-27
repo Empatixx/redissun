@@ -30,6 +30,8 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RMapCache` | `HashMapCache` |
 | `RMapCacheNative` | `MapCacheNative` |
 | `RSetCache` | `HashSetCache` |
+| `RListMultimap` | `ListMultimap` |
+| `RSetMultimap` | `SetMultimap` |
 | `RTopic` | `Topic` |
 | `RPatternTopic` | `PatternTopic` |
 | `RReliableTopic` | `ReliableTopic` |
@@ -455,6 +457,20 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `putAll(PutArgs)` with `timeToLive`, `expireAt`, `keepTTL` | `extend(entries).ttl(d)`, `.expire_at(t)`, `.keep_ttl()` (`expire_at` and `keep_ttl` need Redis 8.0) |
 | `putIfAllKeysAbsent(PutArgs)` | `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
 | `putIfAllKeysExist(PutArgs)` | `update_many(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
+
+## Multimaps
+
+`ListMultimap` and `SetMultimap` use Redisson's layout and scripts, so Redisson and redissun clients share the data.
+
+| Redisson | redissun |
+|---|---|
+| `redisson.getListMultimap("x")`, `redisson.getSetMultimap("x")` | `client.list_multimap("x")`, `client.set_multimap("x")` |
+| `put(k, v)` | `insert(&k, &v)` → `bool` |
+| `getAll(k)` | `get_all(&k)` → `Vec<V>` (also for the set) |
+| `containsKey(k)` | `contains_key(&k)` |
+| `size()` | `len()` |
+| `keySize()` | `key_len()` |
+| `isEmpty()` | `is_empty()` |
 
 ## LocalCachedMap
 

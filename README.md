@@ -81,6 +81,8 @@ async fn main() -> redissun::Result<()> {
 | [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash, sorted sets, strings and pub/sub (Redisson's `RMapCache` layout) | stable |
 | [`MapCacheNative`](https://empatixx.github.io/redissun/docs/objects/map-cache-native) | hash with per-field TTL (Redis 7.4+) | experimental |
 | [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
+| [`ListMultimap`](https://empatixx.github.io/redissun/docs/objects/list-multimap) | hash + one list per key | experimental |
+| [`SetMultimap`](https://empatixx.github.io/redissun/docs/objects/set-multimap) | hash + one set per key | experimental |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |
 | [`PatternTopic`](https://empatixx.github.io/redissun/docs/objects/topic#pattern-topics) | pub/sub | stable |
 | [`ReliableTopic`](https://empatixx.github.io/redissun/docs/objects/reliable-topic) | stream and sorted set | stable |

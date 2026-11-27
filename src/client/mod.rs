@@ -18,6 +18,7 @@ use crate::collections::hash_map_cache::{HashMapCache, HashMapCacheBuilder};
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
 use crate::collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
+use crate::collections::multimap::{ListMultimap, Mode as MultimapMode, SetMultimap};
 use crate::collections::sorted_set::SortedSet;
 use crate::coordination::adder::{Adder, Summable};
 use crate::coordination::gcra::Gcra;
@@ -223,6 +224,26 @@ impl<C: Codec> Client<C> {
         HashSetCache::new(
             Key::new(self.core.clone(), tagged(&name)),
             self.codec.clone(),
+        )
+    }
+
+    /// Returns the [`ListMultimap`] stored under `name`, Redisson's `getListMultimap`. **Experimental.**
+    #[doc(alias = "getListMultimap")]
+    pub fn list_multimap<K, V>(&self, name: impl Into<Arc<str>>) -> ListMultimap<K, V, C> {
+        ListMultimap::new(
+            Key::new(self.core.clone(), name),
+            self.codec.clone(),
+            MultimapMode::Plain,
+        )
+    }
+
+    /// Returns the [`SetMultimap`] stored under `name`, Redisson's `getSetMultimap`. **Experimental.**
+    #[doc(alias = "getSetMultimap")]
+    pub fn set_multimap<K, V>(&self, name: impl Into<Arc<str>>) -> SetMultimap<K, V, C> {
+        SetMultimap::new(
+            Key::new(self.core.clone(), name),
+            self.codec.clone(),
+            MultimapMode::Plain,
         )
     }
 

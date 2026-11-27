@@ -6,6 +6,7 @@ pub(crate) mod list;
 pub(crate) mod local_cached_map;
 pub(crate) mod map;
 pub(crate) mod map_cache_native;
+pub(crate) mod multimap;
 pub(crate) mod sorted_set;
 pub(crate) mod vec;
 pub(crate) mod vec_deque;
