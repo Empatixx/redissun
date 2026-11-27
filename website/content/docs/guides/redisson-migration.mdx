@@ -530,11 +530,11 @@ Every `HashMapCache` method works and returns the same builders; see [`## HashMa
 | `getLocalCachedMapCache(name, options)`, `getLocalCachedMapCache(name, codec, options)` | `client[.with_codec(c)].local_cached_map_cache(name)….build().await` |
 | `LocalCachedMapCacheOptions.cacheSize`, `evictionPolicy`, `timeToLive`, `maxIdle`, `syncStrategy`, `reconnectionStrategy`, `storeCacheMiss`, `storeMode`, `cacheProvider`, `expirationEventPolicy`, `useKeyEventsPattern` | the builder setters of `LocalCachedMap` |
 | `getCachedMap()`, `cachedEntrySet()`, `cachedKeySet()`, `cachedValues()` | `local_entries()` |
-| `clearLocalCache()` | `clear_local_everywhere()` |
+| `clearLocalCache()`, `clearLocalCacheAsync()` | `clear_local_everywhere()` |
 | `preloadCache()`, `preloadCache(count)` | `preload_cache()`, `preload_cache().page_size(count)` → the number of entries cached |
 | `addListener(MapEntryListener)`, `removeListener` | `events()`, `events_of(..)`, then drop |
 | `addListener(ObjectListener)` | `keyspace_events()`, `keyspace_events_of(..)` |
-| `loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)`, `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
+| `loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)` (`WriteMode::WriteBehind { batch_size, delay }`), `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
 | `destroy()` | `flush().await`, then drop |
 
 ## VecDeque blocking

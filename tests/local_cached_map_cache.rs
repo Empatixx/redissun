@@ -1246,3 +1246,141 @@ async fn local_mode_preload_returns_zero() {
     let a = local_mode(&client, &unique("lcmc"), SyncStrategy::Invalidate).await;
     assert_eq!(a.preload_cache().await.unwrap(), 0);
 }
+
+// ---- Task 7: cluster and Object ----
+
+#[tokio::test]
+async fn every_operation_runs_on_a_cluster() {
+    use redissun::{EvictionMode, ReconnectionStrategy};
+    let _gate = shared().await;
+    let topology = common::topology::Topology::cluster().await;
+    let connect = || async {
+        Client::builder()
+            .url(topology.cluster_url())
+            .build()
+            .await
+            .expect("could not connect to the cluster")
+    };
+    let (first, second) = (connect().await, connect().await);
+    let name = format!("{{{}}}:m", unique("t"));
+    let build = |c: Client| {
+        let name = name.clone();
+        async move {
+            c.local_cached_map_cache::<String, String>(name)
+                .reconnection_strategy(ReconnectionStrategy::Load)
+                .sync_strategy(SyncStrategy::Update)
+                .build()
+                .await
+                .unwrap()
+        }
+    };
+    let a = build(first.clone()).await;
+    let b = build(second.clone()).await;
+    a.insert("k", "v")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(
+        a.get_many(&["k", "zz"]).await.unwrap(),
+        [Some("v".to_string()), None]
+    );
+    assert_eq!(a.try_insert("k", "x").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(a.replace("k", "w").await.unwrap().as_deref(), Some("v"));
+    a.extend([("e1", "1"), ("e2", "2")])
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(a.remove_many(&["e1", "zz"]).await.unwrap(), 1);
+    assert!(a
+        .expire_entry("k")
+        .ttl(Duration::from_secs(30))
+        .await
+        .unwrap());
+    let counters = first
+        .local_cached_map_cache::<String, i64>(name.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(counters.incr_by("n", 2).await.unwrap(), 2);
+    a.entry("en")
+        .await
+        .unwrap()
+        .or_insert("1".to_string())
+        .await
+        .unwrap();
+    assert_eq!(b.preload_cache().await.unwrap(), 4);
+    let log = format!("redissun__cache_updates_log:{name}");
+    let port = topology.cluster_master_of(&name).await;
+    let zcard = topology.cli(port, &["ZCARD", &log]).await;
+    assert!(zcard.trim().parse::<i64>().unwrap() > 0, "{zcard}");
+
+    b.clear().await.unwrap();
+    b.set_max_size(1, EvictionMode::Lru).await.unwrap();
+    b.insert("x", "1").await.unwrap();
+    assert_eq!(b.local_len(), 1);
+    sleep(10 * MS).await;
+    a.insert("y", "2").await.unwrap();
+    eventually("the eviction never reached b", || async {
+        !local_keys(&b).contains(&"x".to_string())
+    })
+    .await;
+    a.clear().await.unwrap();
+}
+
+#[tokio::test]
+async fn object_methods_cover_every_key() {
+    use redissun::ReconnectionStrategy;
+    let _gate = shared().await;
+    let (first, second) = (client().await, client().await);
+    let name = unique("lcmc");
+    let a = with_reconnection(&first, &name, ReconnectionStrategy::Load).await;
+    let b = with_reconnection(&second, &name, ReconnectionStrategy::Load).await;
+    a.insert("k", "v")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    a.insert("i", "v")
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    a.set_max_size(10, redissun::EvictionMode::Lru)
+        .await
+        .unwrap();
+    assert!(a.expire(Duration::from_secs(1)).await.unwrap());
+    assert!(a.ttl().await.unwrap().is_some());
+    assert!(a.persist().await.unwrap());
+    let keys = |n: &str| {
+        vec![
+            n.to_string(),
+            format!("redissun__timeout__set:{{{n}}}"),
+            format!("redissun__idle__set:{{{n}}}"),
+            format!("{{{n}}}:redissun_options"),
+            format!("redissun__cache_updates_log:{{{n}}}"),
+        ]
+    };
+    for key in keys(&name) {
+        assert_eq!(exists(&key).await, ":1", "{key}");
+    }
+    let n2 = unique("lcmc");
+    a.rename(&n2).await.unwrap();
+    for key in keys(&n2) {
+        assert_eq!(exists(&key).await, ":1", "{key}");
+    }
+    for key in keys(&name) {
+        assert_eq!(exists(&key).await, ":0", "{key}");
+    }
+    let moved = with_reconnection(&first, &n2, ReconnectionStrategy::Load).await;
+    let other = with_reconnection(&second, &n2, ReconnectionStrategy::Load).await;
+    assert_eq!(other.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(other.local_len(), 1);
+    assert!(moved.del().await.unwrap());
+    for key in keys(&n2) {
+        assert_eq!(exists(&key).await, ":0", "{key}");
+    }
+    eventually("the clear never reached the other instance", || async {
+        other.local_len() == 0
+    })
+    .await;
+    drop(b);
+}
