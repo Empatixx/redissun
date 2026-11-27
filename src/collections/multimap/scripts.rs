@@ -821,3 +821,29 @@ pub(super) static CACHE_SET_FAST_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|
         "end; ",
     ))
 });
+
+/// `MultimapEvictionTask.execute`. KEYS: map, ttl zset. ARGV: now, the most keys to delete.
+///
+/// Deviation from Redisson (D1): the values names start with `suffix_name(KEYS[1], '')`, computed in Lua, instead of `'{' .. KEYS[1] .. '}:'`. Redisson's prefix is wrong for names that contain `{`: it leaks their values keys, and on a cluster the script fails with a non-local key.
+pub(super) static CACHE_EVICT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expiredKeys = redis.call('zrangebyscore', KEYS[2], 0, ARGV[1], 'limit', 0, ARGV[2]); ",
+        "if #expiredKeys > 0 then ",
+        "redis.call('zrem', KEYS[2], unpack(expiredKeys)); ",
+        "local values = redis.call('hmget', KEYS[1], unpack(expiredKeys)); ",
+        "local keys = {}; ",
+        "local prefix = string.find(KEYS[1], '{', 1, true) and (KEYS[1] .. ':') or ('{' .. KEYS[1] .. '}:'); ",
+        "for i, v in ipairs(values) do ",
+        "if v ~= false then ",
+        "local name = prefix .. v; ",
+        "table.insert(keys, name); ",
+        "end;",
+        "end; ",
+        "if #keys > 0 then ",
+        "redis.call('del', unpack(keys)); ",
+        "end; ",
+        "redis.call('hdel', KEYS[1], unpack(expiredKeys)); ",
+        "end; ",
+        "return #expiredKeys;",
+    ))
+});

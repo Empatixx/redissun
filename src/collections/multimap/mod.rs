@@ -11,6 +11,7 @@ use crate::codec::Codec;
 use crate::collections::map::key_hash::hash128_base64;
 use crate::collections::map_cache_native::support::{self, Needs};
 use crate::error::{Error, Result};
+use crate::eviction::{self, KEYS_LIMIT};
 use crate::lua::Lua;
 use crate::object::{millis, now_millis, suffix_name, Key};
 use bytes::Bytes;
@@ -103,6 +104,28 @@ pub(crate) fn slot(key: &Key, encoded_key: Bytes, mode: &Mode) -> Slot {
 }
 
 type ScriptCall = (&'static Lua, Vec<String>, Vec<Bytes>);
+
+/// The arguments of one clean-up run: the client clock and the most keys to delete, as Redisson's `MultimapEvictionTask` (which has no latch).
+fn eviction_arguments(_: Option<Duration>) -> Vec<Bytes> {
+    vec![
+        Bytes::from(now_millis().to_string()),
+        Bytes::from(KEYS_LIMIT.to_string()),
+    ]
+}
+
+/// Schedules the clean-up task of a cache multimap, Redisson's `scheduleCleanMultimap`, unless it already runs in this client. Other modes have none.
+pub(crate) fn schedule_clean_up(key: &Key, mode: &Mode) {
+    if let Some(timeout) = mode.timeout() {
+        eviction::schedule(
+            &key.core,
+            format!("redissun__multimap_eviction:{}", key.name()),
+            &scripts::CACHE_EVICT,
+            vec![key.redis_key(), timeout.to_string()],
+            eviction_arguments,
+            Vec::new(),
+        );
+    }
+}
 
 /// `Object::del`: Redisson's `deleteAsync` over the hash and every values key, and the ttl zset in cache mode.
 pub(crate) fn del_script(key: &Key, mode: &Mode) -> ScriptCall {
@@ -707,6 +730,7 @@ macro_rules! multimap_type {
                 codec: C,
                 mode: $crate::collections::multimap::Mode,
             ) -> Self {
+                $crate::collections::multimap::schedule_clean_up(&key, &mode);
                 Self {
                     key,
                     codec,

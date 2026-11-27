@@ -213,6 +213,70 @@ macro_rules! cache_tests {
         }
 
         #[tokio::test]
+        async fn clean_up_deletes_values_of_a_tagged_name() {
+            let name = format!("{{t}}:{}", unique("mmc"));
+            let client =
+                connect_with(|builder| builder.eviction_interval(Duration::from_millis(300))).await;
+            let map = $factory(&client, &name);
+            map.extend("1", ["a", "b"]).await.unwrap();
+            map.insert("2", "stay").await.unwrap();
+            let values = map.get("1").unwrap().name().to_string();
+            assert!(values.starts_with(&format!("{name}:")), "{values}");
+            assert!(map
+                .expire_key("1", Duration::from_millis(200))
+                .await
+                .unwrap());
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(13);
+            while exists(&values).await {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "not cleaned after 13 s"
+                );
+                sleep(Duration::from_millis(200)).await;
+            }
+            assert_eq!(raw_command(&["HEXISTS", &name, "\"1\""]).await, ":0\r\n");
+            assert_eq!(raw_command(&["ZCARD", &ttl_set(&name)]).await, ":0\r\n");
+            assert_eq!(map.get_all("2").await.unwrap(), ["stay"]);
+            assert_eq!(map.key_len().await.unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn clean_up_runs_once_per_client() {
+            let (_redis, url) = common::own_redis().await;
+            let client = Client::builder()
+                .url(url.clone())
+                .eviction_interval(Duration::from_millis(500))
+                .build()
+                .await
+                .unwrap();
+            let name = unique("mmc");
+            let first = $factory(&client, &name);
+            let second = $factory(&client, &name);
+            first.insert("1", "a").await.unwrap();
+            second.insert("1", "b").await.unwrap();
+            // Let the first run load the script, then count the runs of two more periods.
+            sleep(Duration::from_millis(700)).await;
+            common::raw_command_at(&url, &["CONFIG", "RESETSTAT"]).await;
+            sleep(Duration::from_millis(1000)).await;
+            let stats = common::raw_command_at(&url, &["INFO", "commandstats"]).await;
+            let runs: u64 = stats
+                .lines()
+                .filter(|line| {
+                    line.starts_with("cmdstat_evalsha:") || line.starts_with("cmdstat_eval:")
+                })
+                .filter_map(|line| {
+                    line.split(['=', ','])
+                        .nth(1)
+                        .and_then(|n| n.parse::<u64>().ok())
+                })
+                .sum();
+            assert!(
+                (1..=3).contains(&runs),
+                "{runs} script runs in 1 s: {stats}"
+            );
+        }
+
+        #[tokio::test]
         async fn expire_and_persist_cover_the_ttl_zset() {
             let name = unique("mmc");
             let map = $factory(&client().await, &name);
@@ -233,8 +297,7 @@ macro_rules! cache_tests {
 mod list {
     base_multimap_cache_tests!(
         super::list_cache,
-        handle = #[ignore = "Task 12"],
-        scheduler = #[ignore = "Task 11"]
+        handle = #[ignore = "Task 12"]
     );
     cache_tests!(super::list_cache, "redissun_list_multimap_ttl");
 
@@ -264,8 +327,7 @@ mod list {
 mod set {
     base_multimap_cache_tests!(
         super::set_cache,
-        handle = #[ignore = "Task 12"],
-        scheduler = #[ignore = "Task 11"]
+        handle = #[ignore = "Task 12"]
     );
     cache_tests!(super::set_cache, "redissun_set_multimap_ttl");
 

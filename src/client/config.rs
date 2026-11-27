@@ -169,7 +169,7 @@ impl<C: Codec> ClientBuilder<C> {
         self
     }
 
-    /// The first and shortest pause between two background clean-ups of expired `HashMapCache` and `HashSetCache` entries, like Redisson's `minCleanUpDelay`. As in Redisson, the pause grows by half, up to 30 minutes, after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. Defaults to 5 seconds.
+    /// The first and shortest pause between two background clean-ups of expired `HashMapCache` and `HashSetCache` entries and `ListMultimapCache` and `SetMultimapCache` keys, like Redisson's `minCleanUpDelay`. As in Redisson, the pause grows by half, up to 30 minutes, after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. Defaults to 5 seconds.
     pub fn eviction_interval(mut self, eviction_interval: Duration) -> Self {
         self.settings.eviction_interval = eviction_interval;
         self
