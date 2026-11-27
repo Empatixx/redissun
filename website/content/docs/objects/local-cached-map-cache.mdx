@@ -105,7 +105,19 @@ Before a write, the key is forgotten locally. After the reply, an unconditional 
 
 `set(..).lease(t)` only invalidates because Redisson's script replies the same for "stored over a live entry" and "wrong lease": a write that did not happen is never pushed as a value.
 
-With `SyncStrategy::Invalidate` every write sends an invalidation (or clear); with `SyncStrategy::None` (and no `ReconnectionStrategy::Load`) nothing is published. Writes through a plain `HashMapCache` or Redisson are not announced; other instances see them when their copy's lifetime ends.
+With `SyncStrategy::Invalidate` every write sends an invalidation (or clear); with `SyncStrategy::None` (and no `ReconnectionStrategy::Load`) nothing is published. Writes through a plain `HashMapCache` or Redisson are not announced; other instances see them when their copy's lifetime ends. Their removals do reach the local caches, see below.
+
+## Entries the server drops
+
+At `build` every instance subscribes to the cache's own entry-event channels `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`, whatever the `SyncStrategy`, because the server's data wins. A message forgets the key it names; a message that does not parse, or messages lost while the client was slow, clear the whole local cache. The removed channel carries removals by any client (a plain `HashMapCache` or Redisson's `RMapCache` included) and the evictions of `set_max_size`. The expired channel is fed by the clean-up task, so a copy whose entry got a shorter TTL behind its back goes away at the next clean-up run (`ClientBuilder::eviction_interval`). Redisson's scripts publish these events only when the options hash has `has-listeners`, which `build` sets.
+
+## Reconnection
+
+When the client's pub/sub connection reconnects, messages may have been lost. `reconnection_strategy` chooses what happens, as for `LocalCachedMap`: `None` keeps the local cache, `Clear` clears it, and `Load` forgets only the keys the updates log `redissun__cache_updates_log:{name}` records since the last message (everything when that was more than 10 minutes ago or the cache is gone). With `Load`, every announced write adds its keys to the log.
+
+## Expiry of the whole cache
+
+When the hash `name` expires, every instance clears its local cache. `expiration_event_policy` chooses the notifications: `KeyeventPattern` (the default, `__keyevent@*:expired`) or `KeyspaceChannel` (`__keyspace@<db>__:name`), both needing `notify-keyspace-events` with `E`/`K` and `x` on the server; `None` listens to nothing.
 
 ## How it is stored
 
