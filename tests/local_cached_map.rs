@@ -1,9 +1,11 @@
 mod common;
 
+use common::store::MemoryStore;
 use common::{client, redis_url, unique};
 use futures::TryStreamExt;
 use redissun::{
-    Client, EvictionPolicy, JsonCodec, LocalCachedMap, Object, ReconnectionStrategy, SyncStrategy,
+    Client, EvictionPolicy, JsonCodec, LocalCachedMap, Object, ReconnectionStrategy, StoreMode,
+    SyncStrategy,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -1258,4 +1260,164 @@ async fn an_expired_map_still_clears_the_cache_after_a_reconnect() {
     })
     .await;
     assert_eq!(map.get("k").await.unwrap(), None);
+}
+
+async fn local_only(client: &Client, name: &str, sync: SyncStrategy) -> Map {
+    client
+        .local_cached_map::<String, String>(name.to_string())
+        .store_mode(StoreMode::Local)
+        .sync_strategy(sync)
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn redis_has(key: &str) -> bool {
+    common::raw_command(&["EXISTS", key]).await.trim() != ":0"
+}
+
+fn updates_log_of(name: &str) -> String {
+    format!("redissun__cache_updates_log:{{{name}}}")
+}
+
+#[tokio::test]
+async fn local_store_mode_keeps_data_out_of_redis() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let map = local_only(&client().await, &name, SyncStrategy::Invalidate).await;
+    assert_eq!(map.insert("k", "v").await.unwrap(), None);
+    assert_eq!(map.insert("k", "w").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(map.get("k").await.unwrap().as_deref(), Some("w"));
+    assert_eq!(map.len().await.unwrap(), 1);
+    assert!(map.contains_key("k").await.unwrap());
+    assert!(!redis_has(&name).await);
+    assert!(!redis_has(&updates_log_of(&name)).await);
+    assert_eq!(map.remove("k").await.unwrap().as_deref(), Some("w"));
+    assert!(map.is_empty().await.unwrap());
+}
+
+#[tokio::test]
+async fn local_store_mode_update_reaches_other_instances() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let a = local_only(&client().await, &name, SyncStrategy::Update).await;
+    let b = local_only(&client().await, &name, SyncStrategy::Update).await;
+    a.insert("k", "v").await.unwrap();
+    eventually("the update never arrived", || async {
+        b.get("k").await.unwrap().as_deref() == Some("v")
+    })
+    .await;
+    assert_eq!(b.local_len(), 1);
+    assert!(!redis_has(&name).await);
+}
+
+#[tokio::test]
+async fn local_store_mode_invalidate_drops_the_other_copy() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let a = local_only(&client().await, &name, SyncStrategy::Invalidate).await;
+    let b = local_only(&client().await, &name, SyncStrategy::Invalidate).await;
+    a.insert("k", "1").await.unwrap();
+    // A's invalidation may reach B after B's own insert; insert again until B's copy stays.
+    eventually("B never kept its copy", || async {
+        b.insert("k", "2").await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        b.get("k").await.unwrap().as_deref() == Some("2")
+    })
+    .await;
+    a.insert("k", "3").await.unwrap();
+    eventually("the invalidation never arrived", || async {
+        b.get("k").await.unwrap().is_none()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn local_store_mode_iter_lists_local_entries() {
+    let _gate = shared().await;
+    let map = local_only(&client().await, &unique("lcm"), SyncStrategy::Invalidate).await;
+    for (k, v) in [("a", "1"), ("b", "2"), ("c", "3")] {
+        map.insert(k, v).await.unwrap();
+    }
+    let entries: HashSet<(String, String)> = map.iter().try_collect().await.unwrap();
+    assert_eq!(
+        entries,
+        HashSet::from([
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+            ("c".to_string(), "3".to_string()),
+        ])
+    );
+    let keys: HashSet<String> = map.keys().try_collect().await.unwrap();
+    assert_eq!(keys.len(), 3);
+    let values: HashSet<String> = map.values().try_collect().await.unwrap();
+    assert_eq!(values.len(), 3);
+}
+
+#[tokio::test]
+async fn local_store_mode_clear_reaches_others() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let a = local_only(&client().await, &name, SyncStrategy::Update).await;
+    let b = local_only(&client().await, &name, SyncStrategy::Update).await;
+    a.insert("k", "1").await.unwrap();
+    b.insert("k", "2").await.unwrap();
+    eventually("the update never arrived", || async {
+        a.local_len() == 1 && b.local_len() == 1
+    })
+    .await;
+    assert!(a.clear().await.unwrap());
+    eventually("the clear never arrived", || async {
+        b.len().await.unwrap() == 0
+    })
+    .await;
+    b.insert("j", "1").await.unwrap();
+    assert!(b.del().await.unwrap());
+    assert_eq!(b.local_len(), 0);
+    assert!(!b.del().await.unwrap());
+    assert!(!b.clear().await.unwrap());
+}
+
+#[tokio::test]
+async fn local_store_mode_uses_the_loader_and_the_writer() {
+    let _gate = shared().await;
+    let name = unique("lcm");
+    let store = MemoryStore::with(&[("1", "11")]);
+    let map: Map = client()
+        .await
+        .local_cached_map(name.clone())
+        .store_mode(StoreMode::Local)
+        .loader(store.clone())
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("11"));
+    assert_eq!(map.get("1").await.unwrap().as_deref(), Some("11"));
+    assert_eq!(store.loads(), 1);
+    assert_eq!(map.local_len(), 1);
+    assert!(!map.contains_key("2").await.unwrap());
+    assert_eq!(store.loads(), 2);
+    map.insert("a", "1").await.unwrap();
+    assert_eq!(store.write_calls(), vec![vec!["a"]]);
+    map.remove("a").await.unwrap();
+    assert_eq!(store.delete_calls(), vec![vec!["a"]]);
+    assert!(!redis_has(&name).await);
+}
+
+#[tokio::test]
+async fn local_store_mode_len_counts_values_only() {
+    let _gate = shared().await;
+    let map: Map = client()
+        .await
+        .local_cached_map(unique("lcm"))
+        .store_mode(StoreMode::Local)
+        .store_cache_miss(true)
+        .loader(MemoryStore::default())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(map.get("x").await.unwrap(), None);
+    assert_eq!(map.len().await.unwrap(), 0);
+    assert_eq!(map.local_len(), 1);
 }

@@ -33,6 +33,7 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `sync_strategy(..)` | `Invalidate` (default): other instances drop the entry. `Update`: they receive the new value. `None`: nothing is sent. |
 | `reconnection_strategy(..)` | what happens after the pub/sub connection comes back: `None` (default) keeps the cache, `Clear` empties it, `Load` drops the keys changed meanwhile, read from a 10 minute log in Redis, or everything when the instance was away longer |
 | `store_cache_miss(bool)` | also cache that a key is missing. Off by default. |
+| `store_mode(..)` | `LocalRedis` (default): entries live in Redis and in the local cache. `Local`: in the local cache only; see [Store mode](#store-mode). |
 | `loader(l)` | a `MapLoader` asked on a miss; see [Loaders and writers](/docs/guides/loaders-and-writers). None by default. |
 | `writer(w)` | a `MapWriter` that `insert` and `remove` call. None by default. |
 | `write_mode(m)` | `WriteMode::WriteThrough` (default), or `WriteMode::write_behind()`: 50 entries every second |
@@ -62,6 +63,17 @@ As in Redisson's `RedissonLocalCachedMap`:
 - With a loader, `get` and `contains_key` ask it when neither the local cache nor Redis has the key. A loaded value is stored like an `insert` (Redis, the local cache, and the message to the others) without calling the writer. A key the loader does not have is cached as missing only with `store_cache_miss(true)`; otherwise the loader is asked again next time.
 - With a writer, `insert` always calls `write`, and `remove` always calls `delete`, also for a missing key. `clear` and `del` call neither.
 - The writer is called after Redis changed. A write-through writer that still fails after its attempts gives `Error::Writer`, and Redis keeps the change.
+
+## Store mode
+
+With `store_mode(StoreMode::Local)`, Redisson's `StoreMode.LOCALCACHE`, the entries live only in the local cache of each instance. Redis carries the sync messages, the per-key lock while a loader is asked, and the write-behind queue, but holds no entry.
+
+- `get` and `contains_key` look at the local cache only, and ask the loader on a miss.
+- `insert` writes locally and returns the previous local value; `remove` forgets locally. Then each publishes the sync message of the `sync_strategy` (unless it is `None` and there is no `Load` reconnection), then calls the writer.
+- `len` and `is_empty` count the local entries that hold a value; cached misses do not count (Redisson counts them).
+- `iter`, `keys` and `values` stream a snapshot of the local entries.
+- `clear` and `del` empty the local cache, tell the others, and return whether the local cache held anything.
+- With `SyncStrategy::Invalidate`, a change on one instance drops the copy the others have, and that copy was their only one: they read `None` until they write the key themselves or a loader loads it. Use `SyncStrategy::Update` to hand them the new value instead.
 
 ## What it guarantees
 

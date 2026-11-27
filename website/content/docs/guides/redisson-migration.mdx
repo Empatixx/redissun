@@ -427,6 +427,7 @@ Since this version, `HashMapCache` uses Redisson's scripts, key names, value lay
 |---|---|
 | `getLocalCachedMap(LocalCachedMapOptions)` | `client.local_cached_map(name)….build().await` |
 | `LocalCachedMapOptions.loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)`, `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
+| `LocalCachedMapOptions.storeMode(LOCALCACHE_REDIS / LOCALCACHE)` | `.store_mode(StoreMode::LocalRedis / StoreMode::Local)` |
 | `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)` |
 | `destroy()` (write-behind) | `flush().await`, and dropping the map drains once more |
 

@@ -10,6 +10,8 @@ use crate::lua::Lua;
 use crate::object::{tagged, HasKey, Key};
 use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
+use futures::future::Either;
+use futures::stream;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -67,6 +69,16 @@ static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
     )
 });
 
+/// `del` in [`StoreMode::Local`]: Redis holds nothing to delete, so it only publishes `CLEAR` and returns whether the local cache held anything.
+static CLEAR_LOCAL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "if ARGV[2] ~= '0' then
+            redis.call('PUBLISH', ARGV[1], ARGV[3])
+        end
+        return tonumber(ARGV[4])",
+    )
+});
+
 static CLEAR_ALL: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
         "if redis.call('DEL', KEYS[1], KEYS[2]) > 0 and ARGV[2] ~= '0' then
@@ -99,6 +111,18 @@ pub enum ReconnectionStrategy {
     Clear,
     /// Every write also records the changed key in the sorted set `redissun__cache_updates_log:{name}` for 10 minutes. After a reconnect the keys changed since the last message are dropped, or the whole local cache when the instance was away longer than that or the map is gone.
     Load,
+}
+
+/// Where a [`LocalCachedMap`] keeps its entries, Redisson's `StoreMode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StoreMode {
+    /// In Redis and in the local cache. The default.
+    #[default]
+    #[doc(alias = "LOCALCACHE_REDIS")]
+    LocalRedis,
+    /// In the local cache only. Redis carries the sync messages, and the per-key lock when a loader is asked, but holds no entry. With [`SyncStrategy::Invalidate`], a change on one instance drops the only copy the others have.
+    #[doc(alias = "LOCALCACHE")]
+    Local,
 }
 
 /// Which local entry a [`LocalCachedMap`] drops when its cache is full, as Redisson's `EvictionPolicy`.
@@ -395,6 +419,7 @@ pub struct LocalCachedMapBuilder<K, V, C: Codec> {
     reconnection: ReconnectionStrategy,
     eviction: EvictionPolicy,
     store_cache_miss: bool,
+    store_mode: StoreMode,
     options: StoreOptions<K, V>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
@@ -411,6 +436,7 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             reconnection: ReconnectionStrategy::default(),
             eviction: EvictionPolicy::default(),
             store_cache_miss: false,
+            store_mode: StoreMode::default(),
             options: StoreOptions::default(),
             _marker: PhantomData,
         }
@@ -455,6 +481,13 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
     /// Also caches that a key is missing, so the next read of it costs no round trip. Off by default. With a loader, a key the loader does not have is cached as missing too.
     pub fn store_cache_miss(mut self, store: bool) -> Self {
         self.store_cache_miss = store;
+        self
+    }
+
+    /// Chooses where the entries live: [`StoreMode::LocalRedis`], the default, or [`StoreMode::Local`].
+    #[doc(alias = "storeMode")]
+    pub fn store_mode(mut self, mode: StoreMode) -> Self {
+        self.store_mode = mode;
         self
     }
 }
@@ -519,6 +552,7 @@ where
             sync: self.sync,
             reconnection: self.reconnection,
             store_cache_miss: self.store_cache_miss,
+            store_mode: self.store_mode,
             store,
             _marker: PhantomData,
         })
@@ -633,6 +667,7 @@ pub struct LocalCachedMap<K, V, C: Codec> {
     sync: SyncStrategy,
     reconnection: ReconnectionStrategy,
     store_cache_miss: bool,
+    store_mode: StoreMode,
     /// The loader and writer; `None` keeps every call as it is without them.
     store: Option<Arc<MapStore<K, V, C>>>,
     _marker: PhantomData<fn() -> (K, V)>,
@@ -650,6 +685,13 @@ impl<K, V, C: Codec> HasKey for LocalCachedMap<K, V, C> {
     }
 
     fn del_script(&self) -> Option<(&'static Lua, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
+        if self.store_mode == StoreMode::Local {
+            let held = self.local.len() > 0;
+            self.local.forget_all();
+            let mut arguments = self.clear_arguments();
+            arguments.push(Bytes::from(if held { "1" } else { "0" }));
+            return Some((&CLEAR_LOCAL, self.clear_keys(), arguments));
+        }
         self.local.forget_all();
         Some((&CLEAR_ALL, self.clear_keys(), self.clear_arguments()))
     }
@@ -664,6 +706,29 @@ impl<K, V, C: Codec> LocalCachedMap<K, V, C> {
         } else {
             "0"
         })
+    }
+
+    /// Whether a change is announced: the scripts' `mode != "0"`.
+    fn announces(&self) -> bool {
+        self.sync != SyncStrategy::None || self.reconnection == ReconnectionStrategy::Load
+    }
+
+    /// Whether the entries live in the local cache only.
+    fn local_only(&self) -> bool {
+        self.store_mode == StoreMode::Local
+    }
+
+    /// Publishes a sync message on the map's channel, routed by the channel's slot, as fred did.
+    async fn publish(&self, payload: Bytes) -> Result<()> {
+        let channel = channel(&self.key);
+        let mut cmd = redis::cmd("PUBLISH");
+        cmd.arg(&channel).arg(&payload[..]);
+        let _: i64 = self
+            .key
+            .core
+            .query(Request::new(cmd).key(channel.as_bytes()))
+            .await?;
+        Ok(())
     }
 
     fn clear_keys(&self) -> std::vec::Vec<String> {
@@ -711,10 +776,13 @@ where
         loaded
     }
 
-    /// Reads an encoded key: the local cache, then the master.
+    /// Reads an encoded key: the local cache, then the master unless the entries live locally only.
     pub(crate) async fn read_encoded(&self, k: &Bytes) -> Result<Option<V>> {
         if let Some(Some(value)) = self.local.lookup(k) {
             return Ok(Some(self.codec.decode(&value)?));
+        }
+        if self.local_only() {
+            return Ok(None);
         }
         let mut cmd = self.key.key_cmd("HGET");
         cmd.arg(&k[..]);
@@ -734,7 +802,7 @@ where
         self.remove_raw(k.clone()).await.map(drop)
     }
 
-    /// The local write and the `PUT` script; returns the previous encoded value.
+    /// The local write and the `PUT` script; returns the previous encoded value. Locally only, the sync message is published by itself and the previous value is the local one.
     async fn put_raw(&self, field: Bytes, value: Bytes) -> Result<Option<Bytes>> {
         let notice = match self.sync {
             SyncStrategy::Update => message(
@@ -744,6 +812,14 @@ where
             ),
             _ => message(&self.local.id, INVALIDATE, &[&field]),
         };
+        if self.local_only() {
+            let previous = self.local.lookup(&field).flatten();
+            self.local.write(field, Some(value));
+            if self.announces() {
+                self.publish(notice).await?;
+            }
+            return Ok(previous);
+        }
         self.local.write(field.clone(), Some(value.clone()));
         let [now, entry, keep] = self.log_arguments(&field);
         let written: Result<Option<Bytes>> = self
@@ -767,9 +843,17 @@ where
         written.inspect_err(|_| self.local.forget(&field))
     }
 
-    /// The local forget and the `REMOVE` script; returns the previous encoded value.
+    /// The local forget and the `REMOVE` script; returns the previous encoded value. Locally only, the invalidation is published by itself and the previous value is the local one.
     async fn remove_raw(&self, field: Bytes) -> Result<Option<Bytes>> {
         let notice = message(&self.local.id, INVALIDATE, &[&field]);
+        if self.local_only() {
+            let previous = self.local.lookup(&field).flatten();
+            self.local.forget(&field);
+            if self.announces() {
+                self.publish(notice).await?;
+            }
+            return Ok(previous);
+        }
         self.local.forget(&field);
         let [now, entry, keep] = self.log_arguments(&field);
         self.key
@@ -812,6 +896,13 @@ where
             Some(Some(value)) => return Ok(Some(self.codec.decode(&value)?)),
             Some(None) if self.store_cache_miss => return Ok(None),
             _ => {}
+        }
+        if self.local_only() {
+            if !self.loads() {
+                return Ok(None);
+            }
+            self.local.begin_read(&field);
+            return self.load_missing(field).await;
         }
         self.local.begin_read(&field);
         let mut cmd = self.key.key_cmd("HGET");
@@ -873,6 +964,13 @@ where
         if let Some(cached) = self.local.lookup(&field) {
             return Ok(cached.is_some());
         }
+        if self.local_only() {
+            if !self.loads() {
+                return Ok(false);
+            }
+            self.local.begin_read(&field);
+            return Ok(self.load_missing(field).await?.is_some());
+        }
         self.local.begin_read(&field);
         // From the master, as `get`: a miss read from a replica could be cached after the write that ends it.
         let mut cmd = self.key.key_cmd("HEXISTS");
@@ -886,18 +984,32 @@ where
         found
     }
 
-    /// Number of entries in Redis.
+    /// Number of entries in Redis. In [`StoreMode::Local`], the local entries that hold a value.
     pub async fn len(&self) -> Result<usize> {
+        if self.local_only() {
+            return Ok(self.local.store().entries().len());
+        }
         self.map.len().await
     }
 
-    /// Returns whether Redis holds no entry.
+    /// Returns whether Redis holds no entry. In [`StoreMode::Local`], whether no local entry holds a value.
     pub async fn is_empty(&self) -> Result<bool> {
+        if self.local_only() {
+            return Ok(self.local.store().entries().is_empty());
+        }
         self.map.is_empty().await
     }
 
-    /// Removes every entry for everybody; returns whether there was anything to remove. The other instances empty their local cache only when something was removed.
+    /// Removes every entry for everybody; returns whether there was anything to remove. The other instances empty their local cache only when something was removed. In [`StoreMode::Local`], it empties the local cache, tells the others, and returns whether the local cache held anything.
     pub async fn clear(&self) -> Result<bool> {
+        if self.local_only() {
+            let held = self.local.len() > 0;
+            self.local.forget_all();
+            if self.announces() {
+                self.publish(message(&self.local.id, CLEAR, &[])).await?;
+            }
+            return Ok(held);
+        }
         self.local.forget_all();
         self.key
             .del_with(&CLEAR_ALL, self.clear_keys(), self.clear_arguments())
@@ -927,17 +1039,7 @@ where
     /// Empties the local cache of this instance and tells every other instance to empty theirs, like Redisson's `clearLocalCache`. Redis is not changed. It returns once the message is published, without waiting for the others.
     pub async fn clear_local_everywhere(&self) -> Result<()> {
         self.local.forget_all();
-        let channel = channel(&self.key);
-        let mut cmd = redis::cmd("PUBLISH");
-        cmd.arg(&channel)
-            .arg(&message(&self.local.id, CLEAR, &[])[..]);
-        // Routed by the channel's slot, as fred did.
-        let _: i64 = self
-            .key
-            .core
-            .query(Request::new(cmd).key(channel.as_bytes()))
-            .await?;
-        Ok(())
+        self.publish(message(&self.local.id, CLEAR, &[])).await
     }
 
     /// Loads every key of the loader into the map, Redisson's `loadAll(replaceExistingValues, parallelism)`. A loaded value is cached here and announced like an [`insert`](LocalCachedMap::insert), without the writer. Without a loader it is an [`Error::Config`](crate::Error::Config).
@@ -965,18 +1067,39 @@ where
         }
     }
 
-    /// Streams every entry from Redis. It does not use or fill the local cache.
+    /// The encoded local entries that hold a value, for the streams in [`StoreMode::Local`].
+    fn snapshot(&self) -> std::vec::IntoIter<(Bytes, Bytes)> {
+        self.local.store().entries().into_iter()
+    }
+
+    /// Streams every entry from Redis. It does not use or fill the local cache. In [`StoreMode::Local`], it streams a snapshot of the local entries.
     pub fn iter(&self) -> impl Stream<Item = Result<(K, V)>> + '_ {
-        self.map.iter()
+        if self.local_only() {
+            return Either::Right(stream::iter(
+                self.snapshot()
+                    .map(|(k, v)| Ok((self.codec.decode(&k)?, self.codec.decode(&v)?))),
+            ));
+        }
+        Either::Left(self.map.iter())
     }
 
-    /// Streams every key from Redis.
+    /// Streams every key from Redis. In [`StoreMode::Local`], the keys of the local entries.
     pub fn keys(&self) -> impl Stream<Item = Result<K>> + '_ {
-        self.map.keys()
+        if self.local_only() {
+            return Either::Right(stream::iter(
+                self.snapshot().map(|(k, _)| self.codec.decode(&k)),
+            ));
+        }
+        Either::Left(self.map.keys())
     }
 
-    /// Streams every value from Redis.
+    /// Streams every value from Redis. In [`StoreMode::Local`], the values of the local entries.
     pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
-        self.map.values()
+        if self.local_only() {
+            return Either::Right(stream::iter(
+                self.snapshot().map(|(_, v)| self.codec.decode(&v)),
+            ));
+        }
+        Either::Left(self.map.values())
     }
 }
