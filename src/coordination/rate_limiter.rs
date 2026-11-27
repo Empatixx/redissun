@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::lua::Lua;
-use crate::object::{millis, Key, Object};
+use crate::object::{millis, suffix_name, Key, Object};
 use crate::pending::Pending;
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -252,14 +252,6 @@ pub(crate) static PERSIST_ANY: LazyLock<Lua> = LazyLock::new(|| {
         return result",
     )
 });
-
-pub(crate) fn suffix_name(name: &str, suffix: &str) -> String {
-    if name.contains('{') {
-        format!("{name}:{suffix}")
-    } else {
-        format!("{{{name}}}:{suffix}")
-    }
-}
 
 fn now_millis() -> Bytes {
     let now = SystemTime::now()

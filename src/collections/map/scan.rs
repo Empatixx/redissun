@@ -36,6 +36,20 @@ impl MapScan {
         self.page_size = page_size;
         self
     }
+
+    /// The pattern set with [`MapScan::pattern`], if any.
+    pub(crate) fn match_pattern(&self) -> Option<&str> {
+        self.pattern.as_deref()
+    }
+
+    /// The page size, with zero read as the default of 100.
+    pub(crate) fn page(&self) -> usize {
+        if self.page_size == 0 {
+            DEFAULT_PAGE
+        } else {
+            self.page_size
+        }
+    }
 }
 
 /// Streams the entries `scan` asks for, cursor after cursor until the server says the scan is complete.
@@ -49,12 +63,7 @@ where
     V: DeserializeOwned + 'a,
     C: Codec,
 {
-    let page = if scan.page_size == 0 {
-        DEFAULT_PAGE
-    } else {
-        scan.page_size
-    };
-    let page = i64::try_from(page).unwrap_or(i64::MAX);
+    let page = i64::try_from(scan.page()).unwrap_or(i64::MAX);
     stream::try_unfold(
         (Some(Bytes::from_static(b"0")), scan.pattern),
         move |(cursor, pattern)| async move {

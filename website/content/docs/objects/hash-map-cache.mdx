@@ -18,27 +18,84 @@ let found = sessions.get("abc").await?;
 
 | Method | Notes |
 |---|---|
-| `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
+| `insert(&k, &v)` | no time limit. Replaces the entry and clears the limits the old entry had, like `HashMap::insert`. Returns the old live value. |
 | `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl`. Zero means no limit. |
 | `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` and `contains_key` starts the time again. |
-| `try_insert(&k, &v)` | inserts only when there is no live entry, like Redisson's `fastPutIfAbsent`. It takes `.ttl(..)` and `.max_idle(..)` too. Unlike `HashMap::try_insert` it returns a `bool`, because Redisson's script only reports whether it stored the entry. |
+| `try_insert(&k, &v)` | inserts only when there is no live entry, like Redisson's `putIfAbsent`. Returns `None` when it stored the entry, or `Some(live value)` and stores nothing, like `HashMap::try_insert`. It takes `.ttl(..)` and `.max_idle(..)` too. |
+| `set(&k, &v)` | the same write as `insert`, with `.ttl(..)` and `.max_idle(..)` too, but returns `true` when there was no live entry (exactly when `insert` returns `None`) instead of the old value. Redisson's `fastPut`. |
+| `replace(&k, &v)` | replaces the value of a live entry and returns the old one; a missing or expired entry is left alone. Keeps the entry's limits. |
+| `compare_and_set(&k, &old, &new)` | sets `new` only when the live entry holds `old`. Keeps the limits. |
+| `remove_if_eq(&k, &v)` | removes the live entry only when it holds `v` |
+| `remove_many(&[&k, ..])` | removes several entries and returns how many were in Redis (an expired entry not cleaned up yet counts too, as in Redisson) |
+| `incr_by(&k, n)`, `incr_by_float(&k, x)` | adds to the number stored under the key, creating it, and returns the result. Keeps the limits. |
+| `extend(entries)` | inserts all entries, each as `insert` would. It takes `.ttl(..)`, `.max_idle(..)` and `.batch_size(n)` (one atomic script per batch). |
 | `get(&k)`, `contains_key(&k)` | never show an expired entry. Both start the idle time again and count as a use for the size limit. |
+| `get_many(&[&k, ..])` | the values in key order, `None` for a missing or expired key. Starts the idle time of each live entry again. |
+| `contains_value(&v)` | whether a live entry holds `v`, compared by encoded bytes; reads every value. As in Redisson only the first entry holding `v` counts, so an expired one gives `false`. |
+| `value_len(&k)` | length of the encoded value, the same number `HashMap::value_len` gives; `0` when missing. Does not check expiry. |
+| `random_keys(n)`, `random_entries(n)` | up to `n` random live keys or entries; expired ones are left out of the `n` picked |
+| `to_hash_map()` | every live entry in one call |
 | `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
+| `expire_entry(&k)`, `expire_entries(&[&k, ..])` | set new limits on live entries, starting now: `.ttl(d)`, `.max_idle(d)`, and `.if_not_set()` to touch only entries without a limit. Without `.ttl`/`.max_idle` both limits are removed. Return whether the entry was changed (`bool`) or how many were (`usize`); a missing or expired entry is not changed. Count as a use for the size limit. |
+| `peek(&k)`, `peek_many(&[&k, ..])` | read without it counting as a read, like `lru::LruCache::peek`: they honour the time to live but ignore max idle, do not start the idle time again and are not a use for the size limit |
+| `entry(&k)`, `entry(&k).ttl(d)` | the key's value under its lock, like `HashMap::entry`. See "Entries" below. |
+| `lease(&k, time)` | the value, or a lease on the missing key so that only one caller loads it (`Lease::Hit`, `Lease::Acquired(guard)`, `Lease::Held`). See "Leases" below. |
+| `invalidate(&k)` | deletes the entry and any lease on the key; a pending lease then stores nothing |
+| `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` | the object Redisson keeps for one key, the same names as Redisson's `getLock(key)` and friends (`{name}:<key hash>:lock`) |
 | `len()`, `is_empty()`, `clear()` | `len` is the number of entries in Redis; as in Redisson it counts expired entries until the clean-up deletes them |
 | `iter()`, `keys()`, `values()` | streams of live entries, 100 per page. Expired entries are skipped page by page, and returned entries start their idle time again. |
-| `evict_expired()` | deletes expired entries now and returns how many |
+| `iter_with(scan)`, `keys_with(scan)`, `values_with(scan)` | the same, with a `MapScan` pattern (matched against the encoded key) and page size |
 | `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
 | `init_max_size(n, mode)` | the same, but only when no limit was set before |
-| `events()`, `events_of(kinds)` | start listening to changes. See below. |
+| `events()`, `events_of(kinds)` | start listening to entry events (`EntryEvent`). Unlike on `HashMap`, these are not keyspace notifications. See below. |
+| `keyspace_events()`, `keyspace_events_of(kinds)` | keyspace notifications of the hash (`MapEvent`), what `HashMap::events()` returns. See below. |
+| `migrate_from_0_23()` | moves data that redissun 0.23 and earlier wrote into the current layout, `.batch_size(n)` old entries per call (1000 by default); call it until it returns `0`. See [Upgrading redissun](/docs/guides/upgrading). |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
 
+### Writes
+
+Every plain write (`insert`, `set`, `entry`, `extend` without `.ttl()`/`.max_idle()`) replaces the entry and clears its limits, the way `HashMap::insert` replaces the value. `set` differs from `insert` only in returning `bool`. `replace`, `compare_and_set` and `incr_by` change the value of an existing entry and keep its limits.
+
+### Entries
+
+`entry(&k).await?` takes the key's lock (the one `lock(&k)` returns, which Redisson's `compute` also takes) and gives a `hash_map::Entry`, the same type `HashMap::entry` returns: `and_modify`, `or_insert`, `or_insert_with`, `or_default`, and on `Occupied` `get`, `insert`, `remove`, `into_value`. An expired entry is `Vacant`.
+
+- `entry(&k).ttl(d)` writes with that time to live, Redisson's `compute(k, ttl, f)` and `computeIfAbsent(k, ttl, f)`. Like Redisson's compute, it takes no max idle.
+- A plain `entry(&k)` writes like `insert` and clears the entry's time to live and max idle. Redisson's `compute(k, f)` keeps them.
+- `remove()` on an occupied entry publishes `Removed` to entry listeners.
+
+### Leases
+
+A lease stops a crowd of callers from all loading the same missing value (Redisson's `RLeasedMap`). `lease(&k, time)` reads the key; on a miss it takes a lease for `time`, and everybody else gets `Lease::Held` until the lease is finished or its time is up.
+
+```rust
+use redissun::Lease;
+
+match cache.lease("a", Duration::from_secs(5)).await? {
+    Lease::Hit(value) => use_it(value),
+    Lease::Acquired(guard) => {
+        let value = load("a").await?;
+        guard.insert(&value).ttl(Duration::from_secs(60)).await?;
+    }
+    _ => { /* Lease::Held: someone else is loading it; retry later or read the source */ }
+}
+```
+
+- `guard.insert(&v)` takes `.ttl(..)` and `.max_idle(..)` and returns `true` when it stored the value and freed the lease. `false` means the lease's time was up, or a plain `insert`/`set`, `invalidate` or a newer lease took it over, and nothing was stored. As in Redisson, `false` also comes back when the lease still held but a live entry had been written meanwhile (a write with `.ttl()` keeps the lease); the value was then stored over it.
+- `guard.remove()` deletes the entry and the lease and returns whether an entry was there.
+- Dropping the guard does nothing: the lease ends by itself after `time`, and until then other callers get `Lease::Held`.
+- To finish a lease in another process, send it `guard.token()` and call `set(&k, &v).lease(token)` there (also with `.ttl(..)`/`.max_idle(..)`). It returns what `guard.insert` returns.
+- `invalidate(&k)` is for a caller without a lease, when the source changed: it deletes the entry and the lease, so a pending `guard.insert` stores nothing.
+- A plain `insert`/`set` frees the lease on its key; a write with `.ttl()`/`.max_idle()` and `extend` do not, as in Redisson.
+
 ## How expiry works
 
-- Time comes from the Redis server, so programs with different clocks agree. (Redisson uses the clock of the client.)
+- As in Redisson, time comes from the clock of the client that runs the command: a write stores `now + ttl` from its own clock, and a read hides an entry whose deadline has passed by its own clock. Keep the clocks of your clients in sync.
+- A plain write (`insert` without `.ttl()`/`.max_idle()`) replaces the entry and clears its limits, the way `HashMap::insert` replaces the value. A zero `ttl` or `max_idle` means no limit, as in Redisson.
 - An expired entry is hidden at once, but reads do not delete it.
-- A background task deletes expired entries, like Redisson's eviction task. It starts when you get the cache from the client and runs once per cache name and client. It first runs after `eviction_interval` (5 seconds by default) and cleans up to 100 entries from each set per run. As in Redisson, the pause grows by half (up to 30 minutes) after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. A lock key `redissun__execute_task_once_latch:{name}` that lives as long as the pause (at most 30 seconds) makes sure only one client cleans a cache per run.
+- A background task deletes expired entries, like Redisson's eviction task. It starts when you get the cache from the client and runs once per cache name and client. It first runs after `eviction_interval` (5 seconds by default) and cleans up to 100 entries from each set per run. As in Redisson, the pause grows by half (up to 30 minutes) after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. A lock key `redissun__execute_task_once_latch:{name}`, set with `SETNX` and kept for the pause in whole seconds (at least 1, at most 30), makes sure only one client cleans a cache per run, exactly as in Redisson.
 - The task stops when the client is dropped.
 
 ## Maximum size
@@ -54,41 +111,60 @@ When the cache is full, inserts drop entries: with `Lru` the one that was used l
 ## Listening to changes
 
 ```rust
-use redissun::Event;
+use redissun::EntryEvent;
 
 let mut events = cache.events().await?;
 while let Ok(event) = events.recv().await {
     match event {
-        Event::Created { key, value } => {}
-        Event::Updated { key, value, previous } => {}
-        Event::Removed { key, value } => {}
-        Event::Expired { key, value } => {}
+        EntryEvent::Created { key, value } => {}
+        EntryEvent::Updated { key, value, previous } => {}
+        EntryEvent::Removed { key, value } => {}
+        EntryEvent::Expired { key, value } => {}
         _ => {}
     }
 }
 ```
 
-- You get the changes made by every client, not only yours. `events_of(&[EventKind::Removed])` listens to some kinds only.
+- You get the changes made by every client, not only yours. `events_of(&[EntryEventKind::Removed])` listens to some kinds only.
 - `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries the clean-up deleted.
+- The payload is Redisson's, so a listener also sees the changes Redisson clients make, and Redisson listeners see redissun's. As Redisson does, the first listener asks the server for its OS with `INFO server` to know how the lengths in the payload are written.
 - As in Redisson, each kind has its own channel, and the first listener sets `has-listeners` in the options hash. From then on every write publishes its changes, until the cache is deleted with `del`. Expired entries are always published by the clean-up.
 - Events of one kind arrive in order. When events of several kinds are waiting, `recv` returns removals first, then creations, updates and expirations.
 - A listener has a buffer of 256 events per kind. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
 - `into_stream()` turns the listener into a `Stream`.
+- `events()` here returns entry events, Redisson's `MapEntryListener`. On a `HashMap`, `events()` returns keyspace notifications; on a cache those come from `keyspace_events()`.
+
+## Keyspace events
+
+```rust
+use redissun::MapEvent;
+
+let mut events = cache.keyspace_events().await?;
+if let MapEvent::Put { key } = events.recv().await? {}
+```
+
+- `keyspace_events()` and `keyspace_events_of(&[MapEventKind])` are Redisson's `MapPutListener`, `MapIncrListener`, `MapRemoveListener`, `DeletedObjectListener` and `ExpiredObjectListener` on the cache's hash. They return the same `MapEvents` as `HashMap::events()`, with the same server setting: `notify-keyspace-events` with `Eh` for field events, `g` for deletes, `x` for expiry, and `T` (Redis 8.8 or newer) for the changed key's name.
+- The temporary field `redissun__temp_val` that an increment writes and deletes is left out of subkey events. Without `T`, such writes still show up as events with `key: None`.
 
 ## How it is stored
 
-The keys follow Redisson's `RMapCache`; the values are stored in redissun's own format.
+The keys, the values and the events are Redisson's `RMapCache` layout with the `redissun` prefix, so Redisson and redissun clients share the same data. Times are Unix milliseconds from the client clock. When the name contains `{`, it is used as it is (`{t}:cache` gives `redissun__timeout__set:{t}:cache` and `{t}:cache:redissun_options`), otherwise it is wrapped in `{}`.
 
 | Key | Type | Content |
 |---|---|---|
-| `{name}` | hash | the values, each with its idle time in front |
+| `name` | hash | the values, each stored as `struct.pack('dLc0', maxIdleMs, #value, value)`: the max idle time in ms as an 8-byte double (0 for none), the length of the value as the server's native `unsigned long` (8 bytes on Linux and macOS, 4 on Windows), then the value |
 | `redissun__timeout__set:{name}` | sorted set | entry and the time when its time to live ends |
-| `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends |
-| `redissun__map_cache_last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
-| `redissun__map_cache_options:{name}` | hash | `max-size`, `mode` and `has-listeners` |
+| `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends, moved forward on each read |
+| `redissun__map_cache__last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
+| `{name}:redissun_options` | hash | `max-size`, `mode` and `has-listeners` |
+| `redissun__map__lease:{name}:<key>` | string | a lease on one entry |
 
-Events are published on the channels `redissun_map_cache_created:{name}`, `redissun_map_cache_updated:{name}`, `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`.
+Events are published on the channels `redissun_map_cache_created:{name}`, `redissun_map_cache_updated:{name}`, `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`, each as `struct.pack('Lc0Lc0', #key, key, #value, value)`, and an update with the old value as a third part.
+
+### Upgrading from 0.23
+
+Data written by redissun 0.23 and earlier uses another layout and cannot be read until it is moved with `while cache.migrate_from_0_23().batch_size(1000).await? > 0 {}`. [Upgrading redissun](/docs/guides/upgrading) has the steps.
 
 ## Object methods
 
-`del`, `expire`, `persist` and `rename` apply to all five Redis keys. As in Redisson, `expire` also covers the sorted sets that are created later, and it returns whether the cache itself exists. `clear` deletes the entries but keeps the size limit. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.
+`del`, `expire`, `persist` and `rename` apply to all five Redis keys. As in Redisson, `expire` also covers the sorted sets that are created later, and it returns whether the cache itself exists. `clear` deletes the entries but keeps the size limit. The other keys carry the name as a hash tag, so they are in the slot of `name` in Redis Cluster.

@@ -382,10 +382,39 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 |---|---|
 | `put(k, v)` | `insert(&k, &v)` |
 | `put(k, v, ttl, unit)` | `insert(&k, &v).ttl(ttl)` |
-| `fastPutIfAbsent(k, v)`, `putIfAbsent(k, v)` | `try_insert(&k, &v)`, returns whether it stored the entry |
+| `fastPutIfAbsent(k, v)`, `putIfAbsent(k, v)` | `try_insert(&k, &v)`: `None` when it stored the entry, `Some(live value)` when it stored nothing, like `HashMap::try_insert` |
+| `fastPut(k, v[, ttl, unit[, maxIdle, unit]])` | `set(&k, &v)[.ttl(ttl)][.max_idle(idle)]` → `bool`; clears the TTL, unlike Redisson's `fastPut` |
+| `replace(k, v)`, `fastReplace(k, v)` | `replace(&k, &v)` → `Option<V>`; keeps the limits |
+| `putIfExists(k, v)`, `fastPutIfExists(k, v)` | `replace(&k, &v)`; keeps the idle time, where Redisson's `putIfExists` resets it |
+| `replace(k, old, new)` | `compare_and_set(&k, &old, &new)` |
+| `remove(k, v)` | `remove_if_eq(&k, &v)` |
+| `fastRemove(k...)` | `remove_many(&[&k, ..])` → `usize` |
+| `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)` |
+| `putAll(map[, ttl, unit[, maxIdle, unit]])`, `putAll(map, batchSize)` | `extend(entries)[.ttl(ttl)][.max_idle(idle)][.batch_size(n)]`; clears the TTL without `.ttl()`, unlike Redisson's `putAll(map)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
+| `expireEntry(k, ttl, maxIdle)`, `updateEntryExpiration(k, ttl, unit, maxIdle, unit)` | `expire_entry(&k)[.ttl(ttl)][.max_idle(idle)]` → `bool`; leaving both out is Redisson's `expireEntry(k, ZERO, ZERO)` |
+| `expireEntryIfNotSet(k, ttl, maxIdle)` | `expire_entry(&k).ttl(ttl).if_not_set()` |
+| `expireEntries(keys, ttl, maxIdle)`, `expireEntriesIfNotSet(keys, ttl, maxIdle)` | `expire_entries(&[&k, ..])[.ttl(ttl)][.max_idle(idle)][.if_not_set()]` → `usize` |
+| `getWithTTLOnly(k)` | `peek(&k)` |
+| `getAllWithTTLOnly(keys)` | `peek_many(&[&k, ..])` → `Vec<Option<V>>` in key order |
+| `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `hash_map::Entry`; a write clears the entry's TTL and max idle, unlike Redisson's `compute`, which keeps them |
+| `compute(k, ttl, f)`, `computeIfAbsent(k, ttl, f)` | `entry(&k).ttl(ttl)` |
+| `getWithLease(k, leaseTime)` | `lease(&k, time)` → `Lease::Hit(v)`, `Lease::Acquired(guard)` or `Lease::Held`; the other holder's token is not returned |
+| `putWithLease(k, v[, ttl[, maxIdle]], token)` | `guard.insert(&v)[.ttl(ttl)][.max_idle(idle)]` → `bool`; in another process `set(&k, &v).lease(token)` with `guard.token()` |
+| `removeWithLease(k)` | `guard.remove()`, or `invalidate(&k)` without a lease |
+| `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |
+| `getAll(keys)` | `get_many(&[&k, ..])` → `Vec<Option<V>>` in key order |
+| `containsValue(v)` | `contains_value(&v)` |
+| `valueSize(k)` | `value_len(&k)`: the encoded value without Redisson's 16-byte header |
+| `randomKeys(n)`, `randomEntries(n)` | `random_keys(n)`, `random_entries(n)` |
+| `readAllMap()`, `readAllEntrySet()`, `readAllKeySet()`, `readAllValues()` | `to_hash_map()` |
+| `keySet(pattern, count)`, `values(pattern, count)`, `entrySet(pattern, count)` | `keys_with(MapScan::new().pattern(p).page_size(n))`, `values_with(..)`, `iter_with(..)` |
+| `addListener(MapEntryListener)` (`EntryCreatedListener`, …) | `events()`, `events_of(&[EntryEventKind])` → `EntryEvents` |
+| `addListener(MapPutListener / MapIncrListener / MapRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `keyspace_events()`, `keyspace_events_of(&[MapEventKind])` → `MapEvents` (what `HashMap::events()` returns) |
 
-Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, `trySetMaxSize(n, mode)` is `init_max_size(n, mode)`, and `addListener(...)` is `events()` or `events_of(kinds)` followed by `recv()`. Redisson takes expiry times from the client clock; redissun takes them from the Redis server.
+Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, `trySetMaxSize(n, mode)` is `init_max_size(n, mode)`, and listeners are read with `recv()`. Both take expiry times from the client clock.
+
+Since this version, `HashMapCache` uses Redisson's scripts, key names, value layout and event payload, so Redisson and redissun clients can share a cache. Data written by redissun 0.23 and earlier is in another layout and must be moved with `migrate_from_0_23()` before the new version reads it; listeners of the two versions do not understand each other's events. [Upgrading redissun](/docs/guides/upgrading) has the steps.
 
 ## VecDeque blocking
 

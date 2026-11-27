@@ -1,6 +1,6 @@
 //! The names of the objects Redisson keeps per map key (`RMap.getLock(key)` and friends).
 
-use crate::coordination::rate_limiter::suffix_name;
+use crate::object::suffix_name;
 use highway::{HighwayHash, HighwayHasher};
 
 /// The HighwayHash key of Redisson's `misc.Hash`, shared with the bloom filter.
@@ -44,6 +44,109 @@ pub(crate) fn map_key_name(map_name: &str, encoded_key: &[u8], suffix: &str) -> 
         &format!("{}:{suffix}", hash128_base64(encoded_key)),
     )
 }
+
+/// The objects Redisson keeps per map key, for a map type with the fields `key: Key` and `codec: C`: `fn per_key` and the public `lock`, `fair_lock`, `rw_lock`, `semaphore`, `count_down_latch` and `permit_expirable_semaphore`. Invoke it inside an `impl` block whose `K` and `C` are the map's key type and codec.
+macro_rules! per_key_objects {
+    () => {
+        /// The key of the object Redisson keeps for map key `k` under `suffix`.
+        fn per_key<Q>(&self, k: &Q, suffix: &str) -> $crate::error::Result<$crate::object::Key>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            let encoded = self.codec.encode(k)?;
+            Ok($crate::object::Key::new(
+                self.key.core.clone(),
+                $crate::collections::map::key_hash::map_key_name(self.key.name(), &encoded, suffix),
+            ))
+        }
+
+        /// The [`Lock`](crate::Lock) of one key of the map, Redisson's `getLock(key)`. A Redisson client locking the same key of the same map takes the same lock.
+        #[doc(alias = "getLock")]
+        pub fn lock<Q>(&self, k: &Q) -> $crate::error::Result<$crate::locks::Lock>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            Ok($crate::locks::Lock::new(self.per_key(k, "lock")?))
+        }
+
+        /// The [`FairLock`](crate::FairLock) of one key of the map, Redisson's `getFairLock(key)`.
+        #[doc(alias = "getFairLock")]
+        pub fn fair_lock<Q>(
+            &self,
+            k: &Q,
+        ) -> $crate::error::Result<$crate::locks::fair_lock::FairLock>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            Ok($crate::locks::fair_lock::FairLock::new(
+                self.per_key(k, "fairlock")?,
+            ))
+        }
+
+        /// The [`RwLock`](crate::RwLock) of one key of the map, Redisson's `getReadWriteLock(key)`.
+        #[doc(alias = "getReadWriteLock")]
+        pub fn rw_lock<Q>(&self, k: &Q) -> $crate::error::Result<$crate::locks::rw_lock::RwLock>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            Ok($crate::locks::rw_lock::RwLock::new(
+                self.per_key(k, "rw_lock")?,
+            ))
+        }
+
+        /// The [`Semaphore`](crate::Semaphore) of one key of the map, Redisson's `getSemaphore(key)`.
+        #[doc(alias = "getSemaphore")]
+        pub fn semaphore<Q>(
+            &self,
+            k: &Q,
+        ) -> $crate::error::Result<$crate::coordination::semaphore::Semaphore>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            Ok($crate::coordination::semaphore::Semaphore::new(
+                self.per_key(k, "semaphore")?,
+            ))
+        }
+
+        /// The [`CountDownLatch`](crate::CountDownLatch) of one key of the map, Redisson's `getCountDownLatch(key)`.
+        #[doc(alias = "getCountDownLatch")]
+        pub fn count_down_latch<Q>(
+            &self,
+            k: &Q,
+        ) -> $crate::error::Result<$crate::coordination::latch::CountDownLatch>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            Ok($crate::coordination::latch::CountDownLatch::new(
+                self.per_key(k, "countdownlatch")?,
+            ))
+        }
+
+        /// The [`PermitExpirableSemaphore`](crate::PermitExpirableSemaphore) of one key of the map, Redisson's `getPermitExpirableSemaphore(key)`.
+        #[doc(alias = "getPermitExpirableSemaphore")]
+        pub fn permit_expirable_semaphore<Q>(
+            &self,
+            k: &Q,
+        ) -> $crate::error::Result<$crate::coordination::permit_semaphore::PermitExpirableSemaphore>
+        where
+            K: ::std::borrow::Borrow<Q>,
+            Q: ::serde::Serialize + ?Sized,
+        {
+            Ok(
+                $crate::coordination::permit_semaphore::PermitExpirableSemaphore::new(
+                    self.per_key(k, "permitexpirablesemaphore")?,
+                ),
+            )
+        }
+    };
+}
+pub(crate) use per_key_objects;
 
 #[cfg(test)]
 mod tests {

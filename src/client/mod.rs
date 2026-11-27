@@ -247,10 +247,7 @@ impl<C: Codec> Client<C> {
     /// Returns the [`HashMapCache`] stored under `name`.
     pub fn hash_map_cache<K, V>(&self, name: impl Into<Arc<str>>) -> HashMapCache<K, V, C> {
         let name: Arc<str> = name.into();
-        HashMapCache::new(
-            Key::new(self.core.clone(), tagged(&name)),
-            self.codec.clone(),
-        )
+        HashMapCache::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Lock`] named `name`.

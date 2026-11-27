@@ -54,6 +54,9 @@ pub(crate) struct Core {
     pub(crate) adders: crate::coordination::adder::Registry,
     /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
     pub(crate) batch_connections: Arc<tokio::sync::Semaphore>,
+    /// How the server writes lengths in `struct.pack` payloads, read with `INFO server` when the first map cache listener is added.
+    pub(crate) map_cache_length_prefix:
+        tokio::sync::OnceCell<crate::collections::hash_map_cache::LengthPrefix>,
 }
 
 impl Core {
@@ -88,6 +91,7 @@ impl Core {
             sharded: Default::default(),
             adders: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
+            map_cache_length_prefix: tokio::sync::OnceCell::new(),
         });
         if !startup.ping_interval.is_zero() {
             let ping = tokio::spawn(ping_loop(Arc::downgrade(&core), startup.ping_interval));

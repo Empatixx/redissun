@@ -1,4 +1,5 @@
 use crate::client::core::{Core, Evictor};
+use crate::client::request::Request;
 use crate::error::Result;
 use crate::lua::Lua;
 use bytes::Bytes;
@@ -25,7 +26,20 @@ pub(crate) fn arguments(latch: Option<Duration>) -> Vec<Bytes> {
     ]
 }
 
-pub(crate) fn schedule(core: &Arc<Core>, task: String, script: &'static Lua, keys: Vec<String>) {
+/// The arguments of an eviction script for one run, given the latch time of that run (`None` when it runs without a latch).
+pub(crate) type Arguments = fn(Option<Duration>) -> Vec<Bytes>;
+
+/// Schedules the clean-up `task` of one object, unless it already runs in this client.
+///
+/// While any of the `wait_for` keys exists (they must share the slot of `keys`), a run skips the script; once one check finds none of them, the task stops checking. An empty `wait_for` never waits.
+pub(crate) fn schedule(
+    core: &Arc<Core>,
+    task: String,
+    script: &'static Lua,
+    keys: Vec<String>,
+    args: Arguments,
+    wait_for: Vec<String>,
+) {
     let Ok(runtime) = Handle::try_current() else {
         return;
     };
@@ -40,6 +54,8 @@ pub(crate) fn schedule(core: &Arc<Core>, task: String, script: &'static Lua, key
         Arc::downgrade(core),
         script,
         keys,
+        args,
+        wait_for,
         core.eviction_interval,
     ));
     tasks.insert(
@@ -89,16 +105,29 @@ impl Pacing {
     }
 }
 
-async fn run(core: Weak<Core>, script: &'static Lua, keys: Vec<String>, min: Duration) {
+async fn run(
+    core: Weak<Core>,
+    script: &'static Lua,
+    keys: Vec<String>,
+    args: Arguments,
+    mut wait_for: Vec<String>,
+    min: Duration,
+) {
     let mut pacing = Pacing::new(min);
     loop {
         tokio::time::sleep(pacing.delay).await;
         let Some(core) = core.upgrade() else {
             return;
         };
+        if !wait_for.is_empty() {
+            if !nothing_exists(&core, &wait_for).await {
+                continue;
+            }
+            wait_for = Vec::new();
+        }
         let latch = pacing.delay.min(MAX_LATCH);
         let outcome: Result<i64> = core
-            .eval_once(script, keys.clone(), arguments(Some(latch)))
+            .eval_once(script, keys.clone(), args(Some(latch)))
             .await;
         drop(core);
         if let Ok(size) = outcome {
@@ -107,6 +136,19 @@ async fn run(core: Weak<Core>, script: &'static Lua, keys: Vec<String>, min: Dur
             }
         }
     }
+}
+
+/// Whether none of `keys` exists, with one `EXISTS` routed by the first key; an error counts as "something may exist".
+async fn nothing_exists(core: &Core, keys: &[String]) -> bool {
+    let Some(first) = keys.first() else {
+        return true;
+    };
+    let mut cmd = redis::cmd("EXISTS");
+    for key in keys {
+        cmd.arg(key);
+    }
+    let found: Result<i64> = core.query(Request::new(cmd).key(first.as_bytes())).await;
+    matches!(found, Ok(0))
 }
 
 #[cfg(test)]

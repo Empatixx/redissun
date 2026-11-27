@@ -238,6 +238,8 @@ impl<V, C: Codec> HashSetCache<V, C> {
             format!("redissun__set_cache_eviction:{}", set.key.redis_key()),
             &EVICT,
             set.eviction_keys(),
+            eviction::arguments,
+            Vec::new(),
         );
         set
     }

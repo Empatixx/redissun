@@ -1,6 +1,6 @@
-use crate::coordination::rate_limiter::suffix_name;
 use crate::error::{Error, Result};
 use crate::lua::Lua;
+use crate::object::suffix_name;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use std::fmt;

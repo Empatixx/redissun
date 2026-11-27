@@ -1,0 +1,49 @@
+---
+title: Upgrading redissun
+description: What to do with stored data when you move to a newer version.
+---
+
+Every release that changes how data is stored in Redis gets a section here, newest first. Each section says what changed for each object and which helper or step moves the old data. A release that is not listed here reads the data of the version before it as it is.
+
+## 0.23 → 0.24
+
+### Stored data
+
+`HashMapCache` now stores its data the way Redisson's `RMapCache` does, so Redisson and redissun clients can share a cache. Every other object is unchanged.
+
+`<name>` is the name passed to `client.hash_map_cache(name)`, and `<tag>` is `{<name>}`, or `<name>` itself when it already contains `{`.
+
+| What | 0.23 | 0.24 |
+|---|---|---|
+| Main hash | `{<name>}` (or `<name>` with a hash tag) | `<name>` |
+| Value bytes | text `<idleMs>:<value>` | `struct.pack('dLc0', idleMs, #value, value)` |
+| Last-access set | `redissun__map_cache_last_access__set:<tag>` | `redissun__map_cache__last_access__set:<tag>` |
+| Options hash | `redissun__map_cache_options:<tag>` | `<tag>:redissun_options` |
+| Deadlines | from the server clock | from the client clock |
+| Event payloads | text with decimal lengths | binary, with the lengths as `struct.pack('L')` |
+
+The timeout and idle sets, their scores and the event channels keep their names. Lease keys (`redissun__map__lease:<tag>:<key>`) are new. All keys of one cache stay in one slot in Redis Cluster.
+
+### What to run
+
+1. Stop every 0.23 client.
+2. For each `HashMapCache`, from one 0.24 client, run the migration until it returns `0`, before any other 0.24 client uses that cache:
+
+   ```rust
+   let cache = client.hash_map_cache::<String, User>("sessions");
+   while cache.migrate_from_0_23().batch_size(1000).await? > 0 {}
+   ```
+
+3. Start the 0.24 clients.
+
+Each call handles up to `batch_size` old entries: it moves the live ones, with their time to live, max idle time and use score, and drops the expired ones. It returns how many it handled. It runs as atomic scripts that each scan at most ten times `batch_size` fields of the hash, so a cache that is mostly in the new layout does not block Redis for long either. The last call also moves the last-access set and the size limit (`max-size`, `mode`) to their new keys. A smaller `batch_size` blocks Redis for less time per script and takes more calls.
+
+No 0.24 client deletes expired entries before the migration is done: that would drop the deadlines of entries that are still in the old layout, and the migration would then move them as live. Until the first call, the background clean-up of a 0.24 client skips its runs while the old options hash (`redissun__map_cache_options:{name}`), the old last-access set or, for a name without `{`, the old main hash (`{name}`) exists, and stops checking once it finds none of them. Every call of the migration also holds the clean-up latch of the cache for 30 seconds, and the last call frees it, so do not pause for more than 30 seconds between calls. One case cannot be detected: a name with a hash tag whose 0.23 cache had no size limit keeps its old data only in the main hash, which has the same name in both layouts; for such a cache, start the loop right after creating the cache handle.
+
+The whole migration is not atomic. Until the loop has returned `0`, part of the data is in each layout, so do not mix 0.23 and 0.24 clients and do not write to the cache from 0.24 clients: a 0.23 client cannot read the new layout, and a 0.24 client gets a script error on an old value under a name with a hash tag. Event listeners of 0.23 and 0.24 do not understand each other's payloads.
+
+Running the loop again changes nothing. For a name without `{` it returns `0` at once; for a name with a hash tag it scans the whole hash once more, in scripts of at most ten times `batch_size` fields, and moves nothing, which takes a while on a large cache. Data that Redisson's Java client wrote is already in the new layout and is left alone.
+
+### API changes
+
+The method renames (`try_insert`, `EntryEvent*`, `peek`, `lease`, `keyspace_events`, the removed `evict_expired`) are in the changelog and in the [`HashMapCache` table of the Redisson migration guide](/docs/guides/redisson-migration#hashmapcache).

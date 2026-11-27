@@ -566,7 +566,8 @@ HashMapCache now runs Redisson's RMapCache scripts verbatim (client clock, `stru
 - Scans await the idle-time refresh (`TOUCH_IDLE`) before yielding a page; Redisson fires it without waiting.
 - The temporary field of `addAndGet` is `redissun__temp_val`.
 - `publishCommand` is always `PUBLISH`.
-- `migrate_from_0_23` is a redissun-only script; it only reads and writes redissun's own keys.
+- `migrate_from_0_23` is a redissun-only script; it only reads and writes redissun's own keys. Every call holds the eviction latch (`redissun__execute_task_once_latch:<tag>`, `PX 30000`) and the last call deletes it, so Redisson's `EVICT` returns `-1` on every client while the old layout exists.
+- `addAndGet` (`ADD_AND_GET`) treats an expired entry that the clean-up has not deleted yet as missing: it removes the stale timeout and idle scores and the last-access entry and resets the header idle to `0`, so the counter starts at `delta` with no limits and is visible. Redisson writes the value but leaves the passed deadline, so the value stays hidden and every call returns `delta` again.
 ```
 
 - [ ] **Step 2:** Check that the changelog's data-layout entry and the "Upgrading redissun" page say the same steps. No commit: the commits come from Tasks 1–9, and this task only writes the PR body.

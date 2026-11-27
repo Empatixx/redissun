@@ -1,15 +1,18 @@
-//! [`HashMap::entry`]: one key's value, read and changed under the key's lock, like `std::collections::hash_map::Entry`.
+//! [`HashMap::entry`] and [`HashMapCache::entry`]: one key's value, read and changed under the key's lock, like `std::collections::hash_map::Entry`.
 
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
+use crate::collections::hash_map_cache::HashMapCache;
 use crate::collections::map::ops::KeyLock;
 use crate::error::Result;
+use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt;
+use std::time::Duration;
 
-/// One key of a [`HashMap`], held under the key's lock until the entry is consumed or dropped. See [`HashMap::entry`].
+/// One key of a [`HashMap`] or a [`HashMapCache`], held under the key's lock until the entry is consumed or dropped. See [`HashMap::entry`] and [`HashMapCache::entry`].
 ///
 /// Dropping an entry without consuming it changes nothing and releases the lock in the background.
 #[must_use = "an entry holds the key's lock until it is consumed or dropped"]
@@ -34,8 +37,50 @@ pub struct VacantEntry<'m, K, V, C: Codec> {
     held: Held<'m, K, V, C>,
 }
 
+/// The map an [`Entry`] reads and writes. It stays in a private field, so the public entry types do not depend on it.
+pub(crate) enum Target<'m, K, V, C: Codec> {
+    Map(&'m HashMap<K, V, C>),
+    /// A cache and the time to live its writes get; `None` writes like `insert`, which clears the entry's limits.
+    Cache(&'m HashMapCache<K, V, C>, Option<Duration>),
+}
+
+impl<K, V, C> Target<'_, K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    fn key(&self) -> &Key {
+        match self {
+            Target::Map(map) => map.redis_key(),
+            Target::Cache(cache, _) => HasKey::key(*cache),
+        }
+    }
+
+    async fn read(&self, k: &Bytes) -> Result<Option<V>> {
+        match self {
+            Target::Map(map) => map.read_encoded(k).await,
+            Target::Cache(cache, _) => cache.read_encoded(k).await,
+        }
+    }
+
+    async fn write(&self, k: &Bytes, v: &V) -> Result<()> {
+        match self {
+            Target::Map(map) => map.write_encoded(k, v).await,
+            Target::Cache(cache, ttl) => cache.write_encoded(k, v, *ttl).await,
+        }
+    }
+
+    async fn delete(&self, k: &Bytes) -> Result<()> {
+        match self {
+            Target::Map(map) => map.delete_encoded(k).await,
+            Target::Cache(cache, _) => cache.delete_encoded(k).await,
+        }
+    }
+}
+
 struct Held<'m, K, V, C: Codec> {
-    map: &'m HashMap<K, V, C>,
+    target: Target<'m, K, V, C>,
     key: Bytes,
     lock: KeyLock,
 }
@@ -47,7 +92,7 @@ where
     C: Codec,
 {
     async fn write(self, value: &V) -> Result<()> {
-        let body = self.map.write_encoded(&self.key, value).await;
+        let body = self.target.write(&self.key, value).await;
         self.lock.release(body).await
     }
 }
@@ -58,13 +103,13 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    pub(crate) async fn acquire(map: &'m HashMap<K, V, C>, key: Bytes) -> Result<Self> {
-        let lock = KeyLock::acquire(map.redis_key(), &key).await?;
-        let value = match map.read_encoded(&key).await {
+    pub(crate) async fn acquire(target: Target<'m, K, V, C>, key: Bytes) -> Result<Self> {
+        let lock = KeyLock::acquire(target.key(), &key).await?;
+        let value = match target.read(&key).await {
             Ok(value) => value,
             Err(e) => return lock.release(Err(e)).await,
         };
-        let held = Held { map, key, lock };
+        let held = Held { target, key, lock };
         Ok(match value {
             Some(value) => Entry::Occupied(OccupiedEntry {
                 held,
@@ -135,7 +180,7 @@ where
 
     /// Removes the entry and returns its value. Releases the lock.
     pub async fn remove(self) -> Result<V> {
-        let body = self.held.map.delete_encoded(&self.held.key).await;
+        let body = self.held.target.delete(&self.held.key).await;
         self.held.lock.release(body).await?;
         Ok(self.value)
     }
