@@ -68,7 +68,8 @@ pub mod map_cache_native {
     pub use crate::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};
     pub use crate::collections::map::load::LoadAll;
     pub use crate::collections::map_cache_native::{
-        ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend, TryInsert, UpdateMany,
+        EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend,
+        TryInsert, UpdateMany,
     };
 }
 

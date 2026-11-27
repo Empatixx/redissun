@@ -1434,3 +1434,149 @@ async fn redisson_put_all_get_ttl() {
     assert_eq!(map.get("33").await.unwrap(), None);
     assert_eq!(map.get("55").await.unwrap(), None);
 }
+
+// --- Task 5: entry() with a time ---
+
+#[tokio::test]
+async fn entry_with_ttl_inserts_an_expiring_value() {
+    let map = native(&unique("mcn-entry-ttl")).await;
+    let value = map
+        .entry("a")
+        .ttl(ms(300))
+        .await
+        .unwrap()
+        .or_insert("1".to_string())
+        .await
+        .unwrap();
+    assert_eq!(value, "1");
+    between(map.entry_ttl("a").await.unwrap(), ms(1), ms(300));
+    sleep(ms(500)).await;
+    assert_eq!(map.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn entry_with_expire_at_writes_that_deadline() {
+    let map = native(&unique("mcn-entry-at")).await;
+    map.insert("a", "1").await.unwrap();
+    map.entry("a")
+        .expire_at(SystemTime::now() + secs(20))
+        .await
+        .unwrap()
+        .and_modify(|v| v.push('!'))
+        .or_insert("x".to_string())
+        .await
+        .unwrap();
+    assert_eq!(map.get("a").await.unwrap(), s("1!"));
+    between(map.entry_ttl("a").await.unwrap(), ms(19500), secs(20));
+}
+
+// Review Focus 1: a write through a plain entry is an HSET.
+#[tokio::test]
+async fn entry_without_ttl_clears_the_ttl() {
+    let map = native(&unique("mcn-entry-plain")).await;
+    map.insert("a", "1").ttl(secs(60)).await.unwrap();
+    map.entry("a")
+        .await
+        .unwrap()
+        .and_modify(|v| v.push('!'))
+        .or_insert("x".to_string())
+        .await
+        .unwrap();
+    assert_eq!(map.get("a").await.unwrap(), s("1!"));
+    assert_eq!(map.entry_ttl("a").await.unwrap(), None);
+    // A zero time is no time.
+    map.insert("b", "1").ttl(secs(60)).await.unwrap();
+    match map.entry("b").ttl(Duration::ZERO).await.unwrap() {
+        redissun::map_cache_native::Entry::Occupied(entry) => {
+            entry.insert("2".to_string()).await.unwrap();
+        }
+        redissun::map_cache_native::Entry::Vacant(_) => panic!("b is present"),
+    }
+    assert_eq!(map.entry_ttl("b").await.unwrap(), None);
+    // Reading through an entry writes nothing and keeps the TTL.
+    map.insert("c", "1").ttl(secs(60)).await.unwrap();
+    map.entry("c")
+        .await
+        .unwrap()
+        .or_insert("x".to_string())
+        .await
+        .unwrap();
+    assert!(map.entry_ttl("c").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn entry_sees_an_expired_entry_as_vacant() {
+    let map = native(&unique("mcn-entry-expired")).await;
+    map.insert("a", "old").ttl(ms(100)).await.unwrap();
+    sleep(ms(250)).await;
+    match map.entry("a").ttl(secs(60)).await.unwrap() {
+        redissun::map_cache_native::Entry::Vacant(entry) => {
+            entry.insert("new".to_string()).await.unwrap();
+        }
+        redissun::map_cache_native::Entry::Occupied(entry) => {
+            panic!("an expired entry is occupied: {:?}", entry.get())
+        }
+    }
+    assert_eq!(map.get("a").await.unwrap(), s("new"));
+    between(map.entry_ttl("a").await.unwrap(), secs(59), secs(60));
+}
+
+#[tokio::test]
+async fn entry_is_atomic_across_tasks() {
+    let name = unique("mcn-entry-atomic");
+    let map = native_i64(&name).await;
+    let tasks: Vec<_> = (0..20)
+        .map(|_| {
+            let map = map.clone();
+            tokio::spawn(async move {
+                map.entry("n")
+                    .ttl(secs(60))
+                    .await?
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1)
+                    .await
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(map.get("n").await.unwrap(), Some(20));
+    assert!(map.entry_ttl("n").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_dropped_entry_releases_the_lock() {
+    let map = native(&unique("mcn-entry-drop")).await;
+    let entry = map.entry("a").ttl(secs(60)).await.unwrap();
+    drop(entry);
+    let again = tokio::time::timeout(secs(5), map.entry("a"))
+        .await
+        .expect("the dropped entry kept the lock")
+        .unwrap();
+    again.or_insert("1".to_string()).await.unwrap();
+    assert_eq!(map.get("a").await.unwrap(), s("1"));
+}
+
+#[tokio::test]
+async fn entry_with_a_bad_time_fails_before_locking() {
+    let map = native(&unique("mcn-entry-bad")).await;
+    match map.entry("a").expire_at(UNIX_EPOCH - secs(1)).await {
+        Err(Error::Config(_)) => {}
+        other => panic!("expected Config, got {other:?}"),
+    }
+    // Another task is another lock owner, so a lock left taken would refuse it.
+    let other = map.clone();
+    let taken = tokio::spawn(async move {
+        let guard = other.lock("a").unwrap().try_lock().await.unwrap();
+        let taken = guard.is_some();
+        if let Some(guard) = guard {
+            guard.unlock().await.unwrap();
+        }
+        taken
+    })
+    .await
+    .unwrap();
+    assert!(taken, "the lock was left taken");
+    assert!(!map.contains_key("a").await.unwrap());
+}

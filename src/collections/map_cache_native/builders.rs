@@ -8,6 +8,8 @@ use super::support::{require, Needs};
 use super::ttl::FieldTtl;
 use super::MapCacheNative;
 use crate::codec::Codec;
+use crate::collections::hash_map::Entry;
+use crate::collections::map::entry::Target;
 use crate::error::{Error, Result};
 use crate::expiry::{expiry_args, Expiry};
 use bytes::Bytes;
@@ -738,3 +740,64 @@ all_or_nothing!(
     "update_many",
     "FXX"
 );
+
+/// A pending [`MapCacheNative::entry`]. Await it, optionally after [`EntryRequest::ttl`] or [`EntryRequest::expire_at`], to take the key's lock and read its value.
+#[must_use = "an entry request does nothing until it is awaited"]
+pub struct EntryRequest<'a, K, V, C: Codec> {
+    map: &'a MapCacheNative<K, V, C>,
+    key: Result<Bytes>,
+    ttl: Option<FieldTtl>,
+}
+
+impl<K, V, C: Codec> fmt::Debug for EntryRequest<'_, K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EntryRequest")
+            .field("map", &self.map)
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, K, V, C: Codec> EntryRequest<'a, K, V, C> {
+    pub(super) fn new(map: &'a MapCacheNative<K, V, C>, key: Result<Bytes>) -> Self {
+        Self {
+            map,
+            key,
+            ttl: None,
+        }
+    }
+
+    /// Makes a write through the entry expire `ttl` after it, on the server's clock, Redisson's `compute(key, ttl, f)`. Zero means no time to live: the write clears the TTL, as without this call. The last of `ttl` and `expire_at` wins.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(FieldTtl::After(ttl));
+        self
+    }
+
+    /// Makes a write through the entry expire at `time`, on the caller's clock. A time before 1970 is an [`Error::Config`](crate::Error::Config), returned before the lock is taken. The last of `ttl` and `expire_at` wins.
+    pub fn expire_at(mut self, time: SystemTime) -> Self {
+        self.ttl = Some(FieldTtl::At(time));
+        self
+    }
+}
+
+impl<'a, K, V, C> IntoFuture for EntryRequest<'a, K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<Entry<'a, K, V, C>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let key = self.key?;
+            // Checked before the lock is taken, so a bad time or an old server fails at once.
+            let ttl = match timed(self.map, self.ttl).await? {
+                Some(_) => self.ttl,
+                None => None,
+            };
+            Entry::acquire(Target::Native(self.map, ttl), key).await
+        })
+    }
+}

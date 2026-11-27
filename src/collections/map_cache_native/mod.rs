@@ -10,12 +10,13 @@ use crate::collections::hash_map::HashMap;
 use crate::collections::map::key_hash::per_key_objects;
 use crate::collections::map::load::LoadAll;
 use crate::collections::map::scan::MapScan;
+use crate::collections::map::store::Store;
 use crate::collections::map::store::{store_options, StoreOptions};
 use crate::error::Result;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
 use futures::Stream;
-use scripts::{COMPARE_AND_SET_KEEP_TTL, REPLACE_KEEP_TTL};
+use scripts::{COMPARE_AND_SET_KEEP_TTL, FAST_PUT, REPLACE_KEEP_TTL};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
@@ -25,9 +26,11 @@ use std::time::Duration;
 use support::{has_field_ttl, require, Needs};
 
 pub use builders::{
-    ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend, TryInsert, UpdateMany,
+    EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend, TryInsert,
+    UpdateMany,
 };
 pub(crate) use support::HashFieldSupport;
+pub(crate) use ttl::FieldTtl;
 
 /// **Experimental.** A distributed map in one Redis hash whose entries can expire on their own, Redisson's `RMapCacheNative`.
 ///
@@ -262,6 +265,32 @@ where
             .into_iter()
             .map(|(k, v)| Ok((self.codec.encode(k)?, self.codec.encode(v)?)))
             .collect()
+    }
+
+    /// The value of `k`, taken under the key's lock to read and change it, like [`HashMap::entry`](crate::HashMap::entry): Redisson's `compute`, `computeIfAbsent`, `computeIfPresent` and `merge`. Await it as it is, or set a time first: `map.entry("a").ttl(d).await?`.
+    ///
+    /// Without a time, a write through the entry stores the value without one (`HSET`), so the entry loses its TTL, as with Redisson's `compute(k, f)`. With [`ttl`](EntryRequest::ttl) or [`expire_at`](EntryRequest::expire_at), the write gives it that time, Redisson's `compute(k, ttl, f)` and `computeIfAbsent(k, ttl, f)`; reading through the entry writes nothing. An expired entry is vacant. A value the loader returns is stored without a TTL.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// use std::time::Duration;
+    /// let visits = client.map_cache_native::<String, i64>("visits");
+    /// visits.entry("home").ttl(Duration::from_secs(60)).await?.and_modify(|n| *n += 1).or_insert(1).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(
+        alias = "compute",
+        alias = "computeIfAbsent",
+        alias = "computeIfPresent",
+        alias = "merge"
+    )]
+    pub fn entry<Q>(&self, k: &Q) -> EntryRequest<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        EntryRequest::new(self, self.codec.encode(k))
     }
 
     /// The time each entry has left, in the order of the keys, Redisson's `remainTimeToLive(keys)`. `None` for an entry without a TTL or a missing one. A key listed twice gives two items. Needs Redis 7.4.
@@ -617,6 +646,49 @@ where
     #[doc(alias = "randomEntries")]
     pub async fn random_entries(&self, count: usize) -> Result<std::collections::HashMap<K, V>> {
         self.map.random_entries(count).await
+    }
+}
+
+impl<K, V, C> MapCacheNative<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
+        self.map.store()
+    }
+
+    pub(crate) async fn read_encoded(&self, k: &Bytes) -> Result<Option<V>> {
+        self.map.read_encoded(k).await
+    }
+
+    /// `HSET`, without the writer: the entry has no TTL afterwards.
+    pub(crate) async fn write_encoded(&self, k: &Bytes, v: &V) -> Result<()> {
+        self.map.write_encoded(k, v).await
+    }
+
+    /// Redisson's `fastPut(k, v, ttl)` script, without the writer; a zero TTL is the plain `HSET`.
+    pub(crate) async fn write_encoded_with(&self, k: &Bytes, v: &V, ttl: FieldTtl) -> Result<()> {
+        let Some((ms, command)) = ttl.script_args()? else {
+            return self.write_encoded(k, v).await;
+        };
+        let args = vec![
+            Bytes::from(ms.to_string()),
+            k.clone(),
+            self.codec.encode(v)?,
+            Bytes::copy_from_slice(command.as_bytes()),
+        ];
+        let _: i64 = self
+            .key
+            .core
+            .eval(&FAST_PUT, vec![self.key.redis_key()], args)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_encoded(&self, k: &Bytes) -> Result<()> {
+        self.map.delete_encoded(k).await
     }
 }
 

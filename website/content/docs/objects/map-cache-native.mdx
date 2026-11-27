@@ -60,6 +60,32 @@ A write takes `.ttl(Duration)` or `.expire_at(SystemTime)`; `extend`, `try_exten
 - `extend(..).expire_at(t)`, `extend(..).keep_ttl()`, `try_extend` and `update_many` send `HSETEX`, which Redis 7.4 lacks: there they return `Error::Unsupported` and write nothing. `extend(..).ttl(d)` works on 7.4.
 - The server deletes an expired entry itself; `get`, `len` and the iterators never see it.
 
+## Entries
+
+`entry(&k)` takes the key's lock (the per-key lock Redisson's `compute` family takes) and reads the value, like `HashMap::entry`. Await it as it is, or after `.ttl(d)` or `.expire_at(t)`:
+
+```rust
+let n = visits
+    .entry("home")
+    .ttl(Duration::from_secs(60))
+    .await?
+    .and_modify(|n| *n += 1)
+    .or_insert(1)
+    .await?;
+```
+
+- With a time, a write through the entry gives it that time (Redisson's `compute(k, ttl, f)` and `computeIfAbsent(k, ttl, f)`, through its `fastPut`-with-TTL script).
+- Without a time, or with `.ttl(Duration::ZERO)`, a write stores the value with `HSET`, so the entry loses its TTL, as Redisson's `compute(k, f)` does. Reading through an entry without writing changes nothing.
+- An expired entry is vacant. A bad time (before 1970) or a server without field TTLs fails before the lock is taken.
+
+## Loaders and writers
+
+`client.map_cache_native_builder::<K, V>(name)` takes the options of `hash_map_builder` (`loader`, `writer`, `write_mode`, retries), Redisson's `getMapCacheNative(MapOptions)`, and `.build().await` returns the map.
+
+- The loader is asked as on a `HashMap`: by `get`, `get_many`, `contains_key` and `entry` on a miss, and by `load_all`/`load_many`. A loaded value is stored with `HSET`, **without a time to live**, also inside an entry with `.ttl(d)`; the entry's own write then gives it the time.
+- The writer gets every write after Redis stored it: `insert` and `set` always, `try_insert` when it stored, `replace` and `compare_and_set` when they replaced, `extend` once per batch, `try_extend` and `update_many` when they stored all entries, and `entry` writes and removes. `expire_entry`, `expire_entries`, `persist_entry` and `persist_entries` call no writer.
+- Write-behind (`WriteMode::WriteBehind`) and `flush()` work as on a `HashMap`.
+
 ## How it is stored
 
 One hash at the raw name, with no braces added and no other keys, the same hash a `HashMap` of that name and a Redisson `RMapCacheNative` use. The server stores each field's deadline. Redisson and redissun clients share the data, and the per-key objects have Redisson's names (`{name}:<hash of the key>:lock`).

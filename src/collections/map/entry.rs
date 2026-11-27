@@ -1,4 +1,4 @@
-//! [`HashMap::entry`] and [`HashMapCache::entry`]: one key's value, read and changed under the key's lock, like `std::collections::hash_map::Entry`.
+//! [`HashMap::entry`], [`HashMapCache::entry`] and [`MapCacheNative::entry`]: one key's value, read and changed under the key's lock, like `std::collections::hash_map::Entry`.
 
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
@@ -7,6 +7,7 @@ use crate::collections::local_cached_map::LocalCachedMap;
 use crate::collections::map::load::load_value_locked;
 use crate::collections::map::ops::KeyLock;
 use crate::collections::map::store::Store;
+use crate::collections::map_cache_native::{FieldTtl, MapCacheNative};
 use crate::error::Result;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
@@ -15,7 +16,7 @@ use serde::Serialize;
 use std::fmt;
 use std::time::Duration;
 
-/// One key of a [`HashMap`] or a [`HashMapCache`], held under the key's lock until the entry is consumed or dropped. See [`HashMap::entry`] and [`HashMapCache::entry`].
+/// One key of a [`HashMap`], a [`HashMapCache`] or a [`MapCacheNative`], held under the key's lock until the entry is consumed or dropped. See [`HashMap::entry`], [`HashMapCache::entry`] and [`MapCacheNative::entry`].
 ///
 /// Dropping an entry without consuming it changes nothing and releases the lock in the background.
 #[must_use = "an entry holds the key's lock until it is consumed or dropped"]
@@ -47,6 +48,8 @@ pub(crate) enum Target<'m, K, V, C: Codec> {
     Cache(&'m HashMapCache<K, V, C>, Option<Duration>),
     /// A local cached map, for loading only: reads look at the local cache first, and writes go through its plain put.
     Local(&'m LocalCachedMap<K, V, C>),
+    /// A map with field TTLs and the time its writes get; `None` (or a zero TTL) writes with `HSET`, which clears the entry's TTL.
+    Native(&'m MapCacheNative<K, V, C>, Option<FieldTtl>),
 }
 
 impl<K, V, C> Target<'_, K, V, C>
@@ -60,6 +63,7 @@ where
             Target::Map(map) => map.redis_key(),
             Target::Cache(cache, _) => HasKey::key(*cache),
             Target::Local(map) => HasKey::key(*map),
+            Target::Native(map, _) => HasKey::key(*map),
         }
     }
 
@@ -69,6 +73,7 @@ where
             Target::Map(map) => map.read_encoded(k).await,
             Target::Cache(cache, _) => cache.read_encoded(k).await,
             Target::Local(map) => map.read_encoded(k).await,
+            Target::Native(map, _) => map.read_encoded(k).await,
         }
     }
 
@@ -78,6 +83,8 @@ where
             Target::Map(map) => map.write_encoded(k, v).await,
             Target::Cache(cache, ttl) => cache.write_encoded(k, v, *ttl).await,
             Target::Local(map) => map.put_encoded(k, v).await,
+            Target::Native(map, None) => map.write_encoded(k, v).await,
+            Target::Native(map, Some(ttl)) => map.write_encoded_with(k, v, *ttl).await,
         }
     }
 
@@ -87,6 +94,7 @@ where
             Target::Map(map) => map.delete_encoded(k).await,
             Target::Cache(cache, _) => cache.delete_encoded(k).await,
             Target::Local(map) => map.delete_encoded(k).await,
+            Target::Native(map, _) => map.delete_encoded(k).await,
         }
     }
 
@@ -96,15 +104,17 @@ where
             Target::Map(map) => map.store(),
             Target::Cache(cache, _) => cache.store(),
             Target::Local(map) => map.store(),
+            Target::Native(map, _) => map.store(),
         }
     }
 
-    /// Stores a loaded value with the map's plain put, Redisson's `loadValue`: `HSET` on a map, `PUT` without limits on a cache, also inside an entry with a time to live.
+    /// Stores a loaded value with the map's plain put, Redisson's `loadValue`: `HSET` on a map and on a `MapCacheNative`, `PUT` without limits on a cache, also inside an entry with a time to live.
     pub(crate) async fn write_loaded(&self, k: &Bytes, v: &V) -> Result<()> {
         match self {
             Target::Map(map) => map.write_encoded(k, v).await,
             Target::Cache(cache, _) => cache.write_encoded(k, v, None).await,
             Target::Local(map) => map.put_encoded(k, v).await,
+            Target::Native(map, _) => map.write_encoded(k, v).await,
         }
     }
 }

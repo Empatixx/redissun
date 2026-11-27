@@ -446,6 +446,9 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `expireEntriesIfNotSet(keys, ..)`, `expireEntriesIfGreater(keys, ..)`, `expireEntriesIfLess(keys, ..)` | `expire_entries(&[&k, ..])…` with `.if_not_set()`, `.if_greater()`, `.if_less()` |
 | `clearExpire(k)` | `persist_entry(&k)` → `bool` |
 | `clearExpire(Set)` | `persist_entries(&[&k, ..])` → `Vec<bool>` in key order |
+| `getMapCacheNative(MapOptions)` | `client.map_cache_native_builder(name).loader(l).writer(w)….build().await` |
+| `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `map_cache_native::Entry`; a write clears the entry's TTL (`HSET`), as in Redisson |
+| `compute(k, Duration\|Instant, f)`, `computeIfAbsent(k, Duration\|Instant, f)` | `entry(&k).ttl(d)` / `entry(&k).expire_at(t)` |
 | `putAll(map, Duration)` | `extend(entries).ttl(d)` |
 | `putAll(PutArgs)` with `timeToLive`, `expireAt`, `keepTTL` | `extend(entries).ttl(d)`, `.expire_at(t)`, `.keep_ttl()` (`expire_at` and `keep_ttl` need Redis 8.0) |
 | `putIfAllKeysAbsent(PutArgs)` | `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
