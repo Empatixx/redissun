@@ -63,6 +63,11 @@ pub mod hash_map_cache {
     pub use crate::collections::map::load::LoadAll;
 }
 
+/// The builder [`LocalCachedMapCache::preload_cache`] returns; its other methods return the builders of [`hash_map_cache`].
+pub mod local_cached_map_cache {
+    pub use crate::collections::local_cached_map_cache::PreloadCache;
+}
+
 /// The builders [`MapCacheNative`] methods return.
 pub mod map_cache_native {
     pub use crate::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};
@@ -134,10 +139,12 @@ pub use collections::hash_map_cache::{
 };
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};
-pub use collections::local_cached_map::{
-    CacheProvider, EvictionPolicy, ExpirationEventPolicy, LocalCachedMap, LocalCachedMapBuilder,
-    ReconnectionStrategy, StoreMode, SyncStrategy,
+pub use collections::local_cache::{
+    CacheProvider, EvictionPolicy, ExpirationEventPolicy, ReconnectionStrategy, StoreMode,
+    SyncStrategy,
 };
+pub use collections::local_cached_map::{LocalCachedMap, LocalCachedMapBuilder};
+pub use collections::local_cached_map_cache::{LocalCachedMapCache, LocalCachedMapCacheBuilder};
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
 pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};

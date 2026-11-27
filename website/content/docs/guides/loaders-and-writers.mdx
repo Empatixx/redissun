@@ -49,6 +49,8 @@ let user = users.get("jirka").await?; // a miss asks the loader
 
 `client.local_cached_map::<K, V>(name)` takes them for a `LocalCachedMap`; [LocalCachedMap](/docs/objects/local-cached-map) lists where its loader and writer are called.
 
+`client.local_cached_map_cache::<K, V>(name)` takes the same options for a `LocalCachedMapCache` (experimental); its loader and writer are called where `HashMapCache` calls them, and a loaded value is cached and announced like an insert.
+
 ## When the loader is asked
 
 | Method | The loader is asked |

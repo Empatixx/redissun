@@ -50,9 +50,21 @@ redis = { version = "1.7.1", features = ["tokio-comp", "connection-manager"] }
 serde = { version = "1", features = ["derive"] }
 testcontainers = { version = "0.27", features = ["properties-config"] }
 testcontainers-modules = { version = "0.15", features = ["redis"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [[bench]]
 name = "compare"
 harness = false
+
+# Keep target/ small: tests build ~50 binaries per feature set, and full debug info
+# plus incremental caches grew target/ to hundreds of GB. Line tables keep backtraces.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false

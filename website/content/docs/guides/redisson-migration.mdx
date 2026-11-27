@@ -15,6 +15,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RDeque`, `RQueue` | `VecDeque` |
 | `RSet` | `HashSet` |
 | `RLocalCachedMap` | `LocalCachedMap` |
+| `RLocalCachedMapCache` | `LocalCachedMapCache` (experimental) |
 | `RLock` | `Lock` |
 | `RReadWriteLock` | `RwLock` |
 | `RFairLock` | `FairLock` |
@@ -519,6 +520,22 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `expirationEventPolicy(SUBSCRIBE_WITH_KEYEVENT_PATTERN / SUBSCRIBE_WITH_KEYSPACE_CHANNEL / DONT_SUBSCRIBE)`, `useKeyEventsPattern(bool)` | `.expiration_event_policy(ExpirationEventPolicy::KeyeventPattern / KeyspaceChannel / None)` |
 | `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)` |
 | `destroy()` (write-behind) | `flush().await`, and dropping the map drains once more |
+
+## LocalCachedMapCache
+
+Every `HashMapCache` method works and returns the same builders; see [`## HashMapCache`](#hashmapcache). The table lists the rest.
+
+| Redisson | redissun |
+|---|---|
+| `getLocalCachedMapCache(name, options)`, `getLocalCachedMapCache(name, codec, options)` | `client[.with_codec(c)].local_cached_map_cache(name)….build().await` |
+| `LocalCachedMapCacheOptions.cacheSize`, `evictionPolicy`, `timeToLive`, `maxIdle`, `syncStrategy`, `reconnectionStrategy`, `storeCacheMiss`, `storeMode`, `cacheProvider`, `expirationEventPolicy`, `useKeyEventsPattern` | the builder setters of `LocalCachedMap` |
+| `getCachedMap()`, `cachedEntrySet()`, `cachedKeySet()`, `cachedValues()` | `local_entries()` |
+| `clearLocalCache()`, `clearLocalCacheAsync()` | `clear_local_everywhere()` |
+| `preloadCache()`, `preloadCache(count)` | `preload_cache()`, `preload_cache().page_size(count)` → the number of entries cached |
+| `addListener(MapEntryListener)`, `removeListener` | `events()`, `events_of(..)`, then drop |
+| `addListener(ObjectListener)` | `keyspace_events()`, `keyspace_events_of(..)` |
+| `loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)` (`WriteMode::WriteBehind { batch_size, delay }`), `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
+| `destroy()` | `flush().await`, then drop |
 
 ## VecDeque blocking
 

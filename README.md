@@ -68,6 +68,7 @@ async fn main() -> redissun::Result<()> {
 | [`VecDeque`](https://empatixx.github.io/redissun/docs/objects/vec-deque) | list | stable |
 | [`HashSet`](https://empatixx.github.io/redissun/docs/objects/hash-set) | set | stable |
 | [`LocalCachedMap`](https://empatixx.github.io/redissun/docs/objects/local-cached-map) | hash and pub/sub | stable |
+| [`LocalCachedMapCache`](https://empatixx.github.io/redissun/docs/objects/local-cached-map-cache) | `HashMapCache`'s layout, a local cache and pub/sub | experimental |
 | [`Lock`](https://empatixx.github.io/redissun/docs/objects/lock) | hash and pub/sub | stable |
 | [`RwLock`](https://empatixx.github.io/redissun/docs/objects/rw-lock) | hash, set, strings and pub/sub | stable |
 | [`FairLock`](https://empatixx.github.io/redissun/docs/objects/fair-lock) | hash, list, sorted set and pub/sub | stable |

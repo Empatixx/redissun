@@ -4,7 +4,7 @@ use super::scripts::{
     EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF_NOT_SET, EXPIRE_ENTRY, EXPIRE_ENTRY_IF_NOT_SET,
     MIGRATE_FROM_0_23, PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS,
 };
-use super::{limits, names, HashMapCache, Name, PUBLISH};
+use super::{announced, limits, names, HashMapCache, Name, Op, PUBLISH};
 use crate::codec::Codec;
 use crate::collections::map::entry::{Entry, Target};
 use crate::error::{Error, Result};
@@ -70,12 +70,17 @@ where
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
             let entry = [(key.clone(), value.clone())];
+            if let Some(local) = cache.local_only() {
+                let previous = HashMapCache::<K, V, C>::local_value(local, &key);
+                cache.local_store(local, &entry, &limits).await?;
+                cache.written(&entry).await?;
+                return cache.decode_value(previous);
+            }
             let previous: Option<Bytes> = if limits.any() {
                 cache
-                    .key
-                    .core
-                    .eval(
+                    .eval_write(
                         &PUT_WITH_LIMITS,
+                        &announced::PUT_WITH_LIMITS,
                         cache.redis_keys(&[
                             Name::Main,
                             Name::Timeout,
@@ -87,6 +92,12 @@ where
                             Name::Options,
                         ]),
                         limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
+                        Op::Put {
+                            entries: &entry,
+                            ttl_timeout: limits.ttl_timeout,
+                            idle_delta: limits.idle_delta,
+                        },
+                        false,
                     )
                     .await?
             } else {
@@ -152,11 +163,18 @@ where
             // Always the script with limits, with zeros when there are none: Redisson's script without limits leaves the old deadline of an expired entry in place.
             // Sent at most once: a second run would find this call's own value and return it as the existing one.
             let entry = [(key.clone(), value.clone())];
+            if let Some(local) = cache.local_only() {
+                if let Some(live) = HashMapCache::<K, V, C>::local_value(local, &key) {
+                    return cache.decode_value(Some(live));
+                }
+                cache.local_store(local, &entry, &limits).await?;
+                cache.written(&entry).await?;
+                return Ok(None);
+            }
             let live: Option<Bytes> = cache
-                .key
-                .core
-                .eval_once(
+                .eval_write(
                     &PUT_IF_ABSENT_WITH_LIMITS,
+                    &announced::PUT_IF_ABSENT_WITH_LIMITS,
                     cache.redis_keys(&[
                         Name::Main,
                         Name::Timeout,
@@ -167,7 +185,14 @@ where
                         Name::Options,
                         Name::Lease,
                     ]),
-                    limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
+                    limits.arguments(vec![key.clone(), value.clone(), Bytes::from(PUBLISH)]),
+                    Op::TryPut {
+                        field: &key,
+                        value: &value,
+                        ttl_timeout: limits.ttl_timeout,
+                        idle_delta: limits.idle_delta,
+                    },
+                    true,
                 )
                 .await?;
             if live.is_none() {
@@ -238,6 +263,16 @@ where
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
+            if let Some(local) = cache.local_only() {
+                if self.token.is_some() {
+                    return Err(super::local_mode::needs_redis("set(..).lease"));
+                }
+                let new = HashMapCache::<K, V, C>::local_value(local, &key).is_none();
+                let entry = [(key, value)];
+                cache.local_store(local, &entry, &limits).await?;
+                cache.written(&entry).await?;
+                return Ok(new);
+            }
             if let Some(token) = self.token {
                 // An empty token would make the script store without any lease check.
                 if token.is_empty() {
@@ -341,6 +376,11 @@ where
             } else {
                 self.batch_size
             };
+            if let Some(local) = self.cache.local_only() {
+                let limits = limits(self.ttl, self.max_idle)?;
+                self.cache.local_store(local, &encoded, &limits).await?;
+                return self.cache.written(&encoded).await;
+            }
             for batch in encoded.chunks(size) {
                 // A fresh `now` per batch, as each batch is its own `putAll`.
                 let limits = limits(self.ttl, self.max_idle)?;
@@ -352,10 +392,9 @@ where
                 }
                 let _: redis::Value = self
                     .cache
-                    .key
-                    .core
-                    .eval(
+                    .eval_write(
                         &PUT_ALL_TTL_IDLE,
+                        &announced::PUT_ALL_TTL_IDLE,
                         self.cache.redis_keys(&[
                             Name::Main,
                             Name::Timeout,
@@ -367,6 +406,12 @@ where
                             Name::Options,
                         ]),
                         limits.arguments(rest),
+                        Op::Put {
+                            entries: batch,
+                            ttl_timeout: limits.ttl_timeout,
+                            idle_delta: limits.idle_delta,
+                        },
+                        false,
                     )
                     .await?;
                 self.cache.written(batch).await?;
@@ -432,16 +477,23 @@ where
             let cache = self.cache;
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
-            let script = if self.if_not_set {
-                &*EXPIRE_ENTRY_IF_NOT_SET
+            if let Some(local) = cache.local_only() {
+                return cache
+                    .local_expire(local, &key, &limits, self.if_not_set)
+                    .await;
+            }
+            let (script, announced) = if self.if_not_set {
+                (
+                    &*EXPIRE_ENTRY_IF_NOT_SET,
+                    &*announced::EXPIRE_ENTRY_IF_NOT_SET,
+                )
             } else {
-                &*EXPIRE_ENTRY
+                (&*EXPIRE_ENTRY, &*announced::EXPIRE_ENTRY)
             };
             let changed: i64 = cache
-                .key
-                .core
-                .eval(
+                .eval_write(
                     script,
+                    announced,
                     cache.redis_keys(&[
                         Name::Main,
                         Name::Timeout,
@@ -449,7 +501,9 @@ where
                         Name::LastAccess,
                         Name::Options,
                     ]),
-                    limits.arguments(vec![key]),
+                    limits.arguments(vec![key.clone()]),
+                    Op::IfOne(&key),
+                    false,
                 )
                 .await?;
             Ok(changed == 1)
@@ -521,16 +575,30 @@ where
                 .iter()
                 .map(|k| cache.codec.encode(*k))
                 .collect::<Result<std::vec::Vec<_>>>()?;
-            let script = if self.if_not_set {
-                &*EXPIRE_ENTRIES_IF_NOT_SET
+            if let Some(local) = cache.local_only() {
+                let mut changed = 0;
+                for key in &keys {
+                    if cache
+                        .local_expire(local, key, &limits, self.if_not_set)
+                        .await?
+                    {
+                        changed += 1;
+                    }
+                }
+                return Ok(changed);
+            }
+            let (script, announced) = if self.if_not_set {
+                (
+                    &*EXPIRE_ENTRIES_IF_NOT_SET,
+                    &*announced::EXPIRE_ENTRIES_IF_NOT_SET,
+                )
             } else {
-                &*EXPIRE_ENTRIES
+                (&*EXPIRE_ENTRIES, &*announced::EXPIRE_ENTRIES)
             };
             let changed: usize = cache
-                .key
-                .core
-                .eval(
+                .eval_write(
                     script,
+                    announced,
                     cache.redis_keys(&[
                         Name::Main,
                         Name::Timeout,
@@ -538,7 +606,9 @@ where
                         Name::LastAccess,
                         Name::Options,
                     ]),
-                    limits.arguments(keys),
+                    limits.arguments(keys.clone()),
+                    Op::Touch(&keys),
+                    false,
                 )
                 .await?;
             Ok(changed)

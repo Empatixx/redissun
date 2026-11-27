@@ -1,7 +1,7 @@
 //! Leases on a [`HashMapCache`] key, Redisson's `RLeasedMap`: one caller loads a missing value while the others wait or read through.
 
 use super::scripts::{LEASE_GET, LEASE_REMOVE};
-use super::{limits, HashMapCache, Name, PUBLISH};
+use super::{announced, limits, HashMapCache, Name, Op, PUBLISH};
 use crate::codec::Codec;
 use crate::error::{Error, Result};
 use crate::object::{millis, now_millis};
@@ -171,6 +171,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("lease")?;
         if time.is_zero() {
             return Err(Error::Config("lease time should be positive".into()));
         }
@@ -226,6 +227,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("invalidate")?;
         self.lease_remove(self.codec.encode(k)?).await
     }
 }
@@ -233,11 +235,11 @@ where
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
     /// Redisson's `removeWithLease` script for one encoded key.
     async fn lease_remove(&self, key: Bytes) -> Result<bool> {
+        let fields = [key.clone()];
         let removed: std::vec::Vec<i64> = self
-            .key
-            .core
-            .eval(
+            .eval_write(
                 &LEASE_REMOVE,
+                &announced::LEASE_REMOVE,
                 self.redis_keys(&[
                     Name::Main,
                     Name::Timeout,
@@ -248,6 +250,8 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
                     Name::Lease,
                 ]),
                 vec![Bytes::from(PUBLISH), key],
+                Op::PerKey(&fields),
+                false,
             )
             .await?;
         Ok(removed.iter().any(|n| *n != 0))

@@ -57,5 +57,13 @@ description: Things to know about this version.
   - `exists`, `ttl` and `rename` cover the config key `{name}:config` too, where Redisson's look at the state key only; `ttl` is the config key's.
   - The deprecated `tryAcquire(maxBurst, tokensPerPeriod, period[, tokens])` is not ported.
 - **LocalCachedMap and Redisson's `RLocalCachedMap`.** Not ported: `cacheSize(-1)`, a local cache that stores nothing (`cache_size(0)` means no limit, as in Redisson); `useObjectAsCacheKey`, since the local cache is always keyed by the encoded key; and `useTopicPattern`.
+- **LocalCachedMapCache and Redisson's `RLocalCachedMapCache`.**
+  - Writes by clients without a local cache (a plain `HashMapCache`, Redisson's `RMapCache`) are not announced, so local copies keep the old value until their lifetime ends; their removals and the server's evictions do reach the local caches.
+  - Local hits do not count as uses on the server, so under `set_max_size` the entries read mostly from local caches look cold there and are evicted first.
+  - Entry deadlines use the clocks of the clients that write, as in Redisson.
+  - A sync or eviction message arrives a few milliseconds after the write, so another instance can read its old copy in between.
+  - Redisson's `RLocalCachedMapCache` is a PRO feature, so no Redisson client can be a peer on the sync topic; the topic uses `LocalCachedMap`'s channel and message format. The data in Redis is shared with Redisson's `RMapCache` and with `HashMapCache`.
+  - `rename` moves the data and the updates log, not the local caches of other instances, which keep listening on the old name.
+  - In `StoreMode::Local`, the methods that need the entries in Redis return `Error::Config`; see the object page for the list.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error, except for the entry time limits of `HashMapCache` and `HashSetCache` and the entry TTLs of `MapCacheNative`, where zero means no limit. A `MapCacheNative` deadline (`.expire_at(t)`) is sent in whole Unix milliseconds, rounded down.
 - **Before 1.0**, the API can change between minor versions.
