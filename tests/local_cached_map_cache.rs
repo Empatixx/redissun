@@ -484,9 +484,10 @@ async fn an_invalidation_during_a_read_is_not_overwritten() {
         written.unwrap();
         // Once the invalidation has arrived, a stale read must not have been cached:
         // a stale copy would stay, so waiting for the new value still catches it.
-        eventually(&format!("round {round}: a stale read stayed cached"), || async {
-            a.get("k").await.unwrap().as_deref() == Some(value.as_str())
-        })
+        eventually(
+            &format!("round {round}: a stale read stayed cached"),
+            || async { a.get("k").await.unwrap().as_deref() == Some(value.as_str()) },
+        )
         .await;
     }
 }
@@ -801,7 +802,9 @@ async fn max_size_eviction_drops_my_copy() {
     let name = unique("lcmc");
     let a = lcmc(&client, &name).await;
     let plain = plain(&client, &name);
-    a.set_max_size(2, redissun::EvictionMode::Lru).await.unwrap();
+    a.set_max_size(2, redissun::EvictionMode::Lru)
+        .await
+        .unwrap();
     a.insert("k1", "1").await.unwrap();
     assert_eq!(local_keys(&a), ["k1"]);
     sleep(10 * MS).await;

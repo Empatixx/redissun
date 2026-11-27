@@ -1,7 +1,7 @@
 use crate::codec::Codec;
 use crate::collections::hash_map_cache::{
-    eviction_feed, mark_listeners, EntryEventKind, EntryEvents, EntryRequest, EvictionMode, ExpireEntries,
-    ExpireEntry, Extend, HashMapCache, Insert, Lease, Set, TryInsert,
+    eviction_feed, mark_listeners, EntryEventKind, EntryEvents, EntryRequest, EvictionMode,
+    ExpireEntries, ExpireEntry, Extend, HashMapCache, Insert, Lease, Set, TryInsert,
 };
 use crate::collections::local_cache::messages::{message, CLEAR};
 use crate::collections::local_cache::{local_options, start, LocalCache, LocalOptions, StoreMode};

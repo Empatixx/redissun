@@ -90,11 +90,10 @@ impl EvictionFeed {
         if self.receivers.is_empty() {
             return std::future::pending().await;
         }
-        let received = futures::future::select_all(
-            self.receivers.iter_mut().map(|r| Box::pin(r.recv())),
-        )
-        .await
-        .0;
+        let received =
+            futures::future::select_all(self.receivers.iter_mut().map(|r| Box::pin(r.recv())))
+                .await
+                .0;
         match received {
             Ok(payload) => match split_event(&payload, self.prefix) {
                 Some((key, _, _)) => Eviction::Key(Bytes::copy_from_slice(key)),
