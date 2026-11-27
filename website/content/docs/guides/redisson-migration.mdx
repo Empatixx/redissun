@@ -28,6 +28,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RBloomFilter` | `BloomFilter` |
 | `RBlockingQueue` | `VecDeque` with `pop_front_wait` |
 | `RMapCache` | `HashMapCache` |
+| `RMapCacheNative` | `MapCacheNative` |
 | `RSetCache` | `HashSetCache` |
 | `RTopic` | `Topic` |
 | `RPatternTopic` | `PatternTopic` |
@@ -421,6 +422,38 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, `trySetMaxSize(n, mode)` is `init_max_size(n, mode)`, and listeners are read with `recv()`. Both take expiry times from the client clock.
 
 Since this version, `HashMapCache` uses Redisson's scripts, key names, value layout and event payload, so Redisson and redissun clients can share a cache. Data written by redissun 0.23 and earlier is in another layout and must be moved with `migrate_from_0_23()` before the new version reads it; listeners of the two versions do not understand each other's events. [Upgrading redissun](/docs/guides/upgrading) has the steps.
+
+## MapCacheNative
+
+Every `RMap` method works as on `HashMap`; the table lists the rest.
+
+| Redisson | redissun |
+|---|---|
+| `getMapCacheNative(name)` | `client.map_cache_native(name)` |
+| `put(k, v, Duration)`, `put(k, v, Instant)` | `insert(&k, &v).ttl(d)`, `insert(&k, &v).expire_at(t)` |
+| `fastPut(k, v, Duration)`, `fastPut(k, v, Instant)` | `set(&k, &v).ttl(d)`, `set(&k, &v).expire_at(t)` → `bool` |
+| `putIfAbsent(k, v, Duration\|Instant)`, `fastPutIfAbsent(k, v, Duration\|Instant)` | `try_insert(&k, &v).ttl(d)` / `.expire_at(t)` → `None` when stored (Redisson's `null` / `true`) |
+| `putIfExist(k, v, Duration\|Instant)` | `replace(&k, &v).ttl(d)` / `.expire_at(t)` → `Option<V>` |
+| `replace(k, v)`, `putIfExists(k, v)`, `fastReplace(k, v)` | `replace(&k, &v)`; keeps the entry's TTL, where Redisson's clears it |
+| `replace(k, old, new)` | `compare_and_set(&k, &old, &new)`; keeps the entry's TTL, where Redisson's clears it |
+| a `Duration` of zero | `.ttl(Duration::ZERO)`: no TTL, as in Redisson |
+| `remainTimeToLive(k)` | `entry_ttl(&k)` → `Option<Duration>`; `None` for both a missing entry (`-2`) and one without a time to live (`-1`) |
+| `remainTimeToLive(Set)` | `entry_ttls(&[&k, ..])` → `Vec<Option<Duration>>` in key order, `None` for both `-1` and `-2` |
+| `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)`; keep the entry's time to live |
+| `expireEntry(k, Duration\|Instant)` | `expire_entry(&k).ttl(d)` / `.expire_at(t)` → `bool`; `.ttl(Duration::ZERO)` removes the TTL, where Redisson's `expireEntry(k, ZERO)` deletes the entry |
+| `expireEntryIfNotSet(k, Duration\|Instant)`, `expireEntryIfGreater(..)`, `expireEntryIfLess(..)` | `expire_entry(&k).ttl(d)` / `.expire_at(t)` with `.if_not_set()`, `.if_greater()`, `.if_less()` |
+| `expireEntries(keys, Duration\|Instant)` | `expire_entries(&[&k, ..]).ttl(d)` / `.expire_at(t)` → `usize` |
+| `expireEntriesIfNotSet(keys, ..)`, `expireEntriesIfGreater(keys, ..)`, `expireEntriesIfLess(keys, ..)` | `expire_entries(&[&k, ..])…` with `.if_not_set()`, `.if_greater()`, `.if_less()` |
+| `clearExpire(k)` | `persist_entry(&k)` → `bool` |
+| `clearExpire(Set)` | `persist_entries(&[&k, ..])` → `Vec<bool>` in key order |
+| `getMapCacheNative(MapOptions)` | `client.map_cache_native_builder(name).loader(l).writer(w)….build().await` |
+| `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `map_cache_native::Entry`; a write clears the entry's TTL (`HSET`), as in Redisson |
+| `compute(k, Duration\|Instant, f)`, `computeIfAbsent(k, Duration\|Instant, f)` | `entry(&k).ttl(d)` / `entry(&k).expire_at(t)` |
+| `addListener(MapExpiredListener)`, `addListener(MapClearExpireListener)`, `addListener(ObjectListener)` | `events()` or `events_of(&[MapEventKind::EntryExpired, ..])` → `MapEvents`; `MapEvent::EntryExpired` and `MapEvent::EntryPersisted` besides the `HashMap` events; dropping it is `removeListener` |
+| `putAll(map, Duration)` | `extend(entries).ttl(d)` |
+| `putAll(PutArgs)` with `timeToLive`, `expireAt`, `keepTTL` | `extend(entries).ttl(d)`, `.expire_at(t)`, `.keep_ttl()` (`expire_at` and `keep_ttl` need Redis 8.0) |
+| `putIfAllKeysAbsent(PutArgs)` | `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
+| `putIfAllKeysExist(PutArgs)` | `update_many(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |
 
 ## LocalCachedMap
 

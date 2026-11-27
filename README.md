@@ -79,6 +79,7 @@ async fn main() -> redissun::Result<()> {
 | [`HyperLogLog`](https://empatixx.github.io/redissun/docs/objects/hyper-log-log) | HyperLogLog | stable |
 | [`BloomFilter`](https://empatixx.github.io/redissun/docs/objects/bloom-filter) | string and hash | stable |
 | [`HashMapCache`](https://empatixx.github.io/redissun/docs/objects/hash-map-cache) | hash, sorted sets, strings and pub/sub (Redisson's `RMapCache` layout) | stable |
+| [`MapCacheNative`](https://empatixx.github.io/redissun/docs/objects/map-cache-native) | hash with per-field TTL (Redis 7.4+) | experimental |
 | [`HashSetCache`](https://empatixx.github.io/redissun/docs/objects/hash-set-cache) | sorted set | stable |
 | [`Topic`](https://empatixx.github.io/redissun/docs/objects/topic) | pub/sub | stable |
 | [`PatternTopic`](https://empatixx.github.io/redissun/docs/objects/topic#pattern-topics) | pub/sub | stable |

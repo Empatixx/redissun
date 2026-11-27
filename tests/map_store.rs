@@ -1450,3 +1450,171 @@ async fn local_a_cancelled_read_does_not_stop_caching() {
     assert_eq!(map.get("1").await.unwrap(), Some("11".to_string()));
     assert_eq!(map.local_len(), 1, "the key was not cached");
 }
+
+// --- MapCacheNative ---
+
+type NativeMap = redissun::MapCacheNative<String, String, JsonCodec>;
+
+async fn native_on(
+    client: &redissun::Client,
+    store: &MemoryStore,
+    loader: bool,
+    writer: bool,
+) -> NativeMap {
+    let mut builder = client.map_cache_native_builder::<String, String>(unique("mcn"));
+    if loader {
+        builder = builder.loader(store.clone());
+    }
+    if writer {
+        builder = builder.writer(store.clone());
+    }
+    builder.build().await.unwrap()
+}
+
+#[tokio::test]
+async fn native_get_loads_a_missing_key_without_a_ttl() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let map = native_on(&client().await, &store, true, false).await;
+    assert_eq!(map.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(map.len().await.unwrap(), 1);
+    assert_eq!(map.entry_ttl("1").await.unwrap(), None);
+    assert_eq!(store.loads(), 1);
+}
+
+#[tokio::test]
+async fn native_entry_loads_under_its_lock() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let map = native_on(&client().await, &store, true, false).await;
+    let entry = timeout(
+        Duration::from_secs(5),
+        map.entry("1").ttl(Duration::from_secs(60)),
+    )
+    .await
+    .expect("the entry hangs")
+    .unwrap();
+    match &entry {
+        Entry::Occupied(occupied) => assert_eq!(occupied.get(), "11"),
+        Entry::Vacant(_) => panic!("the loader was not asked"),
+    }
+    // The loaded value is stored without a TTL; the entry's write gives it one.
+    assert_eq!(map.entry_ttl("1").await.unwrap(), None);
+    let value = entry
+        .and_modify(|v| v.push('!'))
+        .or_insert("x".to_string())
+        .await
+        .unwrap();
+    assert_eq!(value, "11!");
+    assert!(map.entry_ttl("1").await.unwrap().is_some());
+    assert_eq!(store.loads(), 1);
+}
+
+// RedissonMapCacheNativeTest testWriterPutTTL, testWriterFastPutTTL, testWriterPutIfAbsentTTL, testWriterFastPutIfAbsentTTL.
+#[tokio::test]
+async fn native_writer_gets_ttl_writes() {
+    let ttl = Duration::from_secs(10);
+    let all = expected(&[("1", "11"), ("2", "22"), ("3", "33")]);
+    let client = client().await;
+
+    let store = MemoryStore::default();
+    let map = native_on(&client, &store, false, true).await;
+    for (k, v) in [("1", "11"), ("2", "22"), ("3", "33")] {
+        map.insert(k, v).ttl(ttl).await.unwrap();
+    }
+    assert_eq!(store.snapshot(), all);
+    assert_eq!(store.write_calls().len(), 3);
+
+    let store = MemoryStore::default();
+    let map = native_on(&client, &store, false, true).await;
+    for (k, v) in [("1", "11"), ("2", "22"), ("3", "33")] {
+        map.set(k, v).ttl(ttl).await.unwrap();
+    }
+    assert_eq!(store.snapshot(), all);
+    assert_eq!(store.write_calls().len(), 3);
+
+    let store = MemoryStore::default();
+    let map = native_on(&client, &store, false, true).await;
+    assert_eq!(map.try_insert("1", "11").ttl(ttl).await.unwrap(), None);
+    assert_eq!(
+        map.try_insert("1", "00").ttl(ttl).await.unwrap(),
+        Some("11".to_string())
+    );
+    assert_eq!(map.replace("2", "22").ttl(ttl).await.unwrap(), None);
+    assert_eq!(store.snapshot(), expected(&[("1", "11")]));
+    assert_eq!(store.write_calls(), vec![vec!["1"]]);
+    assert_eq!(
+        map.replace("1", "12").ttl(ttl).await.unwrap(),
+        Some("11".to_string())
+    );
+    assert_eq!(store.snapshot(), expected(&[("1", "12")]));
+}
+
+#[tokio::test]
+async fn native_writer_gets_all_or_nothing_writes() {
+    let store = MemoryStore::default();
+    let map = native_on(&common::redis8_client().await, &store, false, true).await;
+    let ttl = Duration::from_secs(10);
+    assert!(map
+        .try_extend([("1", "11"), ("2", "22")])
+        .ttl(ttl)
+        .await
+        .unwrap());
+    assert_eq!(store.snapshot(), expected(&[("1", "11"), ("2", "22")]));
+    assert!(!map
+        .try_extend([("2", "x"), ("3", "33")])
+        .ttl(ttl)
+        .await
+        .unwrap());
+    assert!(!map.update_many([("1", "x"), ("3", "33")]).await.unwrap());
+    assert_eq!(store.write_calls().len(), 1);
+    assert!(map
+        .update_many([("1", "12"), ("2", "23")])
+        .keep_ttl()
+        .await
+        .unwrap());
+    assert_eq!(store.snapshot(), expected(&[("1", "12"), ("2", "23")]));
+    assert_eq!(store.write_calls().len(), 2);
+}
+
+#[tokio::test]
+async fn native_expire_and_persist_do_not_call_the_writer() {
+    let store = MemoryStore::default();
+    let map = native_on(&client().await, &store, false, true).await;
+    map.insert("1", "11").await.unwrap();
+    let calls = store.write_calls().len();
+    let ttl = Duration::from_secs(10);
+    assert!(map.expire_entry("1").ttl(ttl).await.unwrap());
+    assert_eq!(
+        map.expire_entries(&["1"]).ttl(ttl).if_less().await.unwrap(),
+        0
+    );
+    assert!(map.persist_entry("1").await.unwrap());
+    map.persist_entries(&["1"]).await.unwrap();
+    assert!(map.expire_entry("1").await.unwrap());
+    assert_eq!(store.write_calls().len(), calls);
+    assert!(store.delete_calls().is_empty());
+}
+
+#[tokio::test]
+async fn native_write_behind_flushes() {
+    let store = MemoryStore::default();
+    let map: NativeMap = client()
+        .await
+        .map_cache_native_builder(unique("mcn"))
+        .writer(store.clone())
+        .write_mode(WriteMode::WriteBehind {
+            batch_size: 10,
+            delay: Duration::from_millis(100),
+        })
+        .build()
+        .await
+        .unwrap();
+    let entries: Vec<(String, String)> =
+        (0..25).map(|i| (i.to_string(), format!("v{i}"))).collect();
+    map.extend(entries.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    map.flush().await.unwrap();
+    assert_eq!(store.snapshot().len(), 25);
+    assert_eq!(map.len().await.unwrap(), 25);
+}

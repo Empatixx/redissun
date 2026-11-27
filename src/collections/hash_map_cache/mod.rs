@@ -807,7 +807,14 @@ where
 
     /// Starts listening to the given kinds of keyspace notification. See [`HashMapCache::keyspace_events`].
     pub async fn keyspace_events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
-        map_events::subscribe(&self.key, self.codec.clone(), kinds, Some(TEMP_VAL_FIELD)).await
+        map_events::subscribe(
+            &self.key,
+            self.codec.clone(),
+            kinds,
+            Some(TEMP_VAL_FIELD),
+            false,
+        )
+        .await
     }
 
     /// Returns the value for the key, or `None` when it is missing or expired. A read starts the idle time of the entry again and counts as a use for the size limit. With a loader, a miss asks the loader and stores what it returns without limits.

@@ -1,4 +1,4 @@
-//! Redisson's map listeners (`MapPutListener`, `MapIncrListener`, `MapRemoveListener`, `DeletedObjectListener`, `ExpiredObjectListener`) as one stream of events.
+//! Redisson's map listeners (`MapPutListener`, `MapIncrListener`, `MapRemoveListener`, `DeletedObjectListener`, `ExpiredObjectListener`, and for `RMapCacheNative` `MapExpiredListener` and `MapClearExpireListener`) as one stream of events.
 
 use crate::codec::Codec;
 use crate::error::{Error, Result};
@@ -17,7 +17,7 @@ use tokio::time::Instant;
 /// How long a key event waits for the subkey event of the same write, Redisson's `MAP_FIELD_EVENT_DEDUPLICATION_TIMEOUT`.
 const DEDUPLICATION: Duration = Duration::from_millis(50);
 
-/// A change of a map, from [`HashMap::events`](crate::HashMap::events).
+/// A change of a map, from [`HashMap::events`](crate::HashMap::events) or [`MapCacheNative::events`](crate::MapCacheNative::events).
 ///
 /// `key` names the changed entry when the server sends subkey notifications (Redis 8.8 or newer with `T` in `notify-keyspace-events`); otherwise it is `None`, as in Redisson, whose listeners then get `null`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +42,18 @@ pub enum MapEvent<K> {
     Deleted,
     /// The whole map expired (`expired`), Redisson's `ExpiredObjectListener`.
     Expired,
+    /// An entry's time to live ran out and the server deleted it (`hexpired`), Redisson's `MapExpiredListener`. Only a [`MapCacheNative`](crate::MapCacheNative) reports it.
+    #[doc(alias = "MapExpiredListener")]
+    EntryExpired {
+        /// The expired key, when the server names it.
+        key: Option<K>,
+    },
+    /// An entry's time to live was removed (`hpersist`), Redisson's `MapClearExpireListener`. Only a [`MapCacheNative`](crate::MapCacheNative) reports it.
+    #[doc(alias = "MapClearExpireListener")]
+    EntryPersisted {
+        /// The key that lost its time to live, when the server names it.
+        key: Option<K>,
+    },
 }
 
 /// The kinds of [`MapEvent`], to listen to only some with [`HashMap::events_of`](crate::HashMap::events_of).
@@ -58,6 +70,10 @@ pub enum MapEventKind {
     Deleted,
     /// [`MapEvent::Expired`].
     Expired,
+    /// [`MapEvent::EntryExpired`]; only on a [`MapCacheNative`](crate::MapCacheNative).
+    EntryExpired,
+    /// [`MapEvent::EntryPersisted`]; only on a [`MapCacheNative`](crate::MapCacheNative).
+    EntryPersisted,
 }
 
 impl MapEventKind {
@@ -69,6 +85,25 @@ impl MapEventKind {
         MapEventKind::Expired,
     ];
 
+    /// Every kind, with the two of field TTLs that only a `MapCacheNative` has.
+    pub(crate) const NATIVE: [MapEventKind; 7] = [
+        MapEventKind::Put,
+        MapEventKind::Incremented,
+        MapEventKind::Removed,
+        MapEventKind::Deleted,
+        MapEventKind::Expired,
+        MapEventKind::EntryExpired,
+        MapEventKind::EntryPersisted,
+    ];
+
+    /// Whether the kind needs a map with field TTLs.
+    fn needs_field_ttl(self) -> bool {
+        matches!(
+            self,
+            MapEventKind::EntryExpired | MapEventKind::EntryPersisted
+        )
+    }
+
     /// The patterns Redisson subscribes to for this kind: the subkey event first, when there is one.
     fn patterns(self) -> &'static [&'static str] {
         match self {
@@ -79,6 +114,8 @@ impl MapEventKind {
             MapEventKind::Removed => &["__subkeyevent@*:hdel", "__keyevent@*:hdel"],
             MapEventKind::Deleted => &["__keyevent@*:del"],
             MapEventKind::Expired => &["__keyevent@*:expired"],
+            MapEventKind::EntryExpired => &["__subkeyevent@*:hexpired", "__keyevent@*:hexpired"],
+            MapEventKind::EntryPersisted => &["__subkeyevent@*:hpersist", "__keyevent@*:hpersist"],
         }
     }
 }
@@ -89,13 +126,15 @@ fn field_event<K>(name: &str, key: Option<K>) -> Option<MapEvent<K>> {
         "hset" => Some(MapEvent::Put { key }),
         "hincrbyfloat" => Some(MapEvent::Incremented { key }),
         "hdel" => Some(MapEvent::Removed { key }),
+        "hexpired" => Some(MapEvent::EntryExpired { key }),
+        "hpersist" => Some(MapEvent::EntryPersisted { key }),
         _ => None,
     }
 }
 
-/// The changes of one map, from [`HashMap::events`](crate::HashMap::events). Dropping it stops listening, Redisson's `removeListener`.
+/// The changes of one map, from [`HashMap::events`](crate::HashMap::events) or [`MapCacheNative::events`](crate::MapCacheNative::events). Dropping it stops listening, Redisson's `removeListener`.
 ///
-/// Redis sends these events only when its `notify-keyspace-events` setting enables them, as for Redisson: `E` with `h` for the field events, `g` for [`MapEvent::Deleted`] and `x` for [`MapEvent::Expired`], and `T` (Redis 8.8 or newer) for the names of changed keys. Like [`Keys::listen`](crate::Keys::listen), it hears the node of the client's pub/sub connection, which in a cluster is one master.
+/// Redis sends these events only when its `notify-keyspace-events` setting enables them, as for Redisson: `E` with `h` for the field events (also `hexpired` and `hpersist`), `g` for [`MapEvent::Deleted`] and `x` for [`MapEvent::Expired`], and `T` (Redis 8.8 or newer) for the names of changed keys. Like [`Keys::listen`](crate::Keys::listen), it hears the node of the client's pub/sub connection, which in a cluster is one master.
 pub struct MapEvents<K, C: Codec> {
     name: String,
     codec: C,
@@ -126,16 +165,22 @@ struct Queued<K> {
     event: Result<MapEvent<K>>,
 }
 
-/// Subscribes to the patterns of `kinds` for the map at `key`. Subkey events of `skip_field` are dropped before decoding.
+/// Subscribes to the patterns of `kinds` for the map at `key`. Subkey events of `skip_field` are dropped before decoding. Without `field_ttl`, the kinds of field TTLs are an [`Error::Config`], as Redisson's `RMap.addListener` does not take their listeners.
 pub(crate) async fn subscribe<K, C: Codec>(
     key: &Key,
     codec: C,
     kinds: &[MapEventKind],
     skip_field: Option<&'static [u8]>,
+    field_ttl: bool,
 ) -> Result<MapEvents<K, C>> {
+    if !field_ttl && kinds.iter().any(|kind| kind.needs_field_ttl()) {
+        return Err(Error::Config(
+            "EntryExpired and EntryPersisted need a MapCacheNative".into(),
+        ));
+    }
     let pubsub = key.core.pubsub().await?.clone();
     let mut sources = std::vec::Vec::new();
-    for kind in MapEventKind::ALL {
+    for kind in MapEventKind::NATIVE {
         if kinds.contains(&kind) {
             for pattern in kind.patterns() {
                 sources.push(pubsub.psubscribe_with_messages(pattern).await?);

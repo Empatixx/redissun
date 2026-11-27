@@ -45,6 +45,8 @@ let user = users.get("jirka").await?; // a miss asks the loader
 
 `client.hash_map_cache_builder::<K, V>(name)` takes the same options for a `HashMapCache`; [HashMapCache](/docs/objects/hash-map-cache) lists where its loader and writer are called.
 
+`client.map_cache_native_builder::<K, V>(name)` takes them for a `MapCacheNative`; [MapCacheNative](/docs/objects/map-cache-native) lists where its loader and writer are called.
+
 `client.local_cached_map::<K, V>(name)` takes them for a `LocalCachedMap`; [LocalCachedMap](/docs/objects/local-cached-map) lists where its loader and writer are called.
 
 ## When the loader is asked

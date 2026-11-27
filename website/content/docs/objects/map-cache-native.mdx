@@ -1,0 +1,124 @@
+---
+title: MapCacheNative
+description: A shared map whose entries expire on the server (Redis 7.4 hash field expiration). Experimental.
+---
+
+**Experimental.** A `MapCacheNative` is a `HashMap` whose entries can each have a time to live, and the server deletes them when it runs out. It is Redisson's `RMapCacheNative`.
+
+```rust
+use std::time::Duration;
+
+let tokens = client.map_cache_native::<String, String>("tokens");
+
+tokens.insert("abc", &token).ttl(Duration::from_secs(60)).await?;
+let left = tokens.entry_ttl("abc").await?;
+```
+
+It needs **Redis 7.4 or newer, or Valkey 9** (hash field expiration) for every method that sets or reads a time to live, and **Redis 8.0** for the methods that send `HSETEX`. On an older server such a method returns `Error::Unsupported` and writes nothing. Such a call first asks the server with `HPTTL` on the map's key (and `HSETEX` for the methods that send it), commands any user of the map may run, so an ACL user needs no `COMMAND`. A client keeps a yes and asks again after a no, so a client started before a server upgrade picks up the new commands. The methods it shares with `HashMap` work on any server.
+
+## Compared with `HashMapCache`
+
+| | `MapCacheNative` | `HashMapCache` |
+|---|---|---|
+| expiry | by the server, per hash field | by scripts and a clean-up task, on the client's clock |
+| keys | one hash | a hash, sorted sets and strings |
+| clean-up task | none | yes |
+| maximum size, max idle, entry events, leases | no, as in Redisson | yes |
+| minimum server | Redis 7.4 / Valkey 9 | Redis 6.2 |
+
+## Methods
+
+Every `HashMap` method works the same way: `get`, `remove`, `contains_key`, `len`, `is_empty`, `clear`, `get_many`, `compare_and_set`, `remove_if_eq`, `remove_many`, `contains_value`, `value_len`, `random_keys`, `random_entries`, `to_hash_map`, `iter`, `keys`, `values`, `iter_with`, `keys_with`, `values_with`, `load_all`, `load_many`, `flush`, and the per-key objects (`lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)`).
+
+| Method | Notes |
+|---|---|
+| `insert(&k, &v)[.ttl(d) / .expire_at(t)]` | returns the old value. Without a time the entry has none afterwards, like `HashMap::insert`; with one, it gets that time and loses the old one. Redisson's `put`. |
+| `set(&k, &v)[.ttl(d) / .expire_at(t)]` | the same write, returning whether the key was new. Redisson's `fastPut`. |
+| `try_insert(&k, &v)[.ttl(d) / .expire_at(t)]` | stores only when the key is missing: `None` when it stored, else the present value, whose value and TTL stay. Redisson's `putIfAbsent` and `fastPutIfAbsent`. |
+| `replace(&k, &v)[.ttl(d) / .expire_at(t)]` | replaces a present key and returns the old value; a missing key gives `None` and stays missing. **Without a time it keeps the entry's TTL**, like `HashMapCache::replace`; with one, it sets the new time. Redisson's `putIfExist`, `putIfExists`, `replace(k, v)`, `fastReplace`. |
+| `compare_and_set(&k, &old, &new)` | sets `new` only when the entry holds `old`, and **keeps the entry's TTL**. Redisson's `replace(k, old, new)`. |
+| `incr_by(&k, n)`, `incr_by_float(&k, x)` | keep the entry's TTL (`HINCRBY` does not clear it). |
+| `entry_ttl(&k)` | the time the entry has left (`HPTTL`). `None` when it has no time to live or is missing. |
+| `entry_ttls(&[&k, ..])` | the same for several keys, in key order; a key listed twice gives two items. |
+| `expire_entry(&k).ttl(d) / .expire_at(t)` | gives a present entry a new time, longer or shorter, and returns whether it changed it; a missing entry gives `false`. Takes `.if_not_set()`, `.if_greater()` or `.if_less()` (see [Conditions](#conditions)). Redisson's `expireEntry` and its `IfNotSet`/`IfGreater`/`IfLess` forms. |
+| `expire_entry(&k)` | without a time, or with `.ttl(Duration::ZERO)`: removes the TTL and returns whether the entry exists. |
+| `expire_entries(&[&k, ..])…` | the same for several entries in one script; returns how many it changed. A key listed twice counts twice. An empty list sends nothing. |
+| `persist_entry(&k)` | removes the TTL (`HPERSIST`); `true` only when there was one. Redisson's `clearExpire(k)`. |
+| `persist_entries(&[&k, ..])` | the same for several keys: one `bool` per key, in key order. Redisson's `clearExpire(keys)`. |
+| `extend(entries)[.batch_size(n)][.ttl(d) / .expire_at(t) / .keep_ttl()]` | inserts all `(&k, &v)` pairs, one call per batch. Without a time the entries have none afterwards (`HSET`, like `HashMap::extend`). `.ttl(d)` runs Redisson's `putAll(map, ttl)` script (Redis 7.4); `.expire_at(t)` and `.keep_ttl()` send `HSETEX` (**Redis 8.0**), Redisson's `putAll(PutArgs)`. An empty list sends nothing. |
+| `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` | stores all entries only when none of the keys is present, in one `HSETEX … FNX` (**Redis 8.0**), and returns whether it did; otherwise nothing changes. Redisson's `putIfAllKeysAbsent`. |
+| `update_many(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` | overwrites all entries only when every key is present (`HSETEX … FXX`, **Redis 8.0**), and returns whether it did. Without a time they lose their TTL; `.keep_ttl()` keeps it. Redisson's `putIfAllKeysExist`. |
+
+## Expiry
+
+A write takes `.ttl(Duration)` or `.expire_at(SystemTime)`; `extend`, `try_extend` and `update_many` also take `.keep_ttl()`. When several are set, the last one wins.
+
+- `.ttl(d)` counts on the **server's** clock from the write (`HPEXPIRE`). `.expire_at(t)` is a deadline on the **caller's** clock (`HPEXPIREAT` with Unix milliseconds).
+- `.ttl(Duration::ZERO)` means no time to live: the entry is stored without one, as Redisson does for `0`. It is never deleted at once.
+- A deadline in the past is passed through: the server deletes the entry at once, and `insert` still returns the old value. A `SystemTime` before 1970 is `Error::Config`, and nothing is written.
+- Which writes clear a TTL: `insert`, `set`, `extend` and the other writes without a time go through `HSET`, which leaves the entry without one. `replace` and `compare_and_set` keep it (their scripts read `HPTTL` and put it back), and `incr_by`/`incr_by_float` keep it because `HINCRBY` does. This differs from Redisson's `replace`, which clears it.
+- `extend(..).expire_at(t)`, `extend(..).keep_ttl()`, `try_extend` and `update_many` send `HSETEX`, which Redis 7.4 lacks: there they return `Error::Unsupported` and write nothing. `extend(..).ttl(d)` works on 7.4.
+- The server deletes an expired entry itself, when it is read or a little later on its own; `get` and the iterators never see it. Until then `len` (`HLEN`) still counts it.
+
+## Entries
+
+`entry(&k)` takes the key's lock (the per-key lock Redisson's `compute` family takes) and reads the value, like `HashMap::entry`. Await it as it is, or after `.ttl(d)` or `.expire_at(t)`:
+
+```rust
+let n = visits
+    .entry("home")
+    .ttl(Duration::from_secs(60))
+    .await?
+    .and_modify(|n| *n += 1)
+    .or_insert(1)
+    .await?;
+```
+
+- With a time, a write through the entry gives it that time (Redisson's `compute(k, ttl, f)` and `computeIfAbsent(k, ttl, f)`, through its `fastPut`-with-TTL script).
+- Without a time, or with `.ttl(Duration::ZERO)`, a write stores the value with `HSET`, so the entry loses its TTL, as Redisson's `compute(k, f)` does. Reading through an entry without writing changes nothing.
+- An expired entry is vacant. A bad time (before 1970) or a server without field TTLs fails before the lock is taken.
+
+## Loaders and writers
+
+`client.map_cache_native_builder::<K, V>(name)` takes the options of `hash_map_builder` (`loader`, `writer`, `write_mode`, retries), Redisson's `getMapCacheNative(MapOptions)`, and `.build().await` returns the map.
+
+- The loader is asked as on a `HashMap`: by `get`, `get_many`, `contains_key` and `entry` on a miss, and by `load_all`/`load_many`. A loaded value is stored with `HSET`, **without a time to live**, also inside an entry with `.ttl(d)`; the entry's own write then gives it the time.
+- The writer gets every write after Redis stored it: `insert` and `set` always, `try_insert` when it stored, `replace` and `compare_and_set` when they replaced, `extend` once per batch, `try_extend` and `update_many` when they stored all entries, and `entry` writes and removes. `expire_entry`, `expire_entries`, `persist_entry` and `persist_entries` call no writer.
+- Write-behind (`WriteMode::WriteBehind`) and `flush()` work as on a `HashMap`.
+
+## Events
+
+`events()` listens to every change, Redisson's `addListener`: the `MapEvent`s of a `HashMap` (`Put`, `Incremented`, `Removed`, `Deleted`, `Expired`), plus `EntryExpired` when the server deletes an entry whose time ran out (`hexpired`, Redisson's `MapExpiredListener`) and `EntryPersisted` when a TTL is removed (`hpersist`, `MapClearExpireListener`). `events_of(&[MapEventKind::EntryExpired])` listens to some kinds only. Dropping the `MapEvents` stops listening.
+
+```rust
+let mut events = tokens.events_of(&[MapEventKind::EntryExpired]).await?;
+while let Ok(MapEvent::EntryExpired { key }) = events.recv().await {
+    println!("expired: {key:?}");
+}
+```
+
+The server sends these only when `notify-keyspace-events` enables them, as for Redisson:
+
+- `E` and `h` for the field events, `EntryExpired` and `EntryPersisted` among them (Redis 7.4).
+- `T`, on Redis 8.8 or newer, for the name of the changed entry (`key: Some(k)`); without it, `key` is `None`.
+- `g` for `Deleted` and `x` for `Expired`, the events of the whole map.
+
+`HashMap::events_of` and `HashMapCache::keyspace_events_of` with `EntryExpired` or `EntryPersisted` return `Error::Config`, as Redisson's `RMap.addListener` does not take those listeners.
+
+## What it does not have
+
+As in Redisson's `RMapCacheNative`, and unlike `HashMapCache`: no maximum size or eviction mode (`setMaxSize`, `trySetMaxSize`), no max idle, no entry events with values (`MapEntryListener`), no `peek` (`getWithTTLOnly`), no leases, no `updateEntryExpiration`, and no clean-up task. As on the other maps, `sizeInMemory`, `destroy`, `mapReduce`, `expireAt` and `expire` with a condition on the whole object, and batch views are not ported.
+
+## How it is stored
+
+One hash at the raw name, with no braces added and no other keys, the same hash a `HashMap` of that name and a Redisson `RMapCacheNative` use. The server stores each field's deadline. Redisson and redissun clients share the data, and the per-key objects have Redisson's names (`{name}:<hash of the key>:lock`).
+
+## Conditions
+
+`.if_not_set()`, `.if_greater()` and `.if_less()` are Redis's `NX`, `GT` and `LT`; the last one set wins, and each needs `.ttl(d)` or `.expire_at(t)` (without a time it is `Error::Config`). Redis counts an entry without a TTL as one that never expires, so on such an entry `.if_greater()` changes nothing (`false`), `.if_less()` sets the time (`true`), and `.if_not_set()` sets it (`true`). A missing entry is never changed.
+
+`expire_entry(&k)` without a time removes the TTL, as `HashMapCache::expire_entry` removes its limits. Redisson's `expireEntry(k, Duration.ZERO)` sends `hpexpire 0`, which deletes the entry; here `.ttl(Duration::ZERO)` means no time to live, as in every other method.
+
+`expire_entry` and `expire_entries` call no writer, like `persist_entry` and `persist_entries`.
+
+The server deletes a field whose time ran out when it is read, or a little later on its own. Until then, `expire_entry` and `expire_entries` (`HPEXPIRE`) still find it and give it the new time, on Redis 7.4 and 8.8 alike, as with Redisson.

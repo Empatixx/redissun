@@ -159,7 +159,7 @@ impl<K, V, C: Codec> HashMap<K, V, C> {
     }
 
     /// The store when it has a writer; `None` skips every writer call.
-    fn writer(&self) -> Option<&Store<K, V, C>> {
+    pub(crate) fn writer(&self) -> Option<&Store<K, V, C>> {
         self.store.as_deref().filter(|store| store.has_writer())
     }
 }
@@ -219,12 +219,12 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    fn decode_value(&self, raw: Option<Bytes>) -> Result<Option<V>> {
+    pub(crate) fn decode_value(&self, raw: Option<Bytes>) -> Result<Option<V>> {
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
     /// Hands a stored entry to the writer, if there is one.
-    async fn written(&self, k: Bytes, v: Bytes) -> Result<()> {
+    pub(crate) async fn written(&self, k: Bytes, v: Bytes) -> Result<()> {
         match self.writer() {
             Some(store) => store.written(&[(k, v)]).await,
             None => Ok(()),
@@ -232,7 +232,7 @@ where
     }
 
     /// Hands a removed key to the writer, if there is one.
-    async fn deleted(&self, k: Bytes) -> Result<()> {
+    pub(crate) async fn deleted(&self, k: Bytes) -> Result<()> {
         match self.writer() {
             Some(store) => store.deleted(&[k]).await,
             None => Ok(()),
@@ -274,7 +274,7 @@ where
 
     /// Starts listening to the given kinds of change.
     pub async fn events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
-        events::subscribe(&self.key, self.codec.clone(), kinds, None).await
+        events::subscribe(&self.key, self.codec.clone(), kinds, None, false).await
     }
 
     per_key_objects!();

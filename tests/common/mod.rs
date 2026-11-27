@@ -102,7 +102,12 @@ pub async fn redis8_client() -> Client {
 
 /// A Redis server of its own, removed when the returned container is dropped, for tests that wipe every database.
 pub async fn own_redis() -> (ContainerAsync<Redis>, String) {
-    let container = Redis::default().with_tag("7.4").start().await.unwrap();
+    own_redis_tag("7.4").await
+}
+
+/// A Redis server of its own with the image tag `tag`, for tests that need an older or newer server.
+pub async fn own_redis_tag(tag: &str) -> (ContainerAsync<Redis>, String) {
+    let container = Redis::default().with_tag(tag).start().await.unwrap();
     let port = container.get_host_port_ipv4(6379).await.unwrap();
     wait_until_ready(port).await;
     (container, format!("redis://127.0.0.1:{port}"))

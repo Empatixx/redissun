@@ -33,6 +33,7 @@ mod collections;
 mod coordination;
 mod error;
 mod eviction;
+mod expiry;
 mod keys;
 mod locks;
 mod lua;
@@ -60,6 +61,16 @@ pub mod hash_map_cache {
         TryInsert,
     };
     pub use crate::collections::map::load::LoadAll;
+}
+
+/// The builders [`MapCacheNative`] methods return.
+pub mod map_cache_native {
+    pub use crate::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};
+    pub use crate::collections::map::load::LoadAll;
+    pub use crate::collections::map_cache_native::{
+        EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Replace, Set, TryExtend,
+        TryInsert, UpdateMany,
+    };
 }
 
 /// The builders [`SortedSet`] methods return.
@@ -119,6 +130,7 @@ pub use collections::local_cached_map::{
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
 pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
+pub use collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
@@ -128,6 +140,7 @@ pub use coordination::permit_semaphore::{PermitExpirableSemaphore, PermitRequest
 pub use coordination::rate_limiter::{RateLimiter, RateLimiterConfig, RateType};
 pub use coordination::semaphore::{Permits, Semaphore};
 pub use error::{Error, Result};
+pub use expiry::Expiry;
 pub use keys::{KeyEvent, KeyEvents, KeyType, Keys, KeysScan, Migrate};
 pub use locks::fair_lock::FairLock;
 pub use locks::fenced_lock::FencedLock;
@@ -151,7 +164,7 @@ pub use values::atomic_i64::{AtomicI64, Comparison};
 pub use values::bit_set::BitSet;
 pub use values::bloom_filter::BloomFilter;
 pub use values::bucket::Bucket;
-pub use values::buckets::{Buckets, Expiry};
+pub use values::buckets::Buckets;
 pub use values::geo::{Geo, GeoMatch, GeoOrder, GeoPoint, GeoSearch, GeoUnit};
 pub use values::hyper_log_log::HyperLogLog;
 pub use values::id_generator::IdGenerator;
