@@ -457,7 +457,8 @@ async fn sharded_topics_and_permits_work_on_a_cluster() {
     for i in 0..10 {
         client
             .sharded_topic::<i32>(format!("test{i}"))
-            .unsubscribe_all();
+            .unsubscribe_all()
+            .await;
     }
 
     let semaphore = client.permit_expirable_semaphore("semaphore");

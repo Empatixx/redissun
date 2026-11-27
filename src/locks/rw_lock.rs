@@ -7,12 +7,6 @@ use crate::locks::{
 use crate::object::{HasKey, Key};
 use std::fmt;
 
-/// Proof that a read lock is held. It is the same type as a [`LockGuard`].
-pub type RwLockReadGuard = LockGuard;
-
-/// Proof that the write lock is held. It is the same type as a [`LockGuard`].
-pub type RwLockWriteGuard = LockGuard;
-
 /// A reentrant distributed lock that admits many readers or one writer, the counterpart of Redisson's `RReadWriteLock`.
 ///
 /// Owners work as in [`Lock`](crate::Lock): the client together with the current tokio task. A task that holds the write lock may also take the read lock. A task that holds a read lock cannot take the write lock; it waits until it times out.
@@ -48,7 +42,7 @@ impl RwLock {
     }
 
     /// Takes a read lock when no other owner holds the write lock; returns `None` at once otherwise.
-    pub async fn try_read(&self) -> Result<Option<RwLockReadGuard>> {
+    pub async fn try_read(&self) -> Result<Option<LockGuard>> {
         acquire(&self.key, None, Wait::Once, Mode::Read).await
     }
 
@@ -58,7 +52,7 @@ impl RwLock {
     }
 
     /// Takes the write lock when nobody else holds any lock; returns `None` at once otherwise.
-    pub async fn try_write(&self) -> Result<Option<RwLockWriteGuard>> {
+    pub async fn try_write(&self) -> Result<Option<LockGuard>> {
         acquire(&self.key, None, Wait::Once, Mode::Write).await
     }
 

@@ -249,13 +249,13 @@ impl<M, C: Codec> ShardedTopic<M, C> {
 
     /// Number of [`ShardedSubscriber`]s of this topic in this client, Redisson's `countListeners`.
     #[doc(alias = "countListeners")]
-    pub fn local_subscriber_count(&self) -> usize {
+    pub async fn local_subscriber_count(&self) -> usize {
         self.key.core.sharded.listeners(self.key.name())
     }
 
     /// Ends every [`ShardedSubscriber`] of this topic in this client and unsubscribes, Redisson's `removeAllListeners`. Their `recv` fails once the messages already received are read.
     #[doc(alias = "removeAllListeners")]
-    pub fn unsubscribe_all(&self) {
+    pub async fn unsubscribe_all(&self) {
         let channel = lock(&self.key.core.sharded.channels)
             .remove(self.key.name())
             .and_then(|channel| channel.upgrade());

@@ -235,7 +235,7 @@ impl<M, C: Codec> ReliableTopic<M, C> {
 
     /// How many [`ReliableSubscriber`]s this handle and its clones have, Redisson's `countListeners`.
     #[doc(alias = "countListeners")]
-    pub fn local_subscriber_count(&self) -> usize {
+    pub async fn local_subscriber_count(&self) -> usize {
         lock(&self.shared.state).listeners.len()
     }
 
@@ -254,7 +254,7 @@ impl<M, C: Codec> ReliableTopic<M, C> {
 
     /// Ends every [`ReliableSubscriber`] of this handle and removes the subscriber, Redisson's `removeAllListeners`. Its unread messages are dropped.
     #[doc(alias = "removeAllListeners")]
-    pub async fn unsubscribe_all(&self) -> Result<()> {
+    pub async fn unsubscribe_all(&self) {
         let _transition = self.shared.transition.lock().await;
         let stopping = {
             let mut state = lock(&self.shared.state);
@@ -266,7 +266,6 @@ impl<M, C: Codec> ReliableTopic<M, C> {
             // The task removes the subscriber as it ends.
             let _ = stopping.await;
         }
-        Ok(())
     }
 }
 

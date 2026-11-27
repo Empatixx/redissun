@@ -120,7 +120,7 @@ pub use keys::{KeyEvent, KeyEvents, KeyType, Keys, KeysScan, Migrate};
 pub use locks::fair_lock::FairLock;
 pub use locks::fenced_lock::FencedLock;
 pub use locks::multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequest};
-pub use locks::rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use locks::rw_lock::RwLock;
 pub use locks::{Lock, LockGuard, LockRequest};
 pub use messaging::delayed_queue::DelayedQueue;
 pub use messaging::reliable_topic::{ReliableSubscriber, ReliableTopic};

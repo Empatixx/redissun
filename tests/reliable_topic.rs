@@ -44,7 +44,7 @@ async fn unsubscribe_all_without_a_subscriber_does_nothing() {
     let topic = client()
         .await
         .reliable_topic::<String>(unique("testRemoveAllFresh"));
-    topic.unsubscribe_all().await.unwrap();
+    topic.unsubscribe_all().await;
     assert_eq!(topic.subscriber_count().await.unwrap(), 0);
 }
 
@@ -73,7 +73,7 @@ async fn every_message_published_concurrently_arrives() {
         received.insert(next(&mut subscriber).await);
     }
     nothing_more(&mut subscriber).await;
-    topic.unsubscribe_all().await.unwrap();
+    topic.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -176,11 +176,11 @@ async fn a_subscriber_that_comes_back_reads_what_was_published_meanwhile() {
     // Redisson's testReattach and testListener.
     let topic = client().await.reliable_topic::<String>(unique("test2"));
     let mut subscriber = topic.subscribe().await.unwrap();
-    assert_eq!(topic.local_subscriber_count(), 1);
+    assert_eq!(topic.local_subscriber_count().await, 1);
     topic.publish("1").await.unwrap();
     assert_eq!(next(&mut subscriber).await, "1");
     drop(subscriber);
-    assert_eq!(topic.local_subscriber_count(), 0);
+    assert_eq!(topic.local_subscriber_count().await, 0);
     let deadline = Instant::now() + WAIT;
     while topic.subscriber_count().await.unwrap() != 0 {
         assert!(Instant::now() < deadline);
@@ -201,7 +201,7 @@ async fn each_handle_is_a_subscriber_and_its_listeners_share_it() {
     let topic = client.reliable_topic::<String>(&*name);
     let mut first = topic.subscribe().await.unwrap();
     let mut first_again = topic.clone().subscribe().await.unwrap();
-    assert_eq!(topic.local_subscriber_count(), 2);
+    assert_eq!(topic.local_subscriber_count().await, 2);
     assert_eq!(topic.publish("m1").await.unwrap(), 1);
     assert_eq!(next(&mut first).await, "m1");
     assert_eq!(next(&mut first_again).await, "m1");
@@ -219,7 +219,7 @@ async fn each_handle_is_a_subscriber_and_its_listeners_share_it() {
 async fn unsubscribe_all_ends_the_subscribers() {
     let topic = client().await.reliable_topic::<String>(unique("ended"));
     let subscriber = topic.subscribe().await.unwrap();
-    topic.unsubscribe_all().await.unwrap();
+    topic.unsubscribe_all().await;
     assert_eq!(topic.subscriber_count().await.unwrap(), 0);
     let rest: Vec<_> = timeout(WAIT, subscriber.into_stream().collect::<Vec<_>>())
         .await
