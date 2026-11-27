@@ -1,4 +1,19 @@
 //! Loaders and writers of the maps: Redisson's `MapOptions` store features.
+//!
+//! Ported from Redisson 4.8.0's `BaseMapTest` (run there for `RMap`, `RMapCache` and `RLocalCachedMap`):
+//! `testMapLoaderGet`, `testMapLoaderGetMulipleNulls`, `testLoadAll`, `testLoadAllReplaceValues`,
+//! `testWriterPut`, `testWriterFastPut`, `testWriterRemove`, `testWriterReplaceKeyValue`,
+//! `testWriterReplaceKeyOldNewValue`, `testWriterRemoveKeyValue`, `testWriterPutIfAbsent`,
+//! `testWriterFastPutIfAbsent`, `testWriterPutAll`, `testWriterFastRemove`, `testWriterAddAndGet`,
+//! `testRetryableWriterSuccessAtLastRetry`, `testRetryableWriterAsyncSuccessAtLastRetry`,
+//! `testWriteBehindFastRemove`; from `RedissonMapTest` `testAddAndGetMapWriter`; from `RedissonMapCacheTest`
+//! `testWriterPutTTL`, `testWriterFastPutTTL`, `testWriterPutIfAbsentTTL` and `testWriterFastPutIfAbsentTTL`.
+//!
+//! Not ported one to one:
+//! - `testLoaderGetAsync`, `testLoadAllAsync` and `testWriteBehindAsyncFastRemove` are merged with their sync
+//!   twins: redissun has one async `MapLoader`/`MapWriter` and no sync API.
+//! - `testMapLoaderGetWithException` is inverted (owner decision 1): Redisson returns null, redissun returns
+//!   `Error::Loader` (`hash_map_a_failing_loader_is_an_error`).
 
 mod common;
 
@@ -1179,4 +1194,76 @@ async fn local_write_behind_flush() {
     assert!(store.snapshot().is_empty());
     map.flush().await.unwrap();
     assert_eq!(store.snapshot(), expected(&[("a", "1")]));
+}
+
+// Review Focus 5: loading (lock plus write), write-behind (RPUSH/LPOP) and FAST_REMOVE_BATCH stay in one slot.
+#[tokio::test]
+async fn loader_and_writer_work_on_a_cluster() {
+    let topology = common::topology::Topology::cluster().await;
+    let client = redissun::Client::builder()
+        .url(topology.cluster_url())
+        .build()
+        .await
+        .unwrap();
+    let behind = WriteMode::WriteBehind {
+        batch_size: 50,
+        delay: Duration::from_millis(100),
+    };
+    for name in [unique("ms"), format!("{{{}}}:m", unique("t"))] {
+        let store = MemoryStore::with(&[("1", "11")]);
+        let map: Map = client
+            .hash_map_builder(format!("{name}:map"))
+            .loader(store.clone())
+            .writer(store.clone())
+            .write_mode(behind)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap(), Some("11".to_string()));
+        map.insert("a", "1").await.unwrap();
+        map.insert("b", "2").await.unwrap();
+        map.flush().await.unwrap();
+        assert_eq!(
+            store.snapshot(),
+            expected(&[("1", "11"), ("a", "1"), ("b", "2")])
+        );
+        assert_eq!(map.remove_many(&["a", "b"]).await.unwrap(), 2);
+        map.flush().await.unwrap();
+        assert_eq!(store.delete_calls(), vec![vec!["a", "b"]], "{name}");
+        assert_eq!(store.snapshot(), expected(&[("1", "11")]));
+
+        let store = MemoryStore::with(&[("1", "11")]);
+        let cache: Cache = client
+            .hash_map_cache_builder(format!("{name}:cache"))
+            .loader(store.clone())
+            .writer(store.clone())
+            .write_mode(behind)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(cache.get("1").await.unwrap(), Some("11".to_string()));
+        cache
+            .insert("a", "1")
+            .ttl(Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache.insert("b", "2").await.unwrap();
+        cache.flush().await.unwrap();
+        assert_eq!(
+            store.snapshot(),
+            expected(&[("1", "11"), ("a", "1"), ("b", "2")])
+        );
+        assert_eq!(cache.remove_many(&["a", "b"]).await.unwrap(), 2);
+        cache.flush().await.unwrap();
+        assert_eq!(store.delete_calls(), vec![vec!["a", "b"]], "{name}");
+        assert_eq!(store.snapshot(), expected(&[("1", "11")]));
+
+        let store = MemoryStore::with(&[("1", "11")]);
+        let local = local_on(&client, &format!("{name}:local"), &store).await;
+        assert_eq!(local.get("1").await.unwrap(), Some("11".to_string()));
+        assert_eq!(local.local_len(), 1);
+        assert_eq!(local.len().await.unwrap(), 1);
+        local.insert("a", "1").await.unwrap();
+        assert_eq!(store.write_calls(), vec![vec!["a"]]);
+    }
 }

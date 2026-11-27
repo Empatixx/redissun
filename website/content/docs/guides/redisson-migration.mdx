@@ -144,6 +144,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `keySet()`, `values()`, `entrySet()` | `keys()`, `values()`, `iter()` as streams |
 | `getMap(name, MapOptions)` | `client.hash_map_builder(name).loader(l).writer(w)….build().await` |
 | `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)` |
+| `destroy()` (write-behind) | `flush().await`, and dropping the last handle drains once more |
 
 ## Vec
 

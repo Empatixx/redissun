@@ -27,6 +27,7 @@ description: Things to know about this version.
   - `value_len` returns the length of the encoded value without the 16-byte header (12 on a Windows server) that Redisson's `valueSize` counts.
   - A write with limits into a full cache that overwrites a live key also drops one other entry, because Redisson's size check uses `>=`.
   - `peek` and the scans read from the master. Redisson may read them from a replica.
-  - Not ported: `mapReduce`, `TrackingListener`, `destroy`, `sizeInMemory`, `expireAt` and `expire` with a condition.
+  - Not ported: `mapReduce`, `TrackingListener`, `destroy`, `sizeInMemory`, `expireAt` and `expire` with a condition, and `MapCacheOptions.removeEmptyEvictionTask`.
+- **LocalCachedMap and Redisson's `RLocalCachedMap`.** Not ported: `cacheSize(-1)`, a local cache that stores nothing (`cache_size(0)` means no limit, as in Redisson); `useObjectAsCacheKey`, since the local cache is always keyed by the encoded key; and `useTopicPattern`.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error, except for the entry time limits of `HashMapCache` and `HashSetCache`, where zero means no limit.
 - **Before 1.0**, the API can change between minor versions.
