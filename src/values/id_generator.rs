@@ -76,7 +76,8 @@ impl IdGenerator {
     }
 
     /// Sets the first id and how many ids one block holds, but only when they are not set yet. Returns whether the block size was set. Without it the ids start at 1 and a block holds 5000.
-    pub async fn try_init(&self, first: i64, allocation_size: i64) -> Result<bool> {
+    #[doc(alias = "tryInit")]
+    pub async fn init(&self, first: i64, allocation_size: i64) -> Result<bool> {
         if allocation_size <= 0 {
             return Err(Error::Config("allocation size must be positive".into()));
         }

@@ -18,14 +18,24 @@ Every method is `async` and returns `redissun::Result<T>`. The **Returns** colum
 
 | Method | Redis command | Returns |
 |---|---|---|
-| `set(&v)` | `SET` | `()` |
+| `set(&v)` | `SET` | `()`. The time limit is cleared. |
+| `set(&v).ttl(ttl)` | `SET PX` | `()` |
+| `set(&v).keep_ttl()` | `SET KEEPTTL` | `()`. The time limit stays. |
 | `get()` | `GET` | `Option<V>` |
-| `set_ex(&v, ttl)` | `SET PX` | `()` |
-| `set_nx(&v)` | `SET NX` | `true` if the value was stored |
-| `get_set(&v)` | `GETSET` | the old value |
-| `get_del()` | Lua script | the removed value |
+| `try_set(&v)` | `SETNX` | `true` if the value was stored, because the key was missing |
+| `try_set(&v).ttl(ttl)` | `SET PX NX` | `true` if the value was stored |
+| `update(&v)` | `SET XX` | `true` if the value was stored, because the key existed |
+| `update(&v).ttl(ttl)` | `SET PX XX` | `true` if the value was stored |
+| `replace(&v)` | `GETSET` | the old value, `Option<V>` |
+| `replace(&v).ttl(ttl)` | Lua script | the old value, `Option<V>` |
+| `take()` | Lua script | the removed value |
+| `get_expire(ttl)` | `GETEX PX` | the value; the key now expires after `ttl` |
+| `get_persist()` | `GETEX PERSIST` | the value; the time limit is removed |
+| `len()` | `STRLEN` | length of the encoded value in bytes |
 | `compare_and_set(Some(&expected), Some(&new))` | Lua script | `true` if the value was changed. `None` as expected means "only if missing"; `None` as new deletes the key. |
 
+
+`set`, `try_set`, `update` and `replace` return builders: add `.ttl(..)` (or `.keep_ttl()` on `set`) before `.await`.
 
 Values are passed by reference. For a `Bucket<String>` you can pass a `&str` such as `bucket.set("hello")`, or a `&String`.
 

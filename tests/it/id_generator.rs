@@ -11,10 +11,10 @@ async fn an_empty_generator_starts_at_one() {
 }
 
 #[tokio::test]
-async fn try_init_sets_the_first_id_once() {
+async fn init_sets_the_first_id_once() {
     let generator = client().await.id_generator(unique("ids"));
-    assert!(generator.try_init(12, 2931).await.unwrap());
-    assert!(!generator.try_init(0, 1000).await.unwrap());
+    assert!(generator.init(12, 2931).await.unwrap());
+    assert!(!generator.init(0, 1000).await.unwrap());
 
     for expected in 12..=5000 {
         assert_eq!(generator.next_id().await.unwrap(), expected);
@@ -27,7 +27,7 @@ async fn two_generators_never_hand_out_the_same_id() {
     let name = unique("ids");
     let first = client.id_generator(name.clone());
     let second = client.id_generator(name);
-    first.try_init(1, 10).await.unwrap();
+    first.init(1, 10).await.unwrap();
 
     let mut ids = std::collections::HashSet::new();
     for _ in 0..55 {
@@ -39,7 +39,7 @@ async fn two_generators_never_hand_out_the_same_id() {
 #[tokio::test]
 async fn a_block_size_that_is_not_positive_is_refused() {
     let generator = client().await.id_generator(unique("ids"));
-    assert!(generator.try_init(1, 0).await.is_err());
+    assert!(generator.init(1, 0).await.is_err());
 }
 
 #[tokio::test]
@@ -48,7 +48,7 @@ async fn the_common_methods_cover_both_keys() {
     let name = unique("ids");
     let renamed = unique("ids");
     let generator = client.id_generator(name.clone());
-    generator.try_init(12, 2931).await.unwrap();
+    generator.init(12, 2931).await.unwrap();
     let allocation = client.atomic_i64(format!("{{{name}}}:allocation"));
     assert_eq!(allocation.get().await.unwrap(), 2931);
 

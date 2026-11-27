@@ -400,7 +400,8 @@ async fn expire_many_and_expire_at_many_count_the_keys_that_exist() {
     for name in [&first, &second] {
         client
             .bucket::<i32>(&**name)
-            .set_ex(&23, Duration::from_secs(3600))
+            .set(&23)
+            .ttl(Duration::from_secs(3600))
             .await
             .unwrap();
     }

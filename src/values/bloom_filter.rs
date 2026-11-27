@@ -105,7 +105,7 @@ fn indexes(bytes: &[u8], config: Config) -> impl Iterator<Item = Bytes> {
 }
 
 fn not_initialised() -> Error {
-    Error::Config("the bloom filter is not initialised; call try_init first".into())
+    Error::Config("the bloom filter is not initialised; call init first".into())
 }
 
 fn changed(error: Error) -> Error {
@@ -121,7 +121,7 @@ fn changed(error: Error) -> Error {
 
 /// A distributed Bloom filter, modelled on Redisson's `RBloomFilter`: it remembers values in a small, fixed amount of memory and answers "possibly seen" or "never seen". It never forgets a value, and it is wrong in the "possibly" direction at most as often as the rate you asked for.
 ///
-/// Call [`try_init`](BloomFilter::try_init) once before use; the settings are stored in Redis and shared by every client. Values are told apart by their encoded bytes, hashed with HighwayHash under Redisson's key, so the same bytes set the same bits as in Redisson. The bits live in the string `name` and the settings in the hash `{name}:config`.
+/// Call [`init`](BloomFilter::init) once before use; the settings are stored in Redis and shared by every client. Values are told apart by their encoded bytes, hashed with HighwayHash under Redisson's key, so the same bytes set the same bits as in Redisson. The bits live in the string `name` and the settings in the hash `{name}:config`.
 pub struct BloomFilter<V, C: Codec> {
     key: Key,
     codec: C,
@@ -217,7 +217,8 @@ impl<V, C: Codec> BloomFilter<V, C> {
     /// Sets up the filter for `expected_insertions` values and a false positive rate of `false_probability` (for example 0.01 for 1%). Returns `false` and changes nothing when the filter was already set up.
     ///
     /// The number of bits is `floor(-n ln p / ln² 2)` and must be between 1 and 2 × (2³¹ − 1); the number of hashes is `round(bits / n × ln 2)`, at least 1.
-    pub async fn try_init(&self, expected_insertions: u64, false_probability: f64) -> Result<bool> {
+    #[doc(alias = "tryInit")]
+    pub async fn init(&self, expected_insertions: u64, false_probability: f64) -> Result<bool> {
         if false_probability > 1.0 {
             return Err(Error::Config(
                 "false probability can't be greater than 1".into(),
@@ -358,20 +359,22 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(self.insert_all(&[v]).await? > 0)
+        Ok(self.extend([v]).await? > 0)
     }
 
-    /// Adds several values; returns how many of them changed the filter, which means they were certainly new.
-    pub async fn insert_all<Q>(&self, values: &[&Q]) -> Result<u64>
+    /// Adds several values in one call; returns how many of them changed the filter, which means they were certainly new.
+    #[doc(alias = "add")]
+    pub async fn extend<'a, Q>(&self, values: impl IntoIterator<Item = &'a Q>) -> Result<u64>
     where
         V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
+        Q: Serialize + ?Sized + Sync + 'a,
     {
+        let values: Vec<&Q> = values.into_iter().collect();
         if values.is_empty() {
             return Ok(0);
         }
         let config = self.config().await?;
-        let args = self.arguments(values, config, config.hash_iterations)?;
+        let args = self.arguments(&values, config, config.hash_iterations)?;
         let outcome = self
             .key
             .core
@@ -390,23 +393,24 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        Ok(self.contains_each(&[v]).await?[0])
+        Ok(self.contains_many(&[v]).await?[0])
     }
 
-    /// Returns how many of `values` were possibly added.
-    pub async fn contains_all<Q>(&self, values: &[&Q]) -> Result<u64>
+    /// Returns how many of `values` were possibly added, Redisson's `contains(Collection)`.
+    #[doc(alias = "contains")]
+    pub async fn count_contained<Q>(&self, values: &[&Q]) -> Result<u64>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let found = self.contains_each(values).await?;
+        let found = self.contains_many(values).await?;
         Ok(found.into_iter().filter(|found| *found).count() as u64)
     }
 
     /// Answers [`contains`](BloomFilter::contains) for each of `values`, in order.
     ///
     /// A filter that is not set up, or was set up again with other settings since this handle last looked, contains nothing.
-    pub async fn contains_each<Q>(&self, values: &[&Q]) -> Result<Vec<bool>>
+    pub async fn contains_many<Q>(&self, values: &[&Q]) -> Result<Vec<bool>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,

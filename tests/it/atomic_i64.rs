@@ -19,12 +19,12 @@ async fn set_then_get() {
 }
 
 #[tokio::test]
-async fn add_and_get_and_get_and_add_differ_in_what_they_return() {
+async fn add_and_fetch_add_differ_in_what_they_return() {
     let counter = client().await.atomic_i64(unique("atomic"));
-    assert_eq!(counter.add_and_get(5).await.unwrap(), 5);
-    assert_eq!(counter.get_and_add(3).await.unwrap(), 5);
+    assert_eq!(counter.add(5).await.unwrap(), 5);
+    assert_eq!(counter.fetch_add(3).await.unwrap(), 5);
     assert_eq!(counter.get().await.unwrap(), 8);
-    assert_eq!(counter.add_and_get(-10).await.unwrap(), -2);
+    assert_eq!(counter.add(-10).await.unwrap(), -2);
 }
 
 #[tokio::test]
@@ -36,20 +36,20 @@ async fn incr_and_decr_return_the_new_value() {
 }
 
 #[tokio::test]
-async fn get_and_set_returns_the_previous_value() {
+async fn swap_returns_the_previous_value() {
     let counter = client().await.atomic_i64(unique("atomic"));
-    assert_eq!(counter.get_and_set(10).await.unwrap(), 0);
-    assert_eq!(counter.get_and_set(20).await.unwrap(), 10);
+    assert_eq!(counter.swap(10).await.unwrap(), 0);
+    assert_eq!(counter.swap(20).await.unwrap(), 10);
     assert_eq!(counter.get().await.unwrap(), 20);
 }
 
 #[tokio::test]
-async fn get_and_delete_removes_the_key() {
+async fn take_removes_the_key() {
     let counter = client().await.atomic_i64(unique("atomic"));
     counter.set(9).await.unwrap();
-    assert_eq!(counter.get_and_delete().await.unwrap(), 9);
+    assert_eq!(counter.take().await.unwrap(), 9);
     assert!(!counter.exists().await.unwrap());
-    assert_eq!(counter.get_and_delete().await.unwrap(), 0);
+    assert_eq!(counter.take().await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -206,9 +206,9 @@ async fn set_if_greater_replaces_only_a_smaller_value() {
 
 // Redisson: testGetAndSet
 #[tokio::test]
-async fn get_and_set_on_a_missing_counter_returns_zero() {
+async fn swap_on_a_missing_counter_returns_zero() {
     let al = client().await.atomic_i64(unique("test"));
-    assert_eq!(al.get_and_set(12).await.unwrap(), 0);
+    assert_eq!(al.swap(12).await.unwrap(), 0);
 }
 
 // Redisson: testGetZero
@@ -220,15 +220,15 @@ async fn get_on_a_missing_counter_returns_zero() {
 
 // Redisson: testGetAndDelete
 #[tokio::test]
-async fn get_and_delete_returns_the_value_or_zero_when_missing() {
+async fn take_returns_the_value_or_zero_when_missing() {
     let client = client().await;
     let al = client.atomic_i64(unique("test"));
     al.set(10).await.unwrap();
-    assert_eq!(al.get_and_delete().await.unwrap(), 10);
+    assert_eq!(al.take().await.unwrap(), 10);
     assert!(!al.exists().await.unwrap());
 
     let al2 = client.atomic_i64(unique("test2"));
-    assert_eq!(al2.get_and_delete().await.unwrap(), 0);
+    assert_eq!(al2.take().await.unwrap(), 0);
 }
 
 // Redisson: testCompareAndSetZero
@@ -257,10 +257,10 @@ async fn compare_and_set_with_the_wrong_expectation_leaves_the_value() {
 
 // Redisson: testSetThenIncrement
 #[tokio::test]
-async fn get_and_incr_returns_the_stored_value_before_incrementing() {
+async fn fetch_add_one_returns_the_stored_value_before_incrementing() {
     let al = client().await.atomic_i64(unique("test"));
     al.set(2).await.unwrap();
-    assert_eq!(al.get_and_incr().await.unwrap(), 2);
+    assert_eq!(al.fetch_add(1).await.unwrap(), 2);
     assert_eq!(al.get().await.unwrap(), 3);
 }
 
@@ -274,9 +274,9 @@ async fn incr_on_a_missing_counter_returns_one() {
 
 // Redisson: testGetAndIncrement
 #[tokio::test]
-async fn get_and_incr_on_a_missing_counter_returns_zero() {
+async fn fetch_add_one_on_a_missing_counter_returns_zero() {
     let al = client().await.atomic_i64(unique("test"));
-    assert_eq!(al.get_and_incr().await.unwrap(), 0);
+    assert_eq!(al.fetch_add(1).await.unwrap(), 0);
     assert_eq!(al.get().await.unwrap(), 1);
 }
 
@@ -286,12 +286,12 @@ async fn the_counter_operations_agree_across_handles_up_to_large_values() {
     let name = unique("test");
     let al = client.atomic_i64(name.clone());
     assert_eq!(al.get().await.unwrap(), 0);
-    assert_eq!(al.get_and_incr().await.unwrap(), 0);
+    assert_eq!(al.fetch_add(1).await.unwrap(), 0);
     assert_eq!(al.get().await.unwrap(), 1);
-    assert_eq!(al.get_and_decr().await.unwrap(), 1);
+    assert_eq!(al.fetch_add(-1).await.unwrap(), 1);
     assert_eq!(al.get().await.unwrap(), 0);
-    assert_eq!(al.get_and_incr().await.unwrap(), 0);
-    assert_eq!(al.get_and_set(12).await.unwrap(), 1);
+    assert_eq!(al.fetch_add(1).await.unwrap(), 0);
+    assert_eq!(al.swap(12).await.unwrap(), 1);
     assert_eq!(al.get().await.unwrap(), 12);
     al.set(1).await.unwrap();
 

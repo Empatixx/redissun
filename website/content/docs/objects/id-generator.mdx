@@ -7,7 +7,7 @@ An `IdGenerator` hands out `i64` ids that are unique across all programs.
 
 ```rust
 let orders = client.id_generator("order-ids");
-orders.try_init(1000, 500).await?;
+orders.init(1000, 500).await?;
 
 let id = orders.next_id().await?;
 ```
@@ -16,10 +16,10 @@ let id = orders.next_id().await?;
 
 | Method | What it does |
 |---|---|
-| `try_init(first, allocation_size)` | sets the first id and the block size, only if they are not set yet. Returns `true` if it set the block size. |
+| `init(first, allocation_size)` | sets the first id and the block size, only if they are not set yet. Returns `true` if it set the block size. |
 | `next_id()` | returns the next id |
 
-Without `try_init` the ids start at 1 and a block holds 5000 ids.
+Without `init` the ids start at 1 and a block holds 5000 ids.
 
 ## How it works
 

@@ -48,9 +48,9 @@ As in Redisson, a command that Redis rejects fails its own handle and makes `exe
 | Object | Methods |
 |---|---|
 | `hash_map` | `insert`, `get`, `remove`, `contains_key`, `len` |
-| `bucket` | `set`, `set_ex`, `get` |
+| `bucket` | `set`, `set_with_ttl`, `get` |
 | `hash_set` | `insert`, `remove`, `contains`, `len` |
-| `atomic_i64` | `get`, `set`, `incr`, `decr`, `add_and_get` |
+| `atomic_i64` | `get`, `set`, `incr`, `decr`, `add` |
 | `vec` | `push`, `get`, `len` |
 | `vec_deque` | `push_back`, `push_front`, `pop_front`, `pop_back`, `len` |
 | `sorted_set` | `insert`, `add_score`, `score`, `remove`, `len` |

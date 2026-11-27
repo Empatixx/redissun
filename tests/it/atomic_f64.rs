@@ -59,19 +59,19 @@ async fn set_if_greater() {
 async fn a_missing_number_reads_as_zero() {
     let number = client().await.atomic_f64(unique("atomic-f64"));
     assert_eq!(number.get().await.unwrap(), 0.0);
-    assert_eq!(number.get_and_set(12.0).await.unwrap(), 0.0);
+    assert_eq!(number.swap(12.0).await.unwrap(), 0.0);
 }
 
 #[tokio::test]
-async fn get_and_delete() {
+async fn take() {
     let client = client().await;
     let number = client.atomic_f64(unique("atomic-f64"));
     number.set(10.34).await.unwrap();
-    assert_eq!(number.get_and_delete().await.unwrap(), 10.34);
+    assert_eq!(number.take().await.unwrap(), 10.34);
     assert!(!number.exists().await.unwrap());
 
     let missing = client.atomic_f64(unique("atomic-f64"));
-    assert_eq!(missing.get_and_delete().await.unwrap(), 0.0);
+    assert_eq!(missing.take().await.unwrap(), 0.0);
 }
 
 #[tokio::test]
@@ -88,7 +88,7 @@ async fn compare_and_set() {
 async fn set_then_increment() {
     let number = client().await.atomic_f64(unique("atomic-f64"));
     number.set(2.81).await.unwrap();
-    assert_eq!(number.get_and_incr().await.unwrap(), 2.81);
+    assert_eq!(number.fetch_add(1.0).await.unwrap(), 2.81);
     assert_eq!(number.get().await.unwrap(), 3.81);
 }
 
@@ -101,16 +101,16 @@ async fn decrement_and_get() {
 }
 
 #[tokio::test]
-async fn increment_and_get() {
+async fn add_one() {
     let number = client().await.atomic_f64(unique("atomic-f64"));
     assert_eq!(number.incr().await.unwrap(), 1.0);
     assert_eq!(number.get().await.unwrap(), 1.0);
 }
 
 #[tokio::test]
-async fn get_and_increment() {
+async fn fetch_add_one() {
     let number = client().await.atomic_f64(unique("atomic-f64"));
-    assert_eq!(number.get_and_incr().await.unwrap(), 0.0);
+    assert_eq!(number.fetch_add(1.0).await.unwrap(), 0.0);
     assert_eq!(number.get().await.unwrap(), 1.0);
 }
 
@@ -120,12 +120,12 @@ async fn a_walk_through_every_step() {
     let name = unique("atomic-f64");
     let number = client.atomic_f64(name.clone());
     assert_eq!(number.get().await.unwrap(), 0.0);
-    assert_eq!(number.get_and_incr().await.unwrap(), 0.0);
+    assert_eq!(number.fetch_add(1.0).await.unwrap(), 0.0);
     assert_eq!(number.get().await.unwrap(), 1.0);
-    assert_eq!(number.get_and_decr().await.unwrap(), 1.0);
+    assert_eq!(number.fetch_add(-1.0).await.unwrap(), 1.0);
     assert_eq!(number.get().await.unwrap(), 0.0);
-    assert_eq!(number.get_and_incr().await.unwrap(), 0.0);
-    assert_eq!(number.get_and_set(12.8012).await.unwrap(), 1.0);
+    assert_eq!(number.fetch_add(1.0).await.unwrap(), 0.0);
+    assert_eq!(number.swap(12.8012).await.unwrap(), 1.0);
     assert_eq!(number.get().await.unwrap(), 12.8012);
 
     number.set(1.00123).await.unwrap();

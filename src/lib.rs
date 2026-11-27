@@ -53,6 +53,16 @@ pub mod hash_map {
     pub use crate::collections::hash_map::{Entry, Extend, OccupiedEntry, VacantEntry};
 }
 
+/// The builders [`Bucket`] methods return.
+pub mod bucket {
+    pub use crate::values::bucket::{Replace, Set, TrySet, Update};
+}
+
+/// The builders [`Buckets`] methods return.
+pub mod buckets {
+    pub use crate::values::buckets::{TrySet, Update};
+}
+
 pub use batch::{
     Batch, BatchAtomicI64, BatchBucket, BatchFuture, BatchHashMap, BatchHashSet, BatchResult,
     BatchSortedSet, BatchTopic, BatchVec, BatchVecDeque,

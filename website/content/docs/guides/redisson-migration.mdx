@@ -61,24 +61,24 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | Redisson | redissun |
 |---|---|
 | `set(v)` | `set(&v)` |
-| `set(v, ttl)` | `set_ex(&v, ttl)` |
-| `setAndKeepTTL(v)` | `set_keep_ttl(&v)` |
+| `set(v, ttl)` | `set(&v).ttl(ttl)` |
+| `setAndKeepTTL(v)` | `set(&v).keep_ttl()` |
 | `get()` | `get()` |
-| `size()` | `size()` |
-| `trySet(v)`, `setIfAbsent(v)` | `set_nx(&v)` |
-| `setIfAbsent(v, ttl)` | `set_nx_ex(&v, ttl)` |
-| `setIfExists(v)` | `set_xx(&v)` |
-| `setIfExists(v, ttl)` | `set_xx_ex(&v, ttl)` |
-| `getAndSet(v)` | `get_set(&v)` |
-| `getAndSet(v, ttl)` | `get_set_ex(&v, ttl)` |
-| `getAndDelete()` | `get_del()` |
-| `getAndExpire(duration)` | `get_and_expire(duration)` |
-| `getAndClearExpire()` | `get_and_clear_expire()` |
+| `size()` | `len()` |
+| `trySet(v)`, `setIfAbsent(v)` | `try_set(&v)` |
+| `setIfAbsent(v, ttl)` | `try_set(&v).ttl(ttl)` |
+| `setIfExists(v)` | `update(&v)` |
+| `setIfExists(v, ttl)` | `update(&v).ttl(ttl)` |
+| `getAndSet(v)` | `replace(&v)` |
+| `getAndSet(v, ttl)` | `replace(&v).ttl(ttl)` |
+| `getAndDelete()` | `take()` |
+| `getAndExpire(duration)` | `get_expire(duration)` |
+| `getAndClearExpire()` | `get_persist()` |
 | `compareAndSet(e, n)` | `compare_and_set(Some(&e), Some(&n))` |
 | `compareAndSet(null, n)` | `compare_and_set(None, Some(&n))`: sets only when the key is missing |
 | `compareAndSet(e, null)` | `compare_and_set(Some(&e), None)`: deletes when the value equals `e` |
 | `compareAndDelete(e)` | `compare_and_delete(&e)` |
-| `set(null)`, `getAndSet(null)` | `del()`, `get_del()` |
+| `set(null)`, `getAndSet(null)` | `del()`, `take()` |
 
 ## Keys
 
@@ -109,7 +109,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 |---|---|
 | `get(names…)` | `get(&names)` |
 | `set(map)`, `trySet(map)` | `set(entries)`, `try_set(entries)` |
-| `setIfAllKeysExist(SetArgs)`, `setIfAllKeysAbsent(SetArgs)` | `set_if_all_exist(entries, expiry)`, `set_if_all_absent(entries, expiry)` |
+| `setIfAllKeysExist(SetArgs)`, `setIfAllKeysAbsent(SetArgs)` | `update(entries).expiry(expiry)`, `try_set(entries).expiry(expiry)` |
 | `SetArgs.timeToLive(d)`, `.expireAt(i)`, `.keepTTL()` | `Expiry::After(d)`, `Expiry::At(time)`, `Expiry::KeepTtl` |
 
 ## HashMap
@@ -250,15 +250,15 @@ Redisson's rank ranges include both ends; redissun takes an exclusive Rust range
 | `set(i)`, `clear(i)`, `set(i, v)` | `set(i, true)`, `set(i, false)`, `set(i, v)` |
 | `set(long[], v)` | `set_many(&is, v)` |
 | `set(from, to)`, `clear(from, to)` | `set_range(from..to, true)`, `set_range(from..to, false)` |
-| `cardinality()` | `count()` |
-| `length()` | `length()`: highest set bit plus one |
-| `size()` | `size()`: string length in bits |
+| `cardinality()` | `count_ones()` |
+| `length()` | `last_set()`: the highest set bit as `Option<u64>`, so `length()` is `last_set().map_or(0, \|i\| i + 1)` |
+| `size()` | `len()`: string length in bits |
 | `asBitSet()` | `ones()` |
 | `toByteArray()` | `to_bytes()` |
 | `set(BitSet)` | `replace(&indexes)` |
 | `clear()` | `clear()` |
 | `and`, `or`, `xor`, `not` | `and`, `or`, `xor`, `not` |
-| `getSigned`, `setSigned`, `incrementAndGetSigned` (and unsigned) | `get_signed`, `set_signed`, `increment_and_get_signed` (and unsigned) |
+| `getSigned`, `setSigned`, `incrementAndGetSigned` (and unsigned) | `get_signed`, `set_signed`, `add_signed` (and unsigned) |
 
 ## HyperLogLog
 
@@ -274,16 +274,34 @@ Redisson's rank ranges include both ends; redissun takes an exclusive Rust range
 
 | Redisson | redissun |
 |---|---|
-| `add(lon, lat, m)` | `add(&m, GeoPoint { longitude, latitude })` |
+| `add(lon, lat, m)` | `insert(&m, GeoPoint { longitude, latitude })` |
 | `add(entries...)` | `extend(...)` |
-| `tryAdd(...)` | `try_add(...)` |
-| `addIfExists(...)` | `add_if_exists(...)` |
-| `dist(a, b, unit)` | `dist(&a, &b, unit)` |
-| `pos(m...)`, `hash(m...)` | `pos_many(&ms)`, `hash_many(&ms)` |
+| `tryAdd(...)` | `try_insert(...)` |
+| `addIfExists(...)` | `update(...)` |
+| `dist(a, b, unit)` | `distance(&a, &b, unit)` |
+| `pos(m)`, `pos(m...)` | `position(&m)`, `positions(&ms)` |
+| `hash(m)`, `hash(m...)` | `geohash(&m)`, `geohash_many(&ms)` |
 | `search(args)`, `searchWithDistance(args)`, `searchWithPosition(args)` | `search(center, &GeoSearch)` or `search_from(&m, &GeoSearch)` |
-| `storeSearchTo(...)` | `store_search_to` or `store_search_from_to` |
+| `radius(...)`, `radiusWithDistance(...)` | `search(center, &GeoSearch::radius(r, unit).order(GeoOrder::Asc))`, `search_from(&m, ...)` for a member |
+| `storeSearchTo(...)` | `store_search` or `store_search_from` |
 | `storeSortedSearchTo(...)` | the same with `.store_dist()` |
-| `readAll()` | `read_all()` |
+| `readAll()` | `to_vec()` |
+
+## BloomFilter
+
+| Redisson | redissun |
+|---|---|
+| `tryInit(n, p)` | `init(n, p)` |
+| `add(v)`, `add(collection)` | `insert(&v)`, `extend(values)`: how many were new |
+| `contains(v)`, `contains(collection)` | `contains(&v)`, `count_contained(&values)`; `contains_many(&values)` answers each one |
+| `count()` | `count()` |
+
+## IdGenerator
+
+| Redisson | redissun |
+|---|---|
+| `tryInit(first, allocationSize)` | `init(first, allocation_size)` |
+| `nextId()` | `next_id()` |
 
 ## Stream
 
@@ -402,13 +420,16 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 |---|---|
 | `get()` | `get()` |
 | `set(v)` | `set(v)` |
-| `getAndSet(v)` | `get_and_set(v)` |
-| `getAndDelete()` | `get_and_delete()` |
+| `getAndSet(v)` | `swap(v)` |
+| `getAndDelete()` | `take()` |
 | `compareAndSet(e, u)` | `compare_and_set(e, u)` |
-| `addAndGet(d)` | `add_and_get(d)` |
-| `getAndAdd(d)` | `get_and_add(d)` |
+| `addAndGet(d)` | `add(d)` |
+| `getAndAdd(d)` | `fetch_add(d)` |
 | `incrementAndGet()` | `incr()` |
 | `decrementAndGet()` | `decr()` |
+| `getAndIncrement()`, `getAndDecrement()` | `fetch_add(1)`, `fetch_add(-1)` |
+
+`AtomicF64` (Redisson's `RAtomicDouble`) has the same names.
 
 ## Semaphore
 

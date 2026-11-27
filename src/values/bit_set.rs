@@ -186,7 +186,8 @@ impl BitSet {
     }
 
     /// Number of bits that are set (`BITCOUNT`), Redisson's `cardinality`.
-    pub async fn count(&self) -> Result<u64> {
+    #[doc(alias = "cardinality")]
+    pub async fn count_ones(&self) -> Result<u64> {
         let reply = self.key.read_command("BITCOUNT", vec![self.name()]).await?;
         Ok(number(&reply).unwrap_or(0) as u64)
     }
@@ -200,18 +201,20 @@ impl BitSet {
         Ok(number(&reply).and_then(|position| u64::try_from(position).ok()))
     }
 
-    /// Index of the highest set bit plus one, or 0 when no bit is set, like `java.util.BitSet::length` and Redisson's `length`.
-    pub async fn length(&self) -> Result<u64> {
+    /// Index of the highest set bit, or `None` when no bit is set. Redisson's `length` is this plus one (0 when no bit is set).
+    #[doc(alias = "length")]
+    pub async fn last_set(&self) -> Result<Option<u64>> {
         let length: u64 = self
             .key
             .core
             .eval(&LENGTH, vec![self.key.redis_key()], Vec::new())
             .await?;
-        Ok(length)
+        Ok(length.checked_sub(1))
     }
 
     /// Size of the underlying string in bits, always a multiple of 8, like Redisson's `size`.
-    pub async fn size(&self) -> Result<u64> {
+    #[doc(alias = "size")]
+    pub async fn len(&self) -> Result<u64> {
         let reply = self.key.read_command("STRLEN", vec![self.name()]).await?;
         Ok(number(&reply).unwrap_or(0) as u64 * 8)
     }
@@ -312,12 +315,8 @@ impl BitSet {
     }
 
     /// Adds `increment` to the signed integer of `size` bits (1 to 64) at bit `offset`, wrapping on overflow, and returns the result (`BITFIELD INCRBY i<size>`).
-    pub async fn increment_and_get_signed(
-        &self,
-        size: u32,
-        offset: u64,
-        increment: i64,
-    ) -> Result<i64> {
+    #[doc(alias = "incrementAndGetSigned")]
+    pub async fn add_signed(&self, size: u32, offset: u64, increment: i64) -> Result<i64> {
         self.bitfield(
             true,
             size,
@@ -343,12 +342,8 @@ impl BitSet {
     }
 
     /// Adds `increment` to the unsigned integer of `size` bits (1 to 63) at bit `offset`, wrapping on overflow, and returns the result (`BITFIELD INCRBY u<size>`).
-    pub async fn increment_and_get_unsigned(
-        &self,
-        size: u32,
-        offset: u64,
-        increment: i64,
-    ) -> Result<u64> {
+    #[doc(alias = "incrementAndGetUnsigned")]
+    pub async fn add_unsigned(&self, size: u32, offset: u64, increment: i64) -> Result<u64> {
         let value = self
             .bitfield(
                 false,

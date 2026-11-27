@@ -3,7 +3,7 @@ title: Limitations
 description: Things to know about this version.
 ---
 
-- **Redis 6.2 or newer** is needed for `Bucket::get_set` and `Bucket::get_del`.
+- **Redis 6.2 or newer** is needed for `Bucket::replace` and `Bucket::take`.
 - **Semaphore permits have no owner.** If a program crashes while it holds permits, they are lost until someone adds them back. Use `PermitExpirableSemaphore` with a lease when that matters.
 - **Lost messages.** After a lost connection, a waiting program may miss the "unlocked" message. It then wakes up when the lease ends.
 - **Dropping a guard without a runtime.** The lock cannot be released at once. It frees itself when the lease ends.

@@ -148,8 +148,9 @@ where
         self.batch.queue("SET", args, 0, |_| Ok(()))
     }
 
-    /// Queues a write that expires after `ttl`.
-    pub fn set_ex<Q>(&self, value: &Q, ttl: Duration) -> BatchFuture<()>
+    /// Queues a write that expires after `ttl`, the batch form of `bucket.set(&v).ttl(ttl)`. Batch views queue on the call, so this cannot be a builder.
+    #[doc(alias = "setex")]
+    pub fn set_with_ttl<Q>(&self, value: &Q, ttl: Duration) -> BatchFuture<()>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -275,7 +276,8 @@ impl<C: Codec> BatchAtomicI64<'_, C> {
     }
 
     /// Queues adding `delta`; the handle gives the new value.
-    pub fn add_and_get(&self, delta: i64) -> BatchFuture<i64> {
+    #[doc(alias = "addAndGet")]
+    pub fn add(&self, delta: i64) -> BatchFuture<i64> {
         self.integer("INCRBY", Some(delta))
     }
 }

@@ -20,11 +20,12 @@ assert_eq!(values.len(), 2);
 | `get(&names)` | a `HashMap` of the keys that exist (`MGET`) |
 | `set(entries)` | stores every value (`MSET`) |
 | `try_set(entries)` | stores the values only when none of the keys exists (`MSETNX`); returns whether it did |
-| `set_if_all_exist(entries, expiry)` | stores the values only when every key exists (`MSETEX … XX`) |
-| `set_if_all_absent(entries, expiry)` | stores the values only when no key exists (`MSETEX … NX`) |
+| `try_set(entries).expiry(expiry)` | the same with an expiry (`MSETEX … NX`) |
+| `update(entries)` | stores the values only when every key exists (`MSETEX … XX`); returns whether it did |
+| `update(entries).expiry(expiry)` | the same with an expiry |
 
-`expiry` is `Expiry::None`, `Expiry::After(ttl)`, `Expiry::At(time)` or `Expiry::KeepTtl`. `set_if_all_exist` and `set_if_all_absent` need Redis 8.4 or newer.
+`expiry` is `Expiry::None`, `Expiry::After(ttl)`, `Expiry::At(time)` or `Expiry::KeepTtl`. `update` and `try_set(..).expiry(..)` need Redis 8.4 or newer.
 
 ## On a cluster
 
-Each call sends one command for each hash slot, all at once, as Redisson does. So `try_set`, `set_if_all_exist` and `set_if_all_absent` are checked for each slot on its own, and return `true` when the values of at least one slot were stored. Give keys that must change together the same hash tag, such as `{user:1}`.
+Each call sends one command for each hash slot, all at once, as Redisson does. So `try_set` and `update` are checked for each slot on its own, and return `true` when the values of at least one slot were stored. Give keys that must change together the same hash tag, such as `{user:1}`.

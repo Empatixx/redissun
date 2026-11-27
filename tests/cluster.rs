@@ -52,10 +52,10 @@ async fn plain_collections_work_on_a_cluster() {
 
     let bits = client.bit_set(unique("bits"));
     bits.set(7, true).await.unwrap();
-    assert_eq!(bits.count().await.unwrap(), 1);
+    assert_eq!(bits.count_ones().await.unwrap(), 1);
 
     let geo = client.geo::<String>(unique("geo"));
-    geo.add(
+    geo.insert(
         "prague",
         GeoPoint {
             longitude: 14.43,
@@ -92,7 +92,7 @@ async fn objects_with_several_keys_work_on_a_cluster() {
     assert!(seen.contains("a").await.unwrap());
 
     let filter = client.bloom_filter::<String>(unique("bloom"));
-    assert!(filter.try_init(1000, 0.01).await.unwrap());
+    assert!(filter.init(1000, 0.01).await.unwrap());
     filter.insert("a").await.unwrap();
     assert!(filter.contains("a").await.unwrap());
 

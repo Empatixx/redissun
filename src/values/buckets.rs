@@ -8,11 +8,13 @@ use serde::Serialize;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// When the keys written by [`Buckets::set_if_all_exist`] and [`Buckets::set_if_all_absent`] expire, Redisson's `SetArgs`.
+/// When the keys written by [`Buckets::update`] and [`Buckets::try_set`] expire, Redisson's `SetArgs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expiry {
     /// The keys get no expiry; keys that are overwritten lose theirs.
@@ -159,18 +161,48 @@ where
         Ok(())
     }
 
-    /// Stores the values only when none of the keys exists (`MSETNX`); returns whether they were stored, Redisson's `trySet`.
+    /// Stores the values only when none of the keys exists; resolves to whether they were stored. Redisson's `trySet`, or `setIfAllKeysAbsent` with `.expiry(..)`.
+    ///
+    /// Without [`expiry`](TrySet::expiry) the command is `MSETNX`; with it, `MSETEX … NX` (Redis 8.4 or newer).
     /// In a cluster this holds for each hash slot on its own, and `true` means that the values of at least one slot were stored, as in Redisson.
-    pub async fn try_set<'a, K, W>(
+    #[doc(alias = "trySet", alias = "setIfAllKeysAbsent")]
+    pub fn try_set<'a, K, W>(
         &self,
         entries: impl IntoIterator<Item = (K, &'a W)>,
-    ) -> Result<bool>
+    ) -> TrySet<'_, V, C>
     where
         K: AsRef<str>,
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync + 'a,
     {
-        let entries = self.encode(entries)?;
+        TrySet {
+            buckets: self,
+            entries: self.encode(entries),
+            expiry: None,
+        }
+    }
+
+    /// Stores the values only when every key exists (`MSETEX … XX`, Redis 8.4 or newer); resolves to whether they were stored, Redisson's `setIfAllKeysExist`.
+    /// The keys get no expiry unless [`expiry`](Update::expiry) says otherwise.
+    /// In a cluster this holds for each hash slot on its own, as for [`try_set`](Buckets::try_set).
+    #[doc(alias = "setIfAllKeysExist")]
+    pub fn update<'a, K, W>(
+        &self,
+        entries: impl IntoIterator<Item = (K, &'a W)>,
+    ) -> Update<'_, V, C>
+    where
+        K: AsRef<str>,
+        V: Borrow<W>,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        Update {
+            buckets: self,
+            entries: self.encode(entries),
+            expiry: Expiry::None,
+        }
+    }
+
+    async fn set_nx(&self, entries: Vec<(String, Bytes)>) -> Result<bool> {
         if entries.is_empty() {
             return Ok(false);
         }
@@ -182,36 +214,6 @@ where
             })
             .await?;
         any_stored(replies)
-    }
-
-    /// Stores the values only when every key exists (`MSETEX … XX`, Redis 8.4 or newer); returns whether they were stored, Redisson's `setIfAllKeysExist`.
-    /// In a cluster this holds for each hash slot on its own, as for [`try_set`](Buckets::try_set).
-    pub async fn set_if_all_exist<'a, K, W>(
-        &self,
-        entries: impl IntoIterator<Item = (K, &'a W)>,
-        expiry: Expiry,
-    ) -> Result<bool>
-    where
-        K: AsRef<str>,
-        V: Borrow<W>,
-        W: Serialize + ?Sized + Sync + 'a,
-    {
-        self.set_ex("XX", self.encode(entries)?, expiry).await
-    }
-
-    /// Stores the values only when none of the keys exists (`MSETEX … NX`, Redis 8.4 or newer); returns whether they were stored, Redisson's `setIfAllKeysAbsent`.
-    /// In a cluster this holds for each hash slot on its own, as for [`try_set`](Buckets::try_set).
-    pub async fn set_if_all_absent<'a, K, W>(
-        &self,
-        entries: impl IntoIterator<Item = (K, &'a W)>,
-        expiry: Expiry,
-    ) -> Result<bool>
-    where
-        K: AsRef<str>,
-        V: Borrow<W>,
-        W: Serialize + ?Sized + Sync + 'a,
-    {
-        self.set_ex("NX", self.encode(entries)?, expiry).await
     }
 
     async fn set_ex(
@@ -267,6 +269,89 @@ fn any_stored(replies: Vec<redis::Value>) -> Result<bool> {
         stored |= redis::from_redis_value::<bool>(reply)?;
     }
     Ok(stored)
+}
+
+/// A pending [`Buckets::try_set`]. Await it, optionally after [`TrySet::expiry`].
+#[must_use = "a set does nothing until it is awaited"]
+pub struct TrySet<'b, V, C: Codec> {
+    buckets: &'b Buckets<V, C>,
+    entries: Result<Vec<(String, Bytes)>>,
+    expiry: Option<Expiry>,
+}
+
+impl<V, C: Codec> fmt::Debug for TrySet<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrySet")
+            .field("expiry", &self.expiry)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> TrySet<'_, V, C> {
+    /// Sends `MSETEX … NX` (Redis 8.4 or newer) with this expiry instead of `MSETNX`, Redisson's `setIfAllKeysAbsent`.
+    pub fn expiry(mut self, expiry: Expiry) -> Self {
+        self.expiry = Some(expiry);
+        self
+    }
+}
+
+impl<'b, V, C> IntoFuture for TrySet<'b, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'b,
+    C: Codec,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'b>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let entries = self.entries?;
+            match self.expiry {
+                None => self.buckets.set_nx(entries).await,
+                Some(expiry) => self.buckets.set_ex("NX", entries, expiry).await,
+            }
+        })
+    }
+}
+
+/// A pending [`Buckets::update`]. Await it, optionally after [`Update::expiry`].
+#[must_use = "an update does nothing until it is awaited"]
+pub struct Update<'b, V, C: Codec> {
+    buckets: &'b Buckets<V, C>,
+    entries: Result<Vec<(String, Bytes)>>,
+    expiry: Expiry,
+}
+
+impl<V, C: Codec> fmt::Debug for Update<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Update")
+            .field("expiry", &self.expiry)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> Update<'_, V, C> {
+    /// When the written keys expire; [`Expiry::None`], the default, clears their expiry.
+    pub fn expiry(mut self, expiry: Expiry) -> Self {
+        self.expiry = expiry;
+        self
+    }
+}
+
+impl<'b, V, C> IntoFuture for Update<'b, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'b,
+    C: Codec,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'b>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let entries = self.entries?;
+            self.buckets.set_ex("XX", entries, self.expiry).await
+        })
+    }
 }
 
 #[cfg(test)]

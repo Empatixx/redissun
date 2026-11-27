@@ -322,8 +322,9 @@ where
         Ok(number(&reply).unwrap_or(0) as usize)
     }
 
-    /// Adds a member at a position, or moves it (`GEOADD`, never retried); returns whether the member was new. The member is borrowed: `geo.add("prague", point)`.
-    pub async fn add<Q>(&self, v: &Q, at: GeoPoint) -> Result<bool>
+    /// Adds a member at a position, or moves it (`GEOADD`, never retried); returns whether the member was new. The member is borrowed: `geo.insert("prague", point)`.
+    #[doc(alias = "add")]
+    pub async fn insert<Q>(&self, v: &Q, at: GeoPoint) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -344,7 +345,8 @@ where
     }
 
     /// Adds a member only when it is missing (`GEOADD NX`); returns whether it was added. Redisson's `tryAdd`.
-    pub async fn try_add<Q>(&self, v: &Q, at: GeoPoint) -> Result<bool>
+    #[doc(alias = "tryAdd")]
+    pub async fn try_insert<Q>(&self, v: &Q, at: GeoPoint) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -352,8 +354,9 @@ where
         Ok(self.add_entries(Some("NX"), [(v, at)]).await? == 1)
     }
 
-    /// Moves a member only when it is already there; returns whether it was.
-    pub async fn add_if_exists<Q>(&self, v: &Q, at: GeoPoint) -> Result<bool>
+    /// Moves a member only when it is already there; returns whether it was. Redisson's `addIfExists`.
+    #[doc(alias = "addIfExists")]
+    pub async fn update<Q>(&self, v: &Q, at: GeoPoint) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -386,8 +389,9 @@ where
         Ok(number(&reply) == Some(1))
     }
 
-    /// Returns the position of a member.
-    pub async fn pos<Q>(&self, v: &Q) -> Result<Option<GeoPoint>>
+    /// Returns the position of a member (`GEOPOS`).
+    #[doc(alias = "pos")]
+    pub async fn position<Q>(&self, v: &Q) -> Result<Option<GeoPoint>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -397,8 +401,9 @@ where
         Ok(array(&reply).first().and_then(point))
     }
 
-    /// Returns the geohash string of a member, which is 11 characters long.
-    pub async fn hash<Q>(&self, v: &Q) -> Result<Option<String>>
+    /// Returns the geohash string of a member, which is 11 characters long (`GEOHASH`). Redisson's `hash`.
+    #[doc(alias = "hash")]
+    pub async fn geohash<Q>(&self, v: &Q) -> Result<Option<String>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -409,7 +414,8 @@ where
     }
 
     /// Positions of several members in the order given, `None` for a missing one (`GEOPOS`).
-    pub async fn pos_many<Q>(&self, members: &[&Q]) -> Result<Vec<Option<GeoPoint>>>
+    #[doc(alias = "pos")]
+    pub async fn positions<Q>(&self, members: &[&Q]) -> Result<Vec<Option<GeoPoint>>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -422,7 +428,8 @@ where
     }
 
     /// Geohash strings of several members in the order given, `None` for a missing one (`GEOHASH`).
-    pub async fn hash_many<Q>(&self, members: &[&Q]) -> Result<Vec<Option<String>>>
+    #[doc(alias = "hash")]
+    pub async fn geohash_many<Q>(&self, members: &[&Q]) -> Result<Vec<Option<String>>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -444,8 +451,9 @@ where
             .collect()
     }
 
-    /// Distance between two members, or `None` when one of them is missing.
-    pub async fn dist<Q>(&self, from: &Q, to: &Q, unit: GeoUnit) -> Result<Option<f64>>
+    /// Distance between two members, or `None` when one of them is missing (`GEODIST`).
+    #[doc(alias = "dist")]
+    pub async fn distance<Q>(&self, from: &Q, to: &Q, unit: GeoUnit) -> Result<Option<f64>>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -475,7 +483,8 @@ where
     }
 
     /// All members in score order, which for a geo set is geohash order (`ZRANGE 0 -1`). After a store with [`GeoSearch::store_dist`] it is nearest first. Redisson's `readAll`.
-    pub async fn read_all(&self) -> Result<Vec<V>> {
+    #[doc(alias = "readAll")]
+    pub async fn to_vec(&self) -> Result<Vec<V>> {
         let args = vec![Arg::from(self.key.redis_key()), Arg::Int(0), Arg::Int(-1)];
         let reply = self.key.read_command("ZRANGE", args).await?;
         array(&reply)
@@ -540,11 +549,19 @@ where
     }
 
     /// Members found around a point (`GEOSEARCH FROMLONLAT`), each with its distance in the search unit and its position. Redisson's `search`, `searchWithDistance` and `searchWithPosition` in one.
+    ///
+    /// Redisson's `radius(..)` and box searches are this with [`GeoSearch::radius`] or [`GeoSearch::rect`], [`GeoOrder::Asc`] and an optional [`GeoSearch::count`].
+    #[doc(
+        alias = "radius",
+        alias = "searchWithDistance",
+        alias = "searchWithPosition"
+    )]
     pub async fn search(&self, center: GeoPoint, args: &GeoSearch) -> Result<Vec<GeoMatch<V>>> {
         self.run_search(Origin::Point(center), args).await
     }
 
     /// Members found around another member (`GEOSEARCH FROMMEMBER`). The member itself is included, at distance 0. An unknown member gives an empty list.
+    #[doc(alias = "radius", alias = "searchWithDistance")]
     pub async fn search_from<Q>(&self, member: &Q, args: &GeoSearch) -> Result<Vec<GeoMatch<V>>>
     where
         V: Borrow<Q>,
@@ -555,7 +572,8 @@ where
     }
 
     /// Stores the members found around a point in the geo set `destination`, replacing it (`GEOSEARCHSTORE`); returns how many. Redisson's `storeSearchTo`, or `storeSortedSearchTo` with [`GeoSearch::store_dist`]. In Redis Cluster both names must share a hash slot.
-    pub async fn store_search_to(
+    #[doc(alias = "storeSearchTo", alias = "storeSortedSearchTo")]
+    pub async fn store_search(
         &self,
         destination: &str,
         center: GeoPoint,
@@ -566,7 +584,8 @@ where
     }
 
     /// Stores the members found around another member in the geo set `destination`, replacing it (`GEOSEARCHSTORE`); returns how many.
-    pub async fn store_search_from_to<Q>(
+    #[doc(alias = "storeSearchTo", alias = "storeSortedSearchTo")]
+    pub async fn store_search_from<Q>(
         &self,
         destination: &str,
         member: &Q,
@@ -578,63 +597,5 @@ where
     {
         self.run_store(destination, Origin::Member(self.member(member)?), args)
             .await
-    }
-
-    fn nearest(area: GeoSearch, count: Option<usize>) -> GeoSearch {
-        let args = area.order(GeoOrder::Asc);
-        match count {
-            Some(count) => args.count(count),
-            None => args,
-        }
-    }
-
-    /// Members within `radius` of a point, nearest first. `count` limits how many are returned.
-    pub async fn radius(
-        &self,
-        center: GeoPoint,
-        radius: f64,
-        unit: GeoUnit,
-        count: Option<usize>,
-    ) -> Result<Vec<GeoMatch<V>>> {
-        self.search(
-            center,
-            &Self::nearest(GeoSearch::radius(radius, unit), count),
-        )
-        .await
-    }
-
-    /// Members within `radius` of another member, nearest first. The member itself is included, at distance 0. An unknown member gives an empty list.
-    pub async fn radius_of<Q>(
-        &self,
-        member: &Q,
-        radius: f64,
-        unit: GeoUnit,
-        count: Option<usize>,
-    ) -> Result<Vec<GeoMatch<V>>>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        self.search_from(
-            member,
-            &Self::nearest(GeoSearch::radius(radius, unit), count),
-        )
-        .await
-    }
-
-    /// Members inside a rectangle of `width` by `height` around a point, nearest first.
-    pub async fn within_box(
-        &self,
-        center: GeoPoint,
-        width: f64,
-        height: f64,
-        unit: GeoUnit,
-        count: Option<usize>,
-    ) -> Result<Vec<GeoMatch<V>>> {
-        self.search(
-            center,
-            &Self::nearest(GeoSearch::rect(width, height, unit), count),
-        )
-        .await
     }
 }
