@@ -596,3 +596,188 @@ async fn the_writer_sees_each_write_once() {
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot.get("4").map(String::as_str), Some("44"));
 }
+
+#[tokio::test]
+async fn get_many_uses_local_hits_and_caches_misses() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    let plain = plain(&client, &name);
+    plain.insert("k1", "a").await.unwrap();
+    assert_eq!(a.get("k1").await.unwrap().as_deref(), Some("a"));
+    plain.insert("k1", "x").await.unwrap();
+    plain.insert("k2", "b").await.unwrap();
+    assert_eq!(
+        a.get_many(&["k1", "k2", "k3"]).await.unwrap(),
+        vec![Some("a".to_string()), Some("b".to_string()), None]
+    );
+    assert_eq!(a.local_len(), 2);
+}
+
+#[tokio::test]
+async fn peek_neither_caches_nor_restarts_the_idle_time() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    let plain = plain(&client, &name);
+    plain.insert("k", "v").max_idle(300 * MS).await.unwrap();
+    assert_eq!(a.peek("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(
+        a.peek_many(&["k", "zz"]).await.unwrap(),
+        vec![Some("v".to_string()), None]
+    );
+    assert_eq!(a.local_len(), 0);
+    sleep(350 * MS).await;
+    // `peek` ignores the idle limit; `get` shows the idle time was not restarted.
+    assert_eq!(plain.get("k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn contains_key_caches_a_miss_only_with_store_cache_miss() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    assert!(!a.contains_key("zz").await.unwrap());
+    assert_eq!(a.local_len(), 0);
+    let b: Cache = client
+        .local_cached_map_cache::<String, String>(name.clone())
+        .store_cache_miss(true)
+        .build()
+        .await
+        .unwrap();
+    assert!(!b.contains_key("zz").await.unwrap());
+    assert_eq!(b.local_len(), 1);
+    plain(&client, &name).insert("zz", "1").await.unwrap();
+    assert!(!b.contains_key("zz").await.unwrap());
+}
+
+#[tokio::test]
+async fn preload_cache_fills_the_local_cache() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let plain = plain(&client, &name);
+    for i in 0..24 {
+        plain.insert(&format!("k{i}"), "v").await.unwrap();
+    }
+    plain.insert("short", "v").ttl(300 * MS).await.unwrap();
+    let a = lcmc(&client, &name).await;
+    assert_eq!(a.preload_cache().page_size(7).await.unwrap(), 25);
+    assert_eq!(a.local_len(), 25);
+    sleep(350 * MS).await;
+    assert!(!a.local_entries().unwrap().iter().any(|(k, _)| k == "short"));
+    assert_eq!(a.local_len(), 24);
+}
+
+#[tokio::test]
+async fn clear_local_everywhere_keeps_redis() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = lcmc(&first, &name).await;
+    let b = lcmc(&second, &name).await;
+    let plain = plain(&first, &name);
+    plain.insert("k", "v").await.unwrap();
+    a.get("k").await.unwrap();
+    b.get("k").await.unwrap();
+    a.clear_local_everywhere().await.unwrap();
+    assert_eq!(a.local_len(), 0);
+    eventually("the clear never arrived", || async { b.local_len() == 0 }).await;
+    assert_eq!(plain.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn delegated_methods_answer_like_hash_map_cache() {
+    use futures::TryStreamExt;
+    use redissun::{EntryEvent, EvictionMode, MapScan};
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    let plain = plain(&client, &name);
+    plain
+        .insert("k1", "1")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    plain.insert("k2", "2").await.unwrap();
+    plain.insert("x", "3").await.unwrap();
+    assert!(a.entry_ttl("k1").await.unwrap().is_some());
+    assert_eq!(
+        a.entry_ttl("k2").await.unwrap(),
+        plain.entry_ttl("k2").await.unwrap()
+    );
+    assert_eq!(
+        a.contains_value("2").await.unwrap(),
+        plain.contains_value("2").await.unwrap()
+    );
+    assert_eq!(
+        a.value_len("k1").await.unwrap(),
+        plain.value_len("k1").await.unwrap()
+    );
+    assert_eq!(
+        a.to_hash_map().await.unwrap(),
+        plain.to_hash_map().await.unwrap()
+    );
+    let mut mine: Vec<(String, String)> = a.iter().try_collect().await.unwrap();
+    let mut theirs: Vec<(String, String)> = plain.iter().try_collect().await.unwrap();
+    mine.sort();
+    theirs.sort();
+    assert_eq!(mine, theirs);
+    let mut keys: Vec<String> = a
+        .keys_with(MapScan::new().pattern("\"k1*"))
+        .try_collect()
+        .await
+        .unwrap();
+    keys.sort();
+    let mut plain_keys: Vec<String> = plain
+        .keys_with(MapScan::new().pattern("\"k1*"))
+        .try_collect()
+        .await
+        .unwrap();
+    plain_keys.sort();
+    assert_eq!(keys, plain_keys);
+    assert_eq!(keys, vec!["k1".to_string()]);
+    assert_eq!(a.random_keys(10).await.unwrap().len(), 3);
+    assert_eq!(a.random_entries(10).await.unwrap().len(), 3);
+    let mut values: Vec<String> = a.values().try_collect().await.unwrap();
+    values.sort();
+    assert_eq!(values, vec!["1", "2", "3"]);
+
+    a.set_max_size(10, EvictionMode::Lru).await.unwrap();
+    let options = format!("{{{name}}}:redissun_options");
+    assert_eq!(
+        bulk(&raw_command(&["HGET", &options, "max-size"]).await).as_deref(),
+        Some("10")
+    );
+    assert!(!a.init_max_size(5, EvictionMode::Lru).await.unwrap());
+
+    let mut events = a.events().await.unwrap();
+    plain.insert("new", "n").await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        event,
+        EntryEvent::Created {
+            key: "new".into(),
+            value: "n".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn lock_lives_under_the_redisson_name() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    let lock_key = format!("{{{name}}}:IKm9EBQhlzpVIBxUXDHBWw:lock");
+    let guard = a.lock("key").unwrap().lock().await.unwrap();
+    assert_eq!(raw_command(&["EXISTS", &lock_key]).await, ":1\r\n");
+    guard.unlock().await.unwrap();
+}

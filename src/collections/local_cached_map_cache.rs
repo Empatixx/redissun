@@ -1,22 +1,73 @@
 use crate::codec::Codec;
 use crate::collections::hash_map_cache::{
-    mark_listeners, EntryRequest, ExpireEntries, ExpireEntry, Extend, HashMapCache, Insert, Lease,
-    Set, TryInsert,
+    mark_listeners, EntryEventKind, EntryEvents, EntryRequest, EvictionMode, ExpireEntries,
+    ExpireEntry, Extend, HashMapCache, Insert, Lease, Set, TryInsert,
 };
 use crate::collections::local_cache::messages::{message, CLEAR};
 use crate::collections::local_cache::{local_options, start, LocalCache, LocalOptions, StoreMode};
+use crate::collections::map::events::{MapEventKind, MapEvents};
+use crate::collections::map::key_hash::per_key_objects;
 use crate::collections::map::load::LoadAll;
+use crate::collections::map::scan::MapScan;
 use crate::collections::map::store::{store_options, StoreOptions};
 use crate::error::Result;
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
+use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::future::{Future, IntoFuture};
+use std::hash::Hash;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Redisson's `entrySet()` page, the default page of [`PreloadCache`].
+const PRELOAD_PAGE: usize = 10;
+
+/// A pending [`LocalCachedMapCache::preload_cache`]. Await it, optionally after [`PreloadCache::page_size`]; it resolves to the number of entries it cached.
+#[must_use = "a preload does nothing until it is awaited"]
+pub struct PreloadCache<'a, K, V, C: Codec> {
+    cache: &'a LocalCachedMapCache<K, V, C>,
+    page: usize,
+}
+
+impl<K, V, C: Codec> fmt::Debug for PreloadCache<'_, K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreloadCache")
+            .field("page", &self.page)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K, V, C: Codec> PreloadCache<'_, K, V, C> {
+    /// Reads this many keys per page, Redisson's `preloadCache(count)`. Zero means the default, 10.
+    pub fn page_size(mut self, n: usize) -> Self {
+        self.page = if n == 0 { PRELOAD_PAGE } else { n };
+        self
+    }
+}
+
+impl<'a, K, V, C> IntoFuture for PreloadCache<'a, K, V, C>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<usize>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let cache = self.cache;
+            cache.cache.preload(&cache.local, self.page).await
+        })
+    }
+}
 
 /// Sets up a [`LocalCachedMapCache`]. Get one from [`Client::local_cached_map_cache`](crate::Client::local_cached_map_cache). The local cache options are [`LocalCachedMapBuilder`](crate::LocalCachedMapBuilder)'s, with the same defaults; the loader and writer options are [`HashMapCacheBuilder`](crate::HashMapCacheBuilder)'s.
 #[must_use = "a builder does nothing until build() is awaited"]
@@ -405,6 +456,163 @@ where
         self.cache.flush().await
     }
 
+    /// Returns the values for several keys: the local hits, then one read from Redis for the misses, each cached for as long as its entry lives. Else as [`HashMapCache::get_many`].
+    #[doc(alias = "getAll")]
+    pub async fn get_many<Q>(&self, ks: &[&Q]) -> Result<std::vec::Vec<Option<V>>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.get_many(ks).await
+    }
+
+    /// Same as [`HashMapCache::peek`]; a local copy answers, and a value read from Redis is not cached.
+    #[doc(alias = "getWithTTLOnly")]
+    pub async fn peek<Q>(&self, k: &Q) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.peek(k).await
+    }
+
+    /// Same as [`HashMapCache::peek_many`]; local copies answer, and values read from Redis are not cached.
+    #[doc(alias = "getAllWithTTLOnly")]
+    pub async fn peek_many<Q>(&self, ks: &[&Q]) -> Result<std::vec::Vec<Option<V>>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.peek_many(ks).await
+    }
+
+    /// Reads every entry from Redis, a page at a time, and caches it locally for as long as it lives, Redisson's `preloadCache()` and `preloadCache(count)`. Resolves to the number of entries it cached.
+    #[doc(alias = "preloadCache")]
+    pub fn preload_cache(&self) -> PreloadCache<'_, K, V, C> {
+        PreloadCache {
+            cache: self,
+            page: PRELOAD_PAGE,
+        }
+    }
+
+    /// Same as [`HashMapCache::entry_ttl`].
+    #[doc(alias = "remainTimeToLive")]
+    pub async fn entry_ttl<Q>(&self, k: &Q) -> Result<Option<Duration>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.entry_ttl(k).await
+    }
+
+    /// Same as [`HashMapCache::contains_value`].
+    #[doc(alias = "containsValue")]
+    pub async fn contains_value<W>(&self, v: &W) -> Result<bool>
+    where
+        V: Borrow<W>,
+        W: Serialize + ?Sized + Sync,
+    {
+        self.cache.contains_value(v).await
+    }
+
+    /// Same as [`HashMapCache::value_len`].
+    #[doc(alias = "valueSize")]
+    pub async fn value_len<Q>(&self, k: &Q) -> Result<usize>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.value_len(k).await
+    }
+
+    /// Same as [`HashMapCache::random_keys`].
+    #[doc(alias = "randomKeys")]
+    pub async fn random_keys(&self, count: usize) -> Result<std::vec::Vec<K>> {
+        self.cache.random_keys(count).await
+    }
+
+    /// Same as [`HashMapCache::iter`]; it neither uses nor fills the local cache.
+    pub fn iter(&self) -> impl Stream<Item = Result<(K, V)>> + '_ {
+        self.cache.iter()
+    }
+
+    /// Same as [`HashMapCache::keys`].
+    pub fn keys(&self) -> impl Stream<Item = Result<K>> + '_ {
+        self.cache.keys()
+    }
+
+    /// Same as [`HashMapCache::values`].
+    pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
+        self.cache.values()
+    }
+
+    /// Same as [`HashMapCache::iter_with`].
+    #[doc(alias = "entrySet")]
+    pub fn iter_with(&self, scan: MapScan) -> impl Stream<Item = Result<(K, V)>> + '_ {
+        self.cache.iter_with(scan)
+    }
+
+    /// Same as [`HashMapCache::keys_with`].
+    #[doc(alias = "keySet")]
+    pub fn keys_with(&self, scan: MapScan) -> impl Stream<Item = Result<K>> + '_ {
+        self.cache.keys_with(scan)
+    }
+
+    /// Same as [`HashMapCache::values_with`].
+    pub fn values_with(&self, scan: MapScan) -> impl Stream<Item = Result<V>> + '_ {
+        self.cache.values_with(scan)
+    }
+
+    /// Same as [`HashMapCache::set_max_size`]. It limits the entries in Redis, not the local copies ([`cache_size`](LocalCachedMapCacheBuilder::cache_size) does that). Local hits do not reach Redis, so they do not count as uses there.
+    #[doc(alias = "setMaxSize")]
+    pub async fn set_max_size(&self, max: usize, mode: EvictionMode) -> Result<()> {
+        self.cache.set_max_size(max, mode).await
+    }
+
+    /// Same as [`HashMapCache::init_max_size`].
+    #[doc(alias = "trySetMaxSize")]
+    pub async fn init_max_size(&self, max: usize, mode: EvictionMode) -> Result<bool> {
+        self.cache.init_max_size(max, mode).await
+    }
+
+    /// Same as [`HashMapCache::events`].
+    #[doc(
+        alias = "addListener",
+        alias = "MapEntryListener",
+        alias = "EntryCreatedListener",
+        alias = "EntryUpdatedListener",
+        alias = "EntryRemovedListener",
+        alias = "EntryExpiredListener"
+    )]
+    pub async fn events(&self) -> Result<EntryEvents<K, V, C>> {
+        self.cache.events().await
+    }
+
+    /// Same as [`HashMapCache::events_of`].
+    pub async fn events_of(&self, kinds: &[EntryEventKind]) -> Result<EntryEvents<K, V, C>> {
+        self.cache.events_of(kinds).await
+    }
+
+    /// Same as [`HashMapCache::keyspace_events`].
+    #[doc(
+        alias = "addListener",
+        alias = "MapPutListener",
+        alias = "MapIncrListener",
+        alias = "MapRemoveListener",
+        alias = "MapDeletedListener",
+        alias = "MapExpiredListener"
+    )]
+    pub async fn keyspace_events(&self) -> Result<MapEvents<K, C>> {
+        self.cache.keyspace_events().await
+    }
+
+    /// Same as [`HashMapCache::keyspace_events_of`].
+    pub async fn keyspace_events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
+        self.cache.keyspace_events_of(kinds).await
+    }
+
+    per_key_objects!();
+
     /// Number of entries in the local cache of this instance, including cached misses.
     pub fn local_len(&self) -> usize {
         self.local.local.len()
@@ -438,5 +646,29 @@ where
         self.local
             .publish(&self.key, message(&self.local.local.id, CLEAR, &[]))
             .await
+    }
+}
+
+impl<K, V, C> LocalCachedMapCache<K, V, C>
+where
+    K: Serialize + DeserializeOwned + Eq + Hash + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + Sync,
+    C: Codec,
+{
+    /// Same as [`HashMapCache::random_entries`].
+    #[doc(alias = "randomEntries")]
+    pub async fn random_entries(&self, count: usize) -> Result<std::collections::HashMap<K, V>> {
+        self.cache.random_entries(count).await
+    }
+
+    /// Same as [`HashMapCache::to_hash_map`]; it neither uses nor fills the local cache.
+    #[doc(
+        alias = "readAllMap",
+        alias = "readAllEntrySet",
+        alias = "readAllKeySet",
+        alias = "readAllValues"
+    )]
+    pub async fn to_hash_map(&self) -> Result<std::collections::HashMap<K, V>> {
+        self.cache.to_hash_map().await
     }
 }

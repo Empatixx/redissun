@@ -31,6 +31,9 @@ Every `HashMapCache` method works and returns the same builders (`hash_map_cache
 |---|---|
 | `get(&k)` | local cache first, then Redis; a value read from Redis is cached for as long as its entry lives (see below) |
 | `contains_key(&k)` | a cached key answers without a round trip; a miss is cached only with `store_cache_miss` |
+| `get_many(&ks)` | local hits, then one read from Redis for the misses, each cached for its lifetime |
+| `peek(&k)`, `peek_many(&ks)` | a local copy answers; a value read from Redis is not cached (the reply has no idle deadline) |
+| `preload_cache()[.page_size(n)]` | reads every entry from Redis and caches it; see [Preloading](#preloading) |
 | `insert(&k, &v)[.ttl(d)][.max_idle(d)]` | `HashMapCache::insert`; caches the new value with its limits and tells the others |
 | `remove(&k)` | tells the others when a live entry was removed |
 | `try_insert(&k, &v)[.ttl(d)][.max_idle(d)]` | caches and announces the value only when it stored it |
@@ -47,6 +50,10 @@ Every `HashMapCache` method works and returns the same builders (`hash_map_cache
 | `len()`, `is_empty()` | ask Redis; expired entries count until the clean-up deletes them, as on `HashMapCache` |
 | `local_len()`, `local_entries()`, `clear_local()` | the local cache of this instance only |
 | `clear_local_everywhere()` | empties the local cache of every instance without changing Redis, Redisson's `clearLocalCache` |
+| `entry_ttl`, `contains_value`, `value_len`, `random_keys`, `random_entries`, `to_hash_map`, `iter`, `keys`, `values`, `iter_with`, `keys_with`, `values_with` | as on `HashMapCache`; they neither use nor fill the local cache |
+| `set_max_size`, `init_max_size` | as on `HashMapCache`: they limit the entries in Redis, not the local copies (`cache_size` does that) |
+| `events()`, `events_of(..)`, `keyspace_events()`, `keyspace_events_of(..)` | as on `HashMapCache` |
+| `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, … | the per-key objects of `HashMapCache`, under Redisson's names |
 
 ## How long a local copy lives
 
@@ -63,8 +70,24 @@ Local hits do not reach Redis, so they cannot restart the entry's idle time ther
 | Method | A local hit answers | A miss reads | The miss is cached |
 |---|---|---|---|
 | `get` | yes | `GET` with the entry's deadlines | yes, for its lifetime; a missing key only with `store_cache_miss` |
+| `get_many` | yes | `GET_ALL` with the entries' deadlines, for the misses only | yes, each for its lifetime |
 | `contains_key` | yes | `CONTAINS_KEY` | only a missing key, with `store_cache_miss` |
+| `peek`, `peek_many` | yes | `GET_WITH_TTL_ONLY`, `GET_ALL_WITH_TTL_ONLY` | no |
+| `entry(&k)` | no: it reads Redis under the key's lock | `GET` | no; its write is cached like `insert` |
+| `lease(&k, d)` | no | `LEASE_GET` | no |
 | every other read | no | `HashMapCache`'s script | no |
+
+## Preloading
+
+`preload_cache()` walks the keys of the cache in Redis, 10 per page by default (`.page_size(n)`, Redisson's `preloadCache(count)`), reads each page with the entries' deadlines and caches every live entry for its lifetime. It resolves to the number of entries it cached; a key that is removed between the scan and the read is skipped.
+
+```rust
+let cached = sessions.preload_cache().page_size(100).await?;
+```
+
+## Server-side size limit
+
+`set_max_size` limits the entries in Redis, as on `HashMapCache`; it does not limit the local copies (`cache_size` does that). Local hits do not reach Redis, so they do not count as uses there: under a size limit, the entries read mostly from local caches look cold to Redis and are evicted first.
 
 ## What a write announces
 

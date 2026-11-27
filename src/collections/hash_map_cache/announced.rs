@@ -143,6 +143,10 @@ pub(super) static LEASE_REMOVE: LazyLock<Lua> =
 pub(super) static GET_EXPIRY: LazyLock<Lua> =
     LazyLock::new(|| Lua::from_lua(wrap_read(scripts::GET.source(), false)));
 
+/// redissun: GET_ALL read with its deadlines for LocalCachedMapCache. Replies per key nil or `{value, ttl deadline, idle delta}`.
+pub(super) static GET_ALL_EXPIRY: LazyLock<Lua> =
+    LazyLock::new(|| Lua::from_lua(wrap_read(scripts::GET_ALL.source(), true)));
+
 /// redissun only, for LocalCachedMapCache's `clear`. KEYS: main, timeout, idle, last access, updates log. ARGV: channel, mode, clear message. Deletes them and publishes the message when something was deleted and the mode announces; replies `1` when something was deleted.
 pub(super) static CLEAR_ANNOUNCED: LazyLock<Lua> =
     LazyLock::new(|| Lua::from_lua(DELETE_ANNOUNCED));
@@ -168,6 +172,7 @@ mod tests {
             (&PUT_WITH_LIMITS, &scripts::PUT_WITH_LIMITS),
             (&REMOVE, &scripts::REMOVE),
             (&GET_EXPIRY, &scripts::GET),
+            (&GET_ALL_EXPIRY, &scripts::GET_ALL),
             (
                 &PUT_IF_ABSENT_WITH_LIMITS,
                 &scripts::PUT_IF_ABSENT_WITH_LIMITS,

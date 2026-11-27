@@ -1,7 +1,7 @@
 //! The local cache of a [`HashMapCache`] built for a [`LocalCachedMapCache`](crate::LocalCachedMapCache): the announced write path and the cached reads.
 
-use super::announced::GET_EXPIRY;
-use super::scripts::CONTAINS_KEY;
+use super::announced::{GET_ALL_EXPIRY, GET_EXPIRY};
+use super::scripts::{CONTAINS_KEY, GET_ALL_WITH_TTL_ONLY, SCAN_KEYS};
 use super::{now, HashMapCache, Name};
 use crate::codec::Codec;
 use crate::collections::local_cache::local::ReadGuard;
@@ -225,6 +225,170 @@ where
                 );
                 Ok(None)
             }
+        }
+    }
+
+    /// The local answers for `fields`, in order, and the indices of the keys the local cache does not answer. A cached miss answers only with `store_cache_miss`.
+    pub(crate) fn local_hits(
+        &self,
+        local: &LocalCache,
+        fields: &[Bytes],
+    ) -> Result<(std::vec::Vec<Option<V>>, std::vec::Vec<usize>)> {
+        let mut values = std::vec::Vec::with_capacity(fields.len());
+        let mut misses = std::vec::Vec::new();
+        for (i, field) in fields.iter().enumerate() {
+            match local.local.lookup(field) {
+                Some(Some(value)) => values.push(Some(self.codec.decode(&value)?)),
+                Some(None) if local.store_cache_miss => values.push(None),
+                _ => {
+                    values.push(None);
+                    misses.push(i);
+                }
+            }
+        }
+        Ok((values, misses))
+    }
+
+    /// Reads `fields` with [`GET_ALL_EXPIRY`] under one read guard each; returns, per field, the value and whether it is now cached.
+    async fn read_expiring<'l>(
+        &self,
+        local: &'l LocalCache,
+        fields: &[&Bytes],
+    ) -> Result<std::vec::Vec<(Option<Bytes>, Option<ReadGuard<'l>>)>> {
+        let guards: std::vec::Vec<ReadGuard<'l>> = fields
+            .iter()
+            .map(|field| local.local.begin_read(field))
+            .collect();
+        let mut args = std::vec::Vec::with_capacity(fields.len() + 1);
+        args.push(now());
+        args.extend(fields.iter().map(|field| (*field).clone()));
+        // An error or a cancelled call drops the guards, which cache nothing.
+        let raw: std::vec::Vec<Option<(Bytes, i64, i64)>> = self
+            .key
+            .core
+            .eval(
+                &GET_ALL_EXPIRY,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                args,
+            )
+            .await?;
+        let now = now_millis();
+        Ok(raw
+            .into_iter()
+            .zip(guards)
+            .map(|(raw, guard)| match raw {
+                Some((value, ttl_timeout, idle_delta)) => {
+                    match copy_lifetime(ttl_timeout, idle_delta, now).lifetime() {
+                        Some(lifetime) => {
+                            guard.finish(Some((Some(value.clone()), lifetime)));
+                        }
+                        None => drop(guard),
+                    }
+                    (Some(value), None)
+                }
+                None => (None, Some(guard)),
+            })
+            .collect())
+    }
+
+    /// [`get_many`](HashMapCache::get_many) with a local cache: local hits, then one [`GET_ALL_EXPIRY`] for the misses, each cached for its lifetime; the loader runs for the keys still missing, in order.
+    pub(crate) async fn get_many_cached(
+        &self,
+        local: &LocalCache,
+        fields: &[Bytes],
+    ) -> Result<std::vec::Vec<Option<V>>> {
+        let (mut values, misses) = self.local_hits(local, fields)?;
+        if misses.is_empty() {
+            return Ok(values);
+        }
+        let missing: std::vec::Vec<&Bytes> = misses.iter().filter_map(|i| fields.get(*i)).collect();
+        let read = self.read_expiring(local, &missing).await?;
+        for ((i, field), (value, guard)) in misses.iter().zip(&missing).zip(read) {
+            let value = match (value, guard) {
+                (Some(value), _) => Some(self.codec.decode(&value)?),
+                (None, Some(guard)) if self.loads() => {
+                    self.load_missing_cached(local, field, guard).await?
+                }
+                (None, Some(guard)) => {
+                    guard.finish(
+                        local
+                            .store_cache_miss
+                            .then_some((None, Lifetime::default())),
+                    );
+                    None
+                }
+                (None, None) => None,
+            };
+            if let Some(slot) = values.get_mut(*i) {
+                *slot = value;
+            }
+        }
+        Ok(values)
+    }
+
+    /// [`peek_many`](HashMapCache::peek_many) with a local cache: local hits, then `GET_ALL_WITH_TTL_ONLY` for the misses, which are not cached (the reply has no idle deadline); `args` are `now, keys…`. The loader runs for the keys still missing, in order.
+    pub(crate) async fn peek_many_cached(
+        &self,
+        local: &LocalCache,
+        args: std::vec::Vec<Bytes>,
+    ) -> Result<std::vec::Vec<Option<V>>> {
+        let fields = args.get(1..).unwrap_or_default();
+        let (mut values, misses) = self.local_hits(local, fields)?;
+        if misses.is_empty() {
+            return Ok(values);
+        }
+        let missing: std::vec::Vec<Bytes> = misses
+            .iter()
+            .filter_map(|i| fields.get(*i).cloned())
+            .collect();
+        let raw: std::vec::Vec<Option<Bytes>> = self
+            .key
+            .core
+            .eval(
+                &GET_ALL_WITH_TTL_ONLY,
+                self.redis_keys(&[Name::Main, Name::Timeout]),
+                std::iter::once(now())
+                    .chain(missing.iter().cloned())
+                    .collect(),
+            )
+            .await?;
+        for ((i, field), raw) in misses.iter().zip(&missing).zip(raw) {
+            let mut value = self.decode_value(raw)?;
+            if value.is_none() && self.loads() {
+                value = load_value(&Target::Cache(self, None), field, false).await?;
+            }
+            if let Some(slot) = values.get_mut(*i) {
+                *slot = value;
+            }
+        }
+        Ok(values)
+    }
+
+    /// Redisson's `preloadCache`: walks the keys with `SCAN_KEYS`, `page` at a time, and caches each page read with [`GET_ALL_EXPIRY`]. Returns how many entries it cached; a key that vanished between the two is skipped.
+    pub(crate) async fn preload(&self, local: &LocalCache, page: usize) -> Result<usize> {
+        let mut cursor = "0".to_string();
+        let mut cached = 0;
+        loop {
+            let (next, keys) = self.scan_page(&SCAN_KEYS, cursor, None, page).await?;
+            if !keys.is_empty() {
+                let fields: std::vec::Vec<&Bytes> = keys.iter().collect();
+                cached += self
+                    .read_expiring(local, &fields)
+                    .await?
+                    .iter()
+                    .filter(|(value, _)| value.is_some())
+                    .count();
+            }
+            if next == "0" {
+                return Ok(cached);
+            }
+            cursor = next;
         }
     }
 

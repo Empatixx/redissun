@@ -63,6 +63,11 @@ pub mod hash_map_cache {
     pub use crate::collections::map::load::LoadAll;
 }
 
+/// The builder [`LocalCachedMapCache::preload_cache`] returns; its other methods return the builders of [`hash_map_cache`].
+pub mod local_cached_map_cache {
+    pub use crate::collections::local_cached_map_cache::PreloadCache;
+}
+
 /// The builders [`MapCacheNative`] methods return.
 pub mod map_cache_native {
     pub use crate::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};

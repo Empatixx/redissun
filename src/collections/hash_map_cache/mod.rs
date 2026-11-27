@@ -927,6 +927,11 @@ where
         for k in ks {
             args.push(self.codec.encode(*k)?);
         }
+        if let Some(local) = &self.local {
+            return self
+                .get_many_cached(local, args.get(1..).unwrap_or_default())
+                .await;
+        }
         let raw: std::vec::Vec<Option<Bytes>> = self
             .key
             .core
@@ -959,6 +964,13 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let encoded = self.codec.encode(k)?;
+        if let Some(local) = &self.local {
+            match local.local.lookup(&encoded) {
+                Some(Some(value)) => return Ok(Some(self.codec.decode(&value)?)),
+                Some(None) if local.store_cache_miss => return Ok(None),
+                _ => {}
+            }
+        }
         let raw: Option<Bytes> = self
             .key
             .core
@@ -988,6 +1000,9 @@ where
         args.push(now());
         for k in ks {
             args.push(self.codec.encode(*k)?);
+        }
+        if let Some(local) = &self.local {
+            return self.peek_many_cached(local, args).await;
         }
         let raw: std::vec::Vec<Option<Bytes>> = self
             .key
@@ -1230,7 +1245,7 @@ where
     }
 
     /// One page of [`SCAN_ENTRIES`] or [`SCAN_KEYS`], then the idle refresh of the entries on it, which Redisson sends without waiting and redissun awaits before the page is returned.
-    async fn scan_page(
+    pub(crate) async fn scan_page(
         &self,
         script: &Lua,
         cursor: String,
