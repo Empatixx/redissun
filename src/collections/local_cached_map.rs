@@ -167,6 +167,21 @@ impl ExpiryFeed {
     }
 }
 
+/// Which cache holds the local entries of a [`LocalCachedMap`], Redisson's `CacheProvider`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CacheProvider {
+    /// redissun's own cache, with every [`EvictionPolicy`]. The default.
+    #[default]
+    #[doc(alias = "REDISSON")]
+    Builtin,
+    /// A [`moka`](https://docs.rs/moka) cache, as Redisson's Caffeine one: [`ttl`](LocalCachedMapBuilder::ttl) is moka's time to live, [`max_idle`](LocalCachedMapBuilder::max_idle) its time to idle, and a [`cache_size`](LocalCachedMapBuilder::cache_size) above zero its capacity, whatever the [`EvictionPolicy`]. Moka evicts in the background, so the cache may hold more entries for a short time. Needs the `moka` feature.
+    #[cfg(feature = "moka")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "moka")))]
+    #[doc(alias = "CAFFEINE")]
+    Moka,
+}
+
 /// Where a [`LocalCachedMap`] keeps its entries, Redisson's `StoreMode`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StoreMode {
@@ -207,7 +222,6 @@ struct Store {
     max_idle: Option<Duration>,
     sequence: u64,
     baseline: u64,
-    reads: StdHashMap<Bytes, (usize, bool)>,
 }
 
 impl Store {
@@ -230,7 +244,6 @@ impl Store {
             max_idle,
             sequence: 0,
             baseline: 0,
-            reads: StdHashMap::new(),
         }
     }
 
@@ -320,16 +333,134 @@ impl Store {
         }
     }
 
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.order.clear();
+    }
+
+    fn entries(&mut self) -> std::vec::Vec<(Bytes, Bytes)> {
+        self.remove_expired();
+        self.slots
+            .iter()
+            .filter_map(|(key, slot)| Some((key.clone(), slot.value.clone()?)))
+            .collect()
+    }
+}
+
+/// The local cache of a [`LocalCachedMap`], by [`CacheProvider`]. A value of `None` is a cached miss.
+enum LocalStore {
+    Builtin(Store),
+    #[cfg(feature = "moka")]
+    Moka(moka::sync::Cache<Bytes, Option<Bytes>>),
+}
+
+impl LocalStore {
+    fn new(
+        provider: CacheProvider,
+        policy: EvictionPolicy,
+        capacity: usize,
+        ttl: Option<Duration>,
+        max_idle: Option<Duration>,
+    ) -> Self {
+        match provider {
+            CacheProvider::Builtin => {
+                LocalStore::Builtin(Store::new(policy, capacity, ttl, max_idle))
+            }
+            // Redisson's Caffeine branch: the eviction policy does not matter, the size limits the cache.
+            #[cfg(feature = "moka")]
+            CacheProvider::Moka => {
+                let mut builder = moka::sync::Cache::builder();
+                if let Some(ttl) = ttl {
+                    builder = builder.time_to_live(ttl);
+                }
+                if let Some(idle) = max_idle {
+                    builder = builder.time_to_idle(idle);
+                }
+                if capacity > 0 {
+                    builder = builder.max_capacity(capacity as u64);
+                }
+                LocalStore::Moka(builder.build())
+            }
+        }
+    }
+
+    fn get(&mut self, key: &Bytes) -> Option<Option<Bytes>> {
+        match self {
+            LocalStore::Builtin(store) => store.get(key),
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => cache.get(key),
+        }
+    }
+
+    fn put(&mut self, key: Bytes, value: Option<Bytes>) {
+        match self {
+            LocalStore::Builtin(store) => store.put(key, value),
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => cache.insert(key, value),
+        }
+    }
+
+    fn remove(&mut self, key: &Bytes) {
+        match self {
+            LocalStore::Builtin(store) => store.remove(key),
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => cache.invalidate(key),
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            LocalStore::Builtin(store) => store.clear(),
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => cache.invalidate_all(),
+        }
+    }
+
+    /// Every slot, cached misses included.
+    fn len(&mut self) -> usize {
+        match self {
+            LocalStore::Builtin(store) => store.slots.len(),
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => {
+                cache.run_pending_tasks();
+                usize::try_from(cache.entry_count()).unwrap_or(usize::MAX)
+            }
+        }
+    }
+
+    /// The slots that hold a value.
+    fn entries(&mut self) -> std::vec::Vec<(Bytes, Bytes)> {
+        match self {
+            LocalStore::Builtin(store) => store.entries(),
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => {
+                cache.run_pending_tasks();
+                cache
+                    .iter()
+                    .filter_map(|(key, value)| Some(((*key).clone(), value?)))
+                    .collect()
+            }
+        }
+    }
+}
+
+/// The local cache and the reads from Redis in flight, under one lock: a change that arrives while a key is read marks the read, so its stale result is not cached.
+struct Cache {
+    store: LocalStore,
+    /// Per key: the reads in flight, and whether a change arrived meanwhile.
+    reads: StdHashMap<Bytes, (usize, bool)>,
+}
+
+impl Cache {
     fn invalidate(&mut self, key: &Bytes) {
-        self.remove(key);
+        self.store.remove(key);
         if let Some(read) = self.reads.get_mut(key) {
             read.1 = true;
         }
     }
 
     fn clear(&mut self) {
-        self.slots.clear();
-        self.order.clear();
+        self.store.clear();
         self.reads.values_mut().for_each(|read| read.1 = true);
     }
 
@@ -347,21 +478,13 @@ impl Store {
             self.reads.remove(&key);
         }
         if let (false, Some(value)) = (dirty, value) {
-            self.put(key, value);
+            self.store.put(key, value);
         }
-    }
-
-    fn entries(&mut self) -> std::vec::Vec<(Bytes, Bytes)> {
-        self.remove_expired();
-        self.slots
-            .iter()
-            .filter_map(|(key, slot)| Some((key.clone(), slot.value.clone()?)))
-            .collect()
     }
 }
 
 struct Local {
-    store: Mutex<Store>,
+    cache: Mutex<Cache>,
     id: [u8; ID_LEN],
     reconnection: ReconnectionStrategy,
     last_invalidate: AtomicI64,
@@ -369,38 +492,44 @@ struct Local {
 }
 
 impl Local {
-    fn store(&self) -> std::sync::MutexGuard<'_, Store> {
-        self.store.lock().unwrap_or_else(|e| e.into_inner())
+    fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn lookup(&self, key: &Bytes) -> Option<Option<Bytes>> {
-        self.store().get(key)
+        self.cache().store.get(key)
     }
 
     fn write(&self, key: Bytes, value: Option<Bytes>) {
-        let mut store = self.store();
-        store.invalidate(&key);
-        store.put(key, value);
+        let mut cache = self.cache();
+        cache.invalidate(&key);
+        cache.store.put(key, value);
     }
 
     fn begin_read(&self, key: &Bytes) {
-        self.store().begin_read(key);
+        self.cache().begin_read(key);
     }
 
     fn finish_read(&self, key: Bytes, value: Option<Option<Bytes>>) {
-        self.store().finish_read(key, value);
+        self.cache().finish_read(key, value);
     }
 
     fn forget(&self, key: &Bytes) {
-        self.store().invalidate(key);
+        self.cache().invalidate(key);
     }
 
     fn forget_all(&self) {
-        self.store().clear();
+        self.cache().clear();
     }
 
+    /// Every local slot, cached misses included.
     fn len(&self) -> usize {
-        self.store().slots.len()
+        self.cache().store.len()
+    }
+
+    /// The local slots that hold a value, encoded.
+    fn entries(&self) -> std::vec::Vec<(Bytes, Bytes)> {
+        self.cache().store.entries()
     }
 
     fn apply(&self, message: &[u8]) {
@@ -475,6 +604,7 @@ pub struct LocalCachedMapBuilder<K, V, C: Codec> {
     store_cache_miss: bool,
     store_mode: StoreMode,
     expiration: ExpirationEventPolicy,
+    provider: CacheProvider,
     options: StoreOptions<K, V>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
@@ -493,6 +623,7 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             store_cache_miss: false,
             store_mode: StoreMode::default(),
             expiration: ExpirationEventPolicy::default(),
+            provider: CacheProvider::default(),
             options: StoreOptions::default(),
             _marker: PhantomData,
         }
@@ -553,6 +684,13 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
         self.expiration = policy;
         self
     }
+
+    /// Chooses the cache that holds the local entries. The default is [`CacheProvider::Builtin`].
+    #[doc(alias = "cacheProvider")]
+    pub fn cache_provider(mut self, provider: CacheProvider) -> Self {
+        self.provider = provider;
+        self
+    }
 }
 
 impl<K, V, C> LocalCachedMapBuilder<K, V, C>
@@ -574,12 +712,16 @@ where
     pub async fn build(self) -> Result<LocalCachedMap<K, V, C>> {
         let store = self.options.into_store(&self.key, self.codec.clone())?;
         let local = Arc::new(Local {
-            store: Mutex::new(Store::new(
-                self.eviction,
-                self.cache_size,
-                self.ttl,
-                self.max_idle,
-            )),
+            cache: Mutex::new(Cache {
+                store: LocalStore::new(
+                    self.provider,
+                    self.eviction,
+                    self.cache_size,
+                    self.ttl,
+                    self.max_idle,
+                ),
+                reads: StdHashMap::new(),
+            }),
             id: *Uuid::new_v4().as_bytes(),
             reconnection: self.reconnection,
             last_invalidate: AtomicI64::new(0),
@@ -1065,7 +1207,7 @@ where
     /// Number of entries in Redis. In [`StoreMode::Local`], the local entries that hold a value.
     pub async fn len(&self) -> Result<usize> {
         if self.local_only() {
-            return Ok(self.local.store().entries().len());
+            return Ok(self.local.entries().len());
         }
         self.map.len().await
     }
@@ -1073,7 +1215,7 @@ where
     /// Returns whether Redis holds no entry. In [`StoreMode::Local`], whether no local entry holds a value.
     pub async fn is_empty(&self) -> Result<bool> {
         if self.local_only() {
-            return Ok(self.local.store().entries().is_empty());
+            return Ok(self.local.entries().is_empty());
         }
         self.map.is_empty().await
     }
@@ -1102,7 +1244,7 @@ where
     /// Returns the entries in the local cache of this instance. Redisson's `getCachedMap`.
     #[doc(alias = "getCachedMap")]
     pub fn local_entries(&self) -> Result<std::vec::Vec<(K, V)>> {
-        let entries = self.local.store().entries();
+        let entries = self.local.entries();
         entries
             .iter()
             .map(|(key, value)| Ok((self.codec.decode(key)?, self.codec.decode(value)?)))
@@ -1147,7 +1289,7 @@ where
 
     /// The encoded local entries that hold a value, for the streams in [`StoreMode::Local`].
     fn snapshot(&self) -> std::vec::IntoIter<(Bytes, Bytes)> {
-        self.local.store().entries().into_iter()
+        self.local.entries().into_iter()
     }
 
     /// Streams every entry from Redis. It does not use or fill the local cache. In [`StoreMode::Local`], it streams a snapshot of the local entries.

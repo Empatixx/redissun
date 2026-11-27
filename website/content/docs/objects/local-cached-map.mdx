@@ -33,6 +33,7 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `sync_strategy(..)` | `Invalidate` (default): other instances drop the entry. `Update`: they receive the new value. `None`: nothing is sent. |
 | `reconnection_strategy(..)` | what happens after the pub/sub connection comes back: `None` (default) keeps the cache, `Clear` empties it, `Load` drops the keys changed meanwhile, read from a 10 minute log in Redis, or everything when the instance was away longer |
 | `store_cache_miss(bool)` | also cache that a key is missing. Off by default. |
+| `cache_provider(..)` | which cache holds the local entries, Redisson's `cacheProvider`: `Builtin` (default, Redisson's `REDISSON`) or `Moka` (Redisson's `CAFFEINE`), which needs the `moka` feature; see [Cache provider](#cache-provider) |
 | `expiration_event_policy(..)` | how the map learns that it expired in Redis, Redisson's `expirationEventPolicy` (formerly `useKeyEventsPattern`): `KeyeventPattern` (default) subscribes to the pattern `__keyevent@*:expired` and needs `notify-keyspace-events` with `Ex`; `KeyspaceChannel` subscribes to the map's own channel `__keyspace@<database>__:<name>` and needs `Kx`; `None` subscribes to nothing, so the local cache is not cleared when the map expires |
 | `store_mode(..)` | `LocalRedis` (default): entries live in Redis and in the local cache. `Local`: in the local cache only; see [Store mode](#store-mode). |
 | `loader(l)` | a `MapLoader` asked on a miss; see [Loaders and writers](/docs/guides/loaders-and-writers). None by default. |
@@ -64,6 +65,34 @@ As in Redisson's `RedissonLocalCachedMap`:
 - With a loader, `get` and `contains_key` ask it when neither the local cache nor Redis has the key. A loaded value is stored like an `insert` (Redis, the local cache, and the message to the others) without calling the writer. A key the loader does not have is cached as missing only with `store_cache_miss(true)`; otherwise the loader is asked again next time.
 - With a writer, `insert` always calls `write`, and `remove` always calls `delete`, also for a missing key. `clear` and `del` call neither.
 - The writer is called after Redis changed. A write-through writer that still fails after its attempts gives `Error::Writer`, and Redis keeps the change.
+
+## Cache provider
+
+`CacheProvider::Moka` keeps the local entries in a [moka](https://docs.rs/moka) cache instead of redissun's own, as Redisson's `CacheProvider.CAFFEINE` uses Caffeine. Turn on the `moka` feature:
+
+```toml
+redissun = { version = "0.23", features = ["moka"] }
+```
+
+```rust
+use redissun::CacheProvider;
+
+let users = client
+    .local_cached_map::<String, String>("users")
+    .cache_provider(CacheProvider::Moka)
+    .cache_size(10_000)
+    .ttl(Duration::from_secs(300))
+    .build()
+    .await?;
+```
+
+Moka honours the options the way Redisson's Caffeine branch does:
+
+- `ttl` is moka's time to live and `max_idle` its time to idle.
+- `cache_size` above zero is its capacity, whatever the `eviction_policy`: moka picks the entries to drop itself, so `Lru` and `Lfu` make no difference.
+- Moka evicts in the background, so the cache can hold a few more entries than `cache_size` for a short time. `local_len()` and `local_entries()` let moka catch up first.
+
+Everything else (sync, reconnection, store mode, loader and writer) works the same with either provider.
 
 ## Store mode
 

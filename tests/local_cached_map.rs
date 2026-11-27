@@ -1478,3 +1478,98 @@ async fn no_expiration_policy_keeps_the_local_cache() {
     sleep(Duration::from_millis(500)).await;
     assert_eq!(map.local_len(), 1);
 }
+
+#[cfg(feature = "moka")]
+mod moka_provider {
+    use super::*;
+    use redissun::CacheProvider;
+
+    async fn moka(
+        client: &Client,
+        name: &str,
+    ) -> redissun::LocalCachedMapBuilder<String, String, JsonCodec> {
+        client
+            .local_cached_map::<String, String>(name.to_string())
+            .cache_provider(CacheProvider::Moka)
+    }
+
+    #[tokio::test]
+    async fn moka_provider_caches_reads() {
+        let _gate = shared().await;
+        let client = client().await;
+        let name = unique("lcm");
+        let map = moka(&client, &name).await.build().await.unwrap();
+        let plain = client.hash_map::<String, String>(name);
+        plain.insert("k", "one").await.unwrap();
+        assert_eq!(map.get("k").await.unwrap().as_deref(), Some("one"));
+        assert_eq!(map.local_len(), 1);
+        plain.insert("k", "two").await.unwrap();
+        assert_eq!(map.get("k").await.unwrap().as_deref(), Some("one"));
+        assert_eq!(
+            map.local_entries().unwrap(),
+            vec![("k".to_string(), "one".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn moka_provider_expires_after_ttl() {
+        let _gate = shared().await;
+        let client = client().await;
+        let name = unique("lcm");
+        let map = moka(&client, &name)
+            .await
+            .ttl(Duration::from_millis(200))
+            .build()
+            .await
+            .unwrap();
+        let plain = client.hash_map::<String, String>(name);
+        plain.insert("k", "one").await.unwrap();
+        assert_eq!(map.get("k").await.unwrap().as_deref(), Some("one"));
+        plain.insert("k", "two").await.unwrap();
+        sleep(Duration::from_millis(400)).await;
+        assert_eq!(map.get("k").await.unwrap().as_deref(), Some("two"));
+    }
+
+    #[tokio::test]
+    async fn moka_provider_respects_cache_size() {
+        let _gate = shared().await;
+        let client = client().await;
+        let name = unique("lcm");
+        let map = moka(&client, &name)
+            .await
+            .cache_size(10)
+            .build()
+            .await
+            .unwrap();
+        let plain = client.hash_map::<String, String>(name);
+        for i in 0..100 {
+            plain.insert(&i.to_string(), "v").await.unwrap();
+        }
+        for i in 0..100 {
+            assert_eq!(map.get(&i.to_string()).await.unwrap().as_deref(), Some("v"));
+        }
+        eventually("the cache grew past its size", || async {
+            map.local_len() <= 10
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn moka_provider_receives_invalidations() {
+        let _gate = shared().await;
+        let name = unique("lcm");
+        let (first, second) = (client().await, client().await);
+        let reader = moka(&first, &name).await.build().await.unwrap();
+        let writer = moka(&second, &name).await.build().await.unwrap();
+        writer.insert("k", "one").await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(reader.get("k").await.unwrap().as_deref(), Some("one"));
+        assert_eq!(reader.local_len(), 1);
+        writer.insert("k", "two").await.unwrap();
+        eventually("the invalidation never arrived", || async {
+            reader.local_len() == 0
+        })
+        .await;
+        assert_eq!(reader.get("k").await.unwrap().as_deref(), Some("two"));
+    }
+}

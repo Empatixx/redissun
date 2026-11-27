@@ -31,10 +31,12 @@ rustls-native-certs = { version = "0.8", optional = true }
 redis = { version = "1.8", default-features = false, features = ["bytes", "aio", "tokio-comp"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+moka = { version = "0.12", default-features = false, features = ["sync"], optional = true }
 
 [features]
 tls-rustls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "rustls/ring", "tokio-rustls/ring"]
 tls-rustls-aws-lc = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
+moka = ["dep:moka"]
 
 [package.metadata.docs.rs]
 all-features = true
