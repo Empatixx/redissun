@@ -161,12 +161,13 @@ pub(crate) async fn listen(
     local: Weak<Local>,
     core: Weak<Core>,
     keys: std::vec::Vec<String>,
-    _subscription: Option<Subscription>,
-    mut messages: Option<broadcast::Receiver<Bytes>>,
+    sync: (Option<Subscription>, Option<broadcast::Receiver<Bytes>>),
     mut expiry: ExpiryFeed,
     mut evictions: Option<EvictionFeed>,
     mut reconnects: broadcast::Receiver<()>,
 ) {
+    // The subscription is held for its `Drop`, which unsubscribes.
+    let (_subscription, mut messages) = sync;
     loop {
         tokio::select! {
             received = next(&mut messages) => {
