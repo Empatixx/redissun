@@ -148,10 +148,11 @@ where
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
             // Always the script with limits, with zeros when there are none: Redisson's script without limits leaves the old deadline of an expired entry in place.
+            // Sent at most once: a second run would find this call's own value and return it as the existing one.
             let live: Option<Bytes> = cache
                 .key
                 .core
-                .eval(
+                .eval_once(
                     &PUT_IF_ABSENT_WITH_LIMITS,
                     cache.redis_keys(&[
                         Name::Main,
@@ -639,21 +640,36 @@ where
             keys.push(names::last_access(name));
             keys.push(names::old_options(name));
             keys.push(names::options(name));
-            let handled: i64 = self
-                .cache
-                .key
-                .core
-                .eval(
-                    &MIGRATE_FROM_0_23,
-                    keys,
-                    vec![
-                        Bytes::from(now_millis().to_string()),
-                        Bytes::from(self.batch_size.to_string()),
-                    ],
-                )
-                .await?;
-            usize::try_from(handled)
-                .map_err(|_| Error::Codec(format!("migration reported {handled} entries")))
+            keys.push(names::latch(name));
+            let cap = migration_scan_cap(self.batch_size);
+            let mut total = 0;
+            // One script call scans at most `cap` fields; keep calling until the batch is full or the scan is complete, so that `0` still means nothing old is left.
+            loop {
+                let (handled, finished): (i64, i64) = self
+                    .cache
+                    .key
+                    .core
+                    .eval(
+                        &MIGRATE_FROM_0_23,
+                        keys.clone(),
+                        vec![
+                            Bytes::from(now_millis().to_string()),
+                            Bytes::from((self.batch_size - total).to_string()),
+                            Bytes::from(cap.to_string()),
+                        ],
+                    )
+                    .await?;
+                total += usize::try_from(handled)
+                    .map_err(|_| Error::Codec(format!("migration reported {handled} entries")))?;
+                if finished == 1 || total >= self.batch_size {
+                    return Ok(total);
+                }
+            }
         })
     }
+}
+
+/// How many fields one migration script call scans at most: ten times the batch, so a cache that is mostly in the new layout does not block Redis in one call.
+fn migration_scan_cap(batch_size: usize) -> usize {
+    batch_size.saturating_mul(10)
 }

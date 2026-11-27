@@ -643,6 +643,8 @@ pub(super) static REMOVE_IF: LazyLock<Lua> = LazyLock::new(|| {
 });
 
 /// `RedissonMapCache.addAndGetOperationAsync`. KEYS: main, timeout, idle, created, updated, last access, removed, options. ARGV: now, key, delta (plain decimal), publish command.
+///
+/// Deviation from Redisson: on an expired entry that the clean-up has not deleted yet, Redisson writes `delta` but leaves the passed deadline in the timeout or idle set, so the value stays hidden and every call returns `delta` again. Here such an entry is treated as missing: its stale timeout and idle scores and its last-access entry are removed and the header idle is reset to `0`, so the counter starts fresh with no limits and is visible. The rest is verbatim.
 pub(super) static ADD_AND_GET: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
         "local value = redis.call('hget', KEYS[1], ARGV[2]); ",
@@ -676,6 +678,12 @@ pub(super) static ADD_AND_GET: LazyLock<Lua> = LazyLock::new(|| {
         "redis.call(ARGV[4], KEYS[5], msg); ",
         "end;",
         "else ",
+        "if value ~= false then ",
+        "redis.call('zrem', KEYS[2], ARGV[2]); ",
+        "redis.call('zrem', KEYS[3], ARGV[2]); ",
+        "redis.call('zrem', KEYS[6], ARGV[2]); ",
+        "t = 0; ",
+        "end; ",
         "newValue = ARGV[3]; ",
         "if hasListeners ~= false then ",
         "local msg = struct.pack('Lc0Lc0', string.len(ARGV[2]), ARGV[2], string.len(ARGV[3]), ARGV[3]); ",
@@ -1578,13 +1586,15 @@ pub(super) static LEASE_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// redissun only: moves 0.23 data into Redisson's layout, up to `ARGV[2]` old entries per call. KEYS: old main, new main, timeout, idle, old last access, new last access, old options, new options. ARGV: now, batch size.
+/// redissun only: moves 0.23 data into Redisson's layout, up to `ARGV[2]` old entries per call. KEYS: old main, new main, timeout, idle, old last access, new last access, old options, new options, eviction latch. ARGV: now, batch size, scan cap.
 ///
-/// The `HSCAN` cursor is kept in the field `migrate-cursor` of the old options hash between calls. A value that unpacks as `dLc0` and fills the whole field is already in the new layout and is skipped. An old value is read with 0.23's `unwrap` and checked with 0.23's expiry rule: a live one is packed into the new main hash (where a new-layout value already there wins), an expired one is dropped from the hash and the sets. When the scan is back at `0`, the old last-access set and the old options move to their new names and the old options hash (with the cursor) is deleted. Returns how many old entries the call handled.
+/// The `HSCAN` cursor is kept in the field `migrate-cursor` of the old options hash between calls. A call stops after the page on which it has scanned `ARGV[3]` fields, so a big hash that is mostly in the new layout does not block Redis in one call. A value that unpacks as `dLc0` and fills the whole field is already in the new layout and is skipped. An old value is read with 0.23's `unwrap` and checked with 0.23's expiry rule: a live one is packed into the new main hash (where a new-layout value already there wins), an expired one is dropped from the hash and the sets. Every call holds the eviction latch for 30 seconds, so `EVICT` returns `-1` on every client while the old layout exists: it would otherwise drop the passed deadlines of old entries from the shared timeout and idle sets and the migration would move them as live. When the scan is back at `0`, the old last-access set and the old options move to their new names, the old options hash (with the cursor) and the latch are deleted. Replies `{handled, finished}`: how many old entries the call handled and `1` when the scan is complete.
 pub(super) static MIGRATE_FROM_0_23: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
         "local now = tonumber(ARGV[1]); ",
         "local limit = tonumber(ARGV[2]); ",
+        "local cap = tonumber(ARGV[3]); ",
+        "redis.call('set', KEYS[9], '1', 'px', 30000); ",
         "local inPlace = KEYS[1] == KEYS[2]; ",
         "local mainTtl = -1; ",
         "if not inPlace then ",
@@ -1593,10 +1603,12 @@ pub(super) static MIGRATE_FROM_0_23: LazyLock<Lua> = LazyLock::new(|| {
         "local cursor = redis.call('hget', KEYS[7], 'migrate-cursor'); ",
         "if cursor == false then cursor = '0'; end; ",
         "local handled = 0; ",
+        "local scanned = 0; ",
         "local finished = false; ",
         "while true do ",
         "    local page = redis.call('hscan', KEYS[1], cursor, 'count', limit); ",
         "    local entries = page[2]; ",
+        "    scanned = scanned + #entries / 2; ",
         "    local stopped = false; ",
         "    for i = 1, #entries, 2 do ",
         "        local field = entries[i]; ",
@@ -1648,7 +1660,7 @@ pub(super) static MIGRATE_FROM_0_23: LazyLock<Lua> = LazyLock::new(|| {
         "        finished = true; ",
         "        break; ",
         "    end; ",
-        "    if handled >= limit then break; end; ",
+        "    if handled >= limit or scanned >= cap then break; end; ",
         "end; ",
         "if mainTtl > 0 and redis.call('exists', KEYS[2]) == 1 then ",
         "    redis.call('pexpire', KEYS[2], mainTtl); ",
@@ -1673,9 +1685,10 @@ pub(super) static MIGRATE_FROM_0_23: LazyLock<Lua> = LazyLock::new(|| {
         "        redis.call('pexpire', KEYS[8], optionsTtl); ",
         "    end; ",
         "    redis.call('del', KEYS[7]); ",
+        "    redis.call('del', KEYS[9]); ",
         "else ",
         "    redis.call('hset', KEYS[7], 'migrate-cursor', cursor); ",
         "end; ",
-        "return handled; ",
+        "return {handled, finished and 1 or 0}; ",
     ))
 });

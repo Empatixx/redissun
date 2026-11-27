@@ -5483,3 +5483,150 @@ async fn migration_runs_on_a_cluster() {
         );
     }
 }
+
+// Final review fixes.
+
+// Finding 1: the clean-up must not drop the deadlines of old entries while the migration runs.
+#[tokio::test]
+async fn the_clean_up_waits_while_the_migration_runs() {
+    let name = unique("cache");
+    let tag = old_tag(&name);
+    let past = (client_now() - 1_000).to_string();
+    let mut hset = vec!["HSET".to_string(), tag.clone()];
+    let mut zadd = vec!["ZADD".to_string(), format!("redissun__timeout__set:{tag}")];
+    for i in 0..200 {
+        hset.push(format!("\"e{i}\""));
+        hset.push(format!("0:\"v{i}\""));
+        zadd.push(past.clone());
+        zadd.push(format!("\"e{i}\""));
+    }
+    for command in [hset, zadd] {
+        let parts: Vec<&str> = command.iter().map(String::as_str).collect();
+        let reply = raw_command(&parts).await;
+        assert!(reply.starts_with(':'), "{reply}");
+    }
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    assert_eq!(cache.migrate_from_0_23().batch_size(1).await.unwrap(), 1);
+    // A 0.24 client's clean-up runs several times now.
+    let (_cleaner_client, _cleaner) = cleaner(&name).await;
+    sleep(Duration::from_millis(800)).await;
+    let (_, total) = migrate_all(&cache, 1000).await;
+    assert_eq!(total, 199);
+    assert_eq!(cache.len().await.unwrap(), 0);
+    assert_eq!(cache.get("e7").await.unwrap(), None);
+    assert_eq!(
+        raw_command(&[
+            "EXISTS",
+            &format!("redissun__execute_task_once_latch:{tag}")
+        ])
+        .await
+        .trim(),
+        ":0",
+        "the migration leaves the latch behind"
+    );
+}
+
+// Finding 2: a failed incr_by must not leave ADD_AND_GET's temporary field in the hash.
+#[tokio::test]
+async fn a_failed_incr_by_leaves_no_temporary_field() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    cache.insert("s", "abc").await.unwrap();
+    cache.insert("t", "def").await.unwrap();
+    let result = cache.incr_by("s", 1).await;
+    assert!(matches!(result, Err(Error::Redis(_))), "{result:?}");
+    let fields = raw_command(&["HKEYS", &name]).await;
+    assert!(!fields.contains("redissun__temp_val"), "{fields}");
+    assert_eq!(cache.len().await.unwrap(), 2);
+    let all = cache.to_hash_map().await.unwrap();
+    assert_eq!(all.len(), 2);
+    let entries: Vec<(String, String)> = cache.iter().try_collect().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(cache.contains_value("def").await.unwrap());
+}
+
+// Finding 4 (deviation from Redisson): incr_by treats an expired entry that is not cleaned up yet as missing.
+#[tokio::test]
+async fn incr_by_restarts_an_expired_entry_before_the_clean_up() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache
+        .insert("ttl", &1)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    cache
+        .insert("idle", &1)
+        .max_idle(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(250)).await;
+    for key in ["ttl", "idle"] {
+        assert_eq!(cache.incr_by(key, 5).await.unwrap(), 5, "{key}");
+        assert_eq!(cache.incr_by(key, 5).await.unwrap(), 10, "{key}");
+        assert_eq!(cache.get(key).await.unwrap(), Some(10), "{key}");
+        assert_eq!(cache.entry_ttl(key).await.unwrap(), None, "{key}");
+    }
+    sleep(Duration::from_millis(250)).await;
+    assert_eq!(cache.get("idle").await.unwrap(), Some(10));
+}
+
+// Finding 5: one migration script call scans a bounded number of fields, and the call still ends with 0.
+#[tokio::test]
+async fn a_migration_call_scans_a_bounded_number_of_fields() {
+    let (_container, url) = common::own_redis().await;
+    let client = redissun::Client::builder()
+        .url(url.clone())
+        .eviction_interval(Duration::from_secs(3600))
+        .build()
+        .await
+        .unwrap();
+    let name = format!("{{{}}}:cache", unique("t"));
+    let cache = client.hash_map_cache::<String, i64>(name.clone());
+    let keys: Vec<String> = (0..2000).map(|i| format!("n{i}")).collect();
+    let values: Vec<i64> = (0..2000).collect();
+    cache
+        .extend(keys.iter().map(String::as_str).zip(values.iter()))
+        .await
+        .unwrap();
+    let reply = common::raw_command_at(
+        &url,
+        &[
+            "HSET", &name, "\"o1\"", "0:1", "\"o2\"", "0:2", "\"o3\"", "0:3",
+        ],
+    )
+    .await;
+    assert_eq!(reply.trim(), ":3");
+    let evalsha_calls = || async {
+        let info = common::raw_command_at(&url, &["INFO", "commandstats"]).await;
+        info.lines()
+            .find(|line| line.starts_with("cmdstat_evalsha:"))
+            .and_then(|line| line.split("calls=").nth(1))
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|calls| calls.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    // Load the script once, so the count below only has the migration's calls.
+    assert_eq!(
+        client
+            .hash_map_cache::<String, i64>(format!("{{{}}}:other", unique("t")))
+            .migrate_from_0_23()
+            .await
+            .unwrap(),
+        0
+    );
+    let before = evalsha_calls().await;
+    let (_, total) = migrate_all(&cache, 2).await;
+    assert_eq!(total, 3);
+    let calls = evalsha_calls().await - before;
+    // 2003 fields, at most 10 × 2 per script call.
+    assert!(calls >= 2003 / 20, "{calls} script calls");
+    assert_eq!(cache.len().await.unwrap(), 2003);
+    assert_eq!(cache.get("o2").await.unwrap(), Some(2));
+    assert_eq!(cache.get("n1999").await.unwrap(), Some(1999));
+}

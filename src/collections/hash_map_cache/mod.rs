@@ -506,9 +506,11 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.key
+        // Not idempotent: a retried call would add twice.
+        let outcome = self
+            .key
             .core
-            .eval(
+            .eval_once(
                 &ADD_AND_GET,
                 self.redis_keys(&[
                     Name::Main,
@@ -527,7 +529,18 @@ where
                     Bytes::from(PUBLISH),
                 ],
             )
-            .await
+            .await;
+        if let Err(Error::Redis(_)) = &outcome {
+            // `HINCRBYFLOAT` fails on a stored value that is not a number after the script wrote the temporary field, and a script error rolls nothing back. Best effort: the original error is what the caller needs.
+            let mut cmd = redis::cmd("HDEL");
+            cmd.arg(self.key.name()).arg(TEMP_VAL_FIELD);
+            let _: Result<i64> = self
+                .key
+                .core
+                .query(Request::new(cmd).key(self.key.name().as_bytes()))
+                .await;
+        }
+        outcome
     }
 
     /// Inserts all entries, as [`HashMapCache::insert`] would one by one: each replaces its entry and clears its limits unless [`Extend::ttl`] or [`Extend::max_idle`] sets new ones (Redisson's `putAll(map)` keeps them). Entries are `(&key, &value)` pairs and are encoded at once; nothing is sent for none.
@@ -1202,7 +1215,7 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
     /// while cache.migrate_from_0_23().batch_size(1000).await? > 0 {}
     /// ```
     ///
-    /// Stop the 0.23 clients first, then run the loop once per cache, from one client, before any client of this version uses that cache. Each call is one atomic script; the whole migration is not: until the loop has returned `0`, part of the data is in each layout, so old and new clients must not mix and new clients should not write to the cache (a 0.23 client cannot read the new layout, and the event formats differ). A live entry keeps its time to live, max idle time and use score; the old last-access set and the size limit move to their new keys in the last call. Running the loop again is harmless: on a name without `{` it returns `0` at once; on a name with a hash tag it scans the hash once more and moves nothing. It leaves data that Redisson wrote alone, as that is already in the new layout. See the "Upgrading redissun" guide.
+    /// Stop the 0.23 clients first, then run the loop once per cache, from one client, before any client of this version uses that cache. Each script is atomic; the whole migration is not: until the loop has returned `0`, part of the data is in each layout, so old and new clients must not mix and new clients should not write to the cache (a 0.23 client cannot read the new layout, and the event formats differ). A live entry keeps its time to live, max idle time and use score; the old last-access set and the size limit move to their new keys in the last call. One script scans at most ten times `batch_size` fields, and a call runs scripts until it has handled `batch_size` old entries or the scan is complete. Every call holds the clean-up latch of the cache for 30 seconds and the last call frees it, so no client of this version deletes expired entries meanwhile (that would drop the deadlines of entries still in the old layout and the migration would move them as live): start the loop right after creating the handle and do not pause between calls. Running the loop again changes nothing: on a name without `{` it returns `0` at once; on a name with a hash tag it scans the whole hash once more and moves nothing. It leaves data that Redisson wrote alone, as that is already in the new layout. See the "Upgrading redissun" guide.
     pub fn migrate_from_0_23(&self) -> Migrate<'_, K, V, C> {
         Migrate::new(self)
     }
@@ -1237,25 +1250,26 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
         v: Bytes,
         token: Bytes,
     ) -> Result<bool> {
-        let inserted: i64 = self
-            .key
-            .core
-            .eval(
-                &FAST_PUT_WITH_LIMITS,
-                self.redis_keys(&[
-                    Name::Main,
-                    Name::Timeout,
-                    Name::Idle,
-                    Name::Created,
-                    Name::Updated,
-                    Name::LastAccess,
-                    Name::Removed,
-                    Name::Options,
-                    Name::Lease,
-                ]),
-                limits.arguments(vec![k, v, Bytes::from(PUBLISH), token]),
-            )
-            .await?;
+        let keys = self.redis_keys(&[
+            Name::Main,
+            Name::Timeout,
+            Name::Idle,
+            Name::Created,
+            Name::Updated,
+            Name::LastAccess,
+            Name::Removed,
+            Name::Options,
+            Name::Lease,
+        ]);
+        // With a token the script frees the lease, so a second run would find no lease and report `false` for a stored value.
+        let leased = !token.is_empty();
+        let args = limits.arguments(vec![k, v, Bytes::from(PUBLISH), token]);
+        let core = &self.key.core;
+        let inserted: i64 = if leased {
+            core.eval_once(&FAST_PUT_WITH_LIMITS, keys, args).await?
+        } else {
+            core.eval(&FAST_PUT_WITH_LIMITS, keys, args).await?
+        };
         Ok(inserted == 1)
     }
 }

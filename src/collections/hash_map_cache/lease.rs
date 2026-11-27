@@ -63,7 +63,7 @@ impl<'m, K, V, C: Codec> LeaseGuard<'m, K, V, C> {
 
     /// Stores the loaded value and frees the lease, when this guard still holds it. Await it, optionally after setting [`LeaseInsert::ttl`] or [`LeaseInsert::max_idle`].
     ///
-    /// Resolves to `true` when the value was stored and the lease freed. `false` means the lease's time was up or someone else took or freed it (by a plain [`HashMapCache::insert`] or [`HashMapCache::set`], [`HashMapCache::invalidate`] or a newer lease), and nothing was stored. As in Redisson, `false` also comes back when the lease still matched but a live entry had been written meanwhile: the value was then stored over it.
+    /// Resolves to `true` when the value was stored and the lease freed. `false` means the lease's time was up or someone else took or freed it (by a plain [`HashMapCache::insert`] or [`HashMapCache::set`], [`HashMapCache::invalidate`] or a newer lease), and nothing was stored. As in Redisson, `false` also comes back when the lease still matched but a live entry had been written meanwhile: the value was then stored over it. The script is sent at most once: when the connection fails after it was sent, the call returns that error instead of sending it again, so a stored value is never reported as `false` by a second run.
     #[doc(alias = "putWithLease")]
     pub fn insert<W>(self, value: &'m W) -> LeaseInsert<'m, K, V, C, W>
     where
@@ -180,7 +180,7 @@ where
         let (status, value, holder, acquired): (i64, Option<Bytes>, Option<String>, i64) = self
             .key
             .core
-            .eval(
+            .eval_once(
                 &LEASE_GET,
                 self.redis_keys(&[
                     Name::Main,
@@ -205,7 +205,7 @@ where
         }
         match holder {
             Some(holder) if !holder.is_empty() => {
-                if acquired == 1 {
+                if took_lease(acquired, &holder, &token) {
                     Ok(Lease::Acquired(LeaseGuard {
                         cache: self,
                         key,
@@ -251,5 +251,22 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
             )
             .await?;
         Ok(removed.iter().any(|n| *n != 0))
+    }
+}
+
+/// Whether a `LEASE_GET` reply means this call holds the lease: it took it now, or the holder is this call's token (a run whose reply was lost took it).
+fn took_lease(acquired: i64, holder: &str, token: &str) -> bool {
+    acquired == 1 || holder == token
+}
+
+#[cfg(test)]
+mod tests {
+    use super::took_lease;
+
+    #[test]
+    fn the_lease_is_ours_when_the_holder_is_our_token() {
+        assert!(took_lease(1, "t", "t"));
+        assert!(took_lease(0, "t", "t"));
+        assert!(!took_lease(0, "other", "t"));
     }
 }
