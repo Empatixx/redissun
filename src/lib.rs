@@ -119,6 +119,7 @@ pub use collections::local_cached_map::{
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
 pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
+pub use collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;

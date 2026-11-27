@@ -17,6 +17,7 @@ use crate::collections::hash_map::{HashMap, HashMapBuilder};
 use crate::collections::hash_map_cache::{HashMapCache, HashMapCacheBuilder};
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
+use crate::collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 use crate::collections::sorted_set::SortedSet;
 use crate::coordination::adder::{Adder, Summable};
 use crate::coordination::latch::CountDownLatch;
@@ -289,6 +290,21 @@ impl<C: Codec> Client<C> {
         name: impl Into<Arc<str>>,
     ) -> HashMapCacheBuilder<K, V, C> {
         HashMapCacheBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// **Experimental.** Returns the [`MapCacheNative`] stored under `name`, a hash whose entries expire on the server (Redis 7.4 or newer for the methods with a time). It is the map [`map_cache_native_builder`](Client::map_cache_native_builder) builds without options.
+    #[doc(alias = "getMapCacheNative")]
+    pub fn map_cache_native<K, V>(&self, name: impl Into<Arc<str>>) -> MapCacheNative<K, V, C> {
+        MapCacheNative::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// **Experimental.** Starts a [`MapCacheNative`] stored under `name` with a loader or a writer, Redisson's `getMapCacheNative(MapOptions)`. Set its options, then `.build().await`.
+    #[doc(alias = "getMapCacheNative")]
+    pub fn map_cache_native_builder<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> MapCacheNativeBuilder<K, V, C> {
+        MapCacheNativeBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Lock`] named `name`.

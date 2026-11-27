@@ -1,0 +1,37 @@
+---
+title: MapCacheNative
+description: A shared map whose entries expire on the server (Redis 7.4 hash field expiration). Experimental.
+---
+
+**Experimental.** A `MapCacheNative` is a `HashMap` whose entries can each have a time to live, and the server deletes them when it runs out. It is Redisson's `RMapCacheNative`.
+
+```rust
+let tokens = client.map_cache_native::<String, String>("tokens");
+
+let left = tokens.entry_ttl("abc").await?;
+```
+
+It needs **Redis 7.4 or newer, or Valkey 9** (hash field expiration) for every method that sets or reads a time to live, and **Redis 8.0** for the methods that send `HSETEX`. On an older server such a method returns `Error::Unsupported` and writes nothing. The first such call per client asks the server with `COMMAND INFO`. The methods it shares with `HashMap` work on any server.
+
+## Compared with `HashMapCache`
+
+| | `MapCacheNative` | `HashMapCache` |
+|---|---|---|
+| expiry | by the server, per hash field | by scripts and a clean-up task, on the client's clock |
+| keys | one hash | a hash, sorted sets and strings |
+| clean-up task | none | yes |
+| maximum size, max idle, entry events, leases | no, as in Redisson | yes |
+| minimum server | Redis 7.4 / Valkey 9 | Redis 6.2 |
+
+## Methods
+
+Every `HashMap` method works the same way: `get`, `remove`, `contains_key`, `len`, `is_empty`, `clear`, `get_many`, `compare_and_set`, `remove_if_eq`, `remove_many`, `contains_value`, `value_len`, `random_keys`, `random_entries`, `to_hash_map`, `iter`, `keys`, `values`, `iter_with`, `keys_with`, `values_with`, `load_all`, `load_many`, `flush`, and the per-key objects (`lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)`).
+
+| Method | Notes |
+|---|---|
+| `entry_ttl(&k)` | the time the entry has left (`HPTTL`). `None` when it has no time to live or is missing. |
+| `incr_by(&k, n)`, `incr_by_float(&k, x)` | keep the entry's time to live (`HINCRBY` does not clear it). |
+
+## How it is stored
+
+One hash at the raw name, with no braces added and no other keys, the same hash a `HashMap` of that name and a Redisson `RMapCacheNative` use. The server stores each field's deadline. Redisson and redissun clients share the data, and the per-key objects have Redisson's names (`{name}:<hash of the key>:lock`).
