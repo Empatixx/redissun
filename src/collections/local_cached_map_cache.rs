@@ -1,6 +1,6 @@
 use crate::codec::Codec;
 use crate::collections::hash_map_cache::{
-    mark_listeners, EntryEventKind, EntryEvents, EntryRequest, EvictionMode, ExpireEntries,
+    eviction_feed, mark_listeners, EntryEventKind, EntryEvents, EntryRequest, EvictionMode, ExpireEntries,
     ExpireEntry, Extend, HashMapCache, Insert, Lease, Set, TryInsert,
 };
 use crate::collections::local_cache::messages::{message, CLEAR};
@@ -121,10 +121,19 @@ where
     /// Checks the options, marks the cache for entry events, subscribes to the changes of the other instances and returns the cache. Invalid store options are an [`Error::Config`](crate::Error::Config).
     pub async fn build(self) -> Result<LocalCachedMapCache<K, V, C>> {
         let store = self.options.into_store(&self.key, self.codec.clone())?;
-        if self.local.store_mode != StoreMode::Local {
+        let evictions = if self.local.store_mode != StoreMode::Local {
             mark_listeners(&self.key).await?;
-        }
-        let local = start(&self.key, self.key.name().to_string(), &self.local).await?;
+            Some(eviction_feed(&self.key).await?)
+        } else {
+            None
+        };
+        let local = start(
+            &self.key,
+            self.key.name().to_string(),
+            &self.local,
+            evictions,
+        )
+        .await?;
         let cache = HashMapCache::with_local(
             self.key.clone(),
             self.codec.clone(),

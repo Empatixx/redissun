@@ -5,6 +5,7 @@ use super::messages::{now_millis, LOG_ID_LEN, UPDATES_LOG_TIME};
 use super::options::ReconnectionStrategy;
 use crate::client::core::Core;
 use crate::client::request::Request;
+use crate::collections::hash_map_cache::entry_events::{split_event, LengthPrefix};
 use crate::error::Result;
 use crate::pubsub::{PatternMessage, Subscription};
 use bytes::Bytes;
@@ -50,6 +51,65 @@ impl ExpiryFeed {
             Ok(false) => Expiry::Ignore,
             Err(RecvError::Closed) => Expiry::Closed,
         }
+    }
+}
+
+/// The entry events of a `HashMapCache` the server publishes when it drops entries (the removed and expired channels): each forgets the key it names, whatever the sync strategy, because the server's truth wins. The subscriptions are held for their `Drop`, which unsubscribes.
+pub(crate) struct EvictionFeed {
+    #[allow(dead_code)]
+    subscriptions: std::vec::Vec<Subscription>,
+    receivers: std::vec::Vec<broadcast::Receiver<Bytes>>,
+    prefix: LengthPrefix,
+}
+
+/// What one eviction message means for the local cache.
+pub(crate) enum Eviction {
+    /// Forget this encoded key.
+    Key(Bytes),
+    /// A message did not parse or messages were lost: clear the cache.
+    Clear,
+    /// The feed ended.
+    Closed,
+}
+
+impl EvictionFeed {
+    pub(crate) fn new(
+        subscriptions: std::vec::Vec<Subscription>,
+        receivers: std::vec::Vec<broadcast::Receiver<Bytes>>,
+        prefix: LengthPrefix,
+    ) -> Self {
+        Self {
+            subscriptions,
+            receivers,
+            prefix,
+        }
+    }
+
+    /// The next message of any channel; never returns without channels.
+    pub(crate) async fn next(&mut self) -> Eviction {
+        if self.receivers.is_empty() {
+            return std::future::pending().await;
+        }
+        let received = futures::future::select_all(
+            self.receivers.iter_mut().map(|r| Box::pin(r.recv())),
+        )
+        .await
+        .0;
+        match received {
+            Ok(payload) => match split_event(&payload, self.prefix) {
+                Some((key, _, _)) => Eviction::Key(Bytes::copy_from_slice(key)),
+                None => Eviction::Clear,
+            },
+            Err(RecvError::Lagged(_)) => Eviction::Clear,
+            Err(RecvError::Closed) => Eviction::Closed,
+        }
+    }
+}
+
+async fn next_eviction(feed: &mut Option<EvictionFeed>) -> Eviction {
+    match feed {
+        Some(feed) => feed.next().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -105,6 +165,7 @@ pub(crate) async fn listen(
     _subscription: Option<Subscription>,
     mut messages: Option<broadcast::Receiver<Bytes>>,
     mut expiry: ExpiryFeed,
+    mut evictions: Option<EvictionFeed>,
     mut reconnects: broadcast::Receiver<()>,
 ) {
     loop {
@@ -123,6 +184,14 @@ pub(crate) async fn listen(
                     Expiry::Clear => local.forget_all(),
                     Expiry::Ignore => {}
                     Expiry::Closed => expiry = ExpiryFeed::None,
+                }
+            }
+            evicted = next_eviction(&mut evictions) => {
+                let Some(local) = local.upgrade() else { return };
+                match evicted {
+                    Eviction::Key(key) => local.forget(&key),
+                    Eviction::Clear => local.forget_all(),
+                    Eviction::Closed => evictions = None,
                 }
             }
             reconnected = reconnects.recv() => {

@@ -119,7 +119,7 @@ where
     /// Checks the options, subscribes to the changes of the other instances and returns the map. Invalid store options are an [`Error::Config`](crate::Error::Config).
     pub async fn build(self) -> Result<LocalCachedMap<K, V, C>> {
         let store = self.options.into_store(&self.key, self.codec.clone())?;
-        let local = start(&self.key, self.key.redis_key(), &self.local).await?;
+        let local = start(&self.key, self.key.redis_key(), &self.local, None).await?;
         Ok(LocalCachedMap {
             map: HashMap::new(self.key.clone(), self.codec.clone()),
             key: self.key,

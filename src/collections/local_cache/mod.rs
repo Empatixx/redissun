@@ -9,6 +9,7 @@ pub(crate) mod store;
 use crate::error::Result;
 use crate::object::Key;
 use bytes::Bytes;
+pub(crate) use listener::EvictionFeed;
 use listener::{listen, ExpiryFeed, EXPIRED_EVENTS};
 use local::Local;
 use messages::{channel, updates_log};
@@ -72,6 +73,7 @@ pub(crate) async fn start(
     key: &Key,
     watched: String,
     options: &LocalOptions,
+    evictions: Option<EvictionFeed>,
 ) -> Result<Arc<LocalCache>> {
     let local = Arc::new(Local::new(
         LocalStore::new(
@@ -114,6 +116,7 @@ pub(crate) async fn start(
         subscription,
         messages,
         expiry,
+        evictions,
         reconnects,
     ));
     *local.listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);

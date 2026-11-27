@@ -2,7 +2,7 @@ mod common;
 
 use common::store::MemoryStore;
 use common::{client, raw_command, unique};
-use redissun::{Client, HashMapCache, JsonCodec, LocalCachedMapCache, SyncStrategy};
+use redissun::{Client, HashMapCache, JsonCodec, LocalCachedMapCache, Object, SyncStrategy};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
@@ -779,4 +779,287 @@ async fn lock_lives_under_the_redisson_name() {
     let guard = a.lock("key").unwrap().lock().await.unwrap();
     assert_eq!(raw_command(&["EXISTS", &lock_key]).await, ":1\r\n");
     guard.unlock().await.unwrap();
+}
+
+// ---- Task 5: entries the server drops, expiry of the whole cache, reconnection, limits ----
+
+fn local_keys(cache: &Cache) -> std::vec::Vec<String> {
+    let mut keys: std::vec::Vec<String> = cache
+        .local_entries()
+        .unwrap()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[tokio::test]
+async fn max_size_eviction_drops_my_copy() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    let plain = plain(&client, &name);
+    a.set_max_size(2, redissun::EvictionMode::Lru).await.unwrap();
+    a.insert("k1", "1").await.unwrap();
+    assert_eq!(local_keys(&a), ["k1"]);
+    sleep(10 * MS).await;
+    plain.insert("k2", "2").await.unwrap();
+    sleep(10 * MS).await;
+    plain.insert("k3", "3").await.unwrap();
+    eventually("the evicted copy stayed", || async {
+        !local_keys(&a).contains(&"k1".to_string())
+    })
+    .await;
+    assert_eq!(plain.get("k1").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_clean_up_drops_a_copy_whose_ttl_was_shortened_behind_its_back() {
+    let _gate = shared().await;
+    let cleaning = redissun::Client::builder()
+        .url(common::redis_url().await)
+        .eviction_interval(Duration::from_secs(1))
+        .build()
+        .await
+        .unwrap();
+    let name = unique("lcmc");
+    let a = lcmc(&cleaning, &name).await;
+    let other = client().await;
+    let plain = plain(&other, &name);
+    a.insert("k", "v").await.unwrap();
+    assert_eq!(a.local_len(), 1);
+    assert!(plain.expire_entry("k").ttl(200 * MS).await.unwrap());
+    eventually("the expired copy stayed", || async { a.local_len() == 0 }).await;
+}
+
+#[tokio::test]
+async fn a_removal_by_a_plain_cache_client_drops_my_copy() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = lcmc(&client, &name).await;
+    a.insert("k", "v").await.unwrap();
+    assert_eq!(a.local_len(), 1);
+    plain(&client, &name).remove("k").await.unwrap();
+    eventually("the removed copy stayed", || async { a.local_len() == 0 }).await;
+}
+
+#[tokio::test]
+async fn sync_none_still_drops_evicted_copies() {
+    let _gate = shared().await;
+    let (first, second) = (client().await, client().await);
+    let name = unique("lcmc");
+    let unsynced = |c: Client| {
+        let name = name.clone();
+        async move {
+            c.local_cached_map_cache::<String, String>(name)
+                .sync_strategy(SyncStrategy::None)
+                .build()
+                .await
+                .unwrap()
+        }
+    };
+    let a = unsynced(first.clone()).await;
+    let b = unsynced(second.clone()).await;
+    a.insert("k", "1").await.unwrap();
+    b.insert("k", "2").await.unwrap();
+    sleep(200 * MS).await;
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("1"));
+    plain(&second, &name).remove("k").await.unwrap();
+    eventually("the removed copy stayed", || async { a.local_len() == 0 }).await;
+}
+
+#[tokio::test]
+async fn the_map_expiring_clears_every_local_cache() {
+    let _gate = exclusive().await;
+    raw_command(&["CONFIG", "SET", "notify-keyspace-events", "EKx"]).await;
+    for policy in [
+        redissun::ExpirationEventPolicy::KeyeventPattern,
+        redissun::ExpirationEventPolicy::KeyspaceChannel,
+    ] {
+        let name = unique("lcmc");
+        let (first, second) = (client().await, client().await);
+        let build = |c: Client| {
+            let name = name.clone();
+            async move {
+                c.local_cached_map_cache::<String, String>(name)
+                    .expiration_event_policy(policy)
+                    .build()
+                    .await
+                    .unwrap()
+            }
+        };
+        let a = build(first).await;
+        let b = build(second).await;
+        a.insert("k", "v").await.unwrap();
+        eventually("b never read k", || async {
+            b.get("k").await.unwrap().as_deref() == Some("v")
+        })
+        .await;
+        assert!(a.expire(200 * MS).await.unwrap());
+        eventually(&format!("{policy:?}: b kept its copy"), || async {
+            b.local_len() == 0
+        })
+        .await;
+    }
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = lcmc(&first, &name).await;
+    let b = second
+        .local_cached_map_cache::<String, String>(name.clone())
+        .expiration_event_policy(redissun::ExpirationEventPolicy::None)
+        .build()
+        .await
+        .unwrap();
+    a.insert("k", "v").await.unwrap();
+    eventually("b never read k", || async {
+        b.get("k").await.unwrap().as_deref() == Some("v")
+    })
+    .await;
+    assert!(a.expire(200 * MS).await.unwrap());
+    sleep(500 * MS).await;
+    assert_eq!(b.local_len(), 1);
+}
+
+async fn kill_pubsub_connections() {
+    use tokio::io::AsyncWriteExt;
+    let url = common::redis_url().await;
+    let mut stream = tokio::net::TcpStream::connect(url.trim_start_matches("redis://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"*4\r\n$6\r\nCLIENT\r\n$4\r\nKILL\r\n$4\r\nTYPE\r\n$6\r\npubsub\r\n")
+        .await
+        .unwrap();
+}
+
+async fn with_reconnection(
+    client: &Client,
+    name: &str,
+    strategy: redissun::ReconnectionStrategy,
+) -> Cache {
+    client
+        .local_cached_map_cache::<String, String>(name.to_string())
+        .reconnection_strategy(strategy)
+        .build()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_clear_strategy_clears_the_cache_after_a_reconnect() {
+    let _gate = exclusive().await;
+    let client = client().await;
+    let cache = with_reconnection(
+        &client,
+        &unique("lcmc"),
+        redissun::ReconnectionStrategy::Clear,
+    )
+    .await;
+    cache.insert("k", "v").await.unwrap();
+    assert_eq!(cache.local_len(), 1);
+    kill_pubsub_connections().await;
+    eventually("the cache was not cleared", || async {
+        cache.local_len() == 0
+    })
+    .await;
+    assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn the_load_strategy_drops_only_the_keys_changed_while_away() {
+    use redissun::ReconnectionStrategy::Load;
+    let _gate = exclusive().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let reader = with_reconnection(&first, &name, Load).await;
+    let writer = with_reconnection(&second, &name, Load).await;
+    writer.insert("a", "1").await.unwrap();
+    writer.insert("b", "1").await.unwrap();
+    eventually("no message arrived", || async {
+        reader.get("a").await.unwrap().as_deref() == Some("1")
+    })
+    .await;
+    reader.get("b").await.unwrap();
+    assert_eq!(reader.local_len(), 2);
+    let log = format!("redissun__cache_updates_log:{{{name}}}");
+    plain(&second, &name).insert("b", "2").await.unwrap();
+    raw_command(&[
+        "ZADD",
+        &log,
+        "99999999999999",
+        &format!("12345678{}", "\"b\""),
+    ])
+    .await;
+    kill_pubsub_connections().await;
+    eventually("b was not dropped", || async {
+        reader.get("b").await.unwrap().as_deref() == Some("2")
+    })
+    .await;
+    assert_eq!(reader.get("a").await.unwrap().as_deref(), Some("1"));
+}
+
+#[tokio::test]
+async fn the_load_strategy_logs_every_announced_write() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = with_reconnection(&client, &name, redissun::ReconnectionStrategy::Load).await;
+    let log = format!("redissun__cache_updates_log:{{{name}}}");
+    let count = || async { raw_command(&["ZCARD", &log]).await.trim().to_string() };
+    a.insert("a", "1").await.unwrap();
+    assert_eq!(count().await, ":1");
+    assert_eq!(a.try_insert("b", "1").await.unwrap(), None);
+    assert_eq!(count().await, ":2");
+    assert_eq!(a.remove_many(&["a", "b"]).await.unwrap(), 2);
+    assert_eq!(count().await, ":4");
+}
+
+#[tokio::test]
+async fn the_local_cache_size_limit_is_independent_of_max_size() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let plain = plain(&client, &name);
+    for k in ["a", "b", "c"] {
+        plain.insert(k, "v").await.unwrap();
+    }
+    let a = client
+        .local_cached_map_cache::<String, String>(name.clone())
+        .cache_size(2)
+        .eviction_policy(redissun::EvictionPolicy::Lru)
+        .build()
+        .await
+        .unwrap();
+    for k in ["a", "b", "c"] {
+        assert_eq!(a.get(k).await.unwrap().as_deref(), Some("v"));
+    }
+    assert_eq!(a.local_len(), 2);
+    assert_eq!(plain.len().await.unwrap(), 3);
+}
+
+#[cfg(feature = "moka")]
+#[tokio::test]
+async fn moka_copies_expire_with_the_entry_ttl() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = client
+        .local_cached_map_cache::<String, String>(name.clone())
+        .cache_provider(redissun::CacheProvider::Moka)
+        .build()
+        .await
+        .unwrap();
+    plain(&client, &name)
+        .insert("k", "v")
+        .ttl(300 * MS)
+        .await
+        .unwrap();
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(a.local_len(), 1);
+    sleep(350 * MS).await;
+    assert!(a.local_entries().unwrap().is_empty());
+    assert_eq!(a.get("k").await.unwrap(), None);
 }

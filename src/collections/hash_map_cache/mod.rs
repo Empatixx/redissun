@@ -1,6 +1,6 @@
 mod announced;
 mod builders;
-mod entry_events;
+pub(crate) mod entry_events;
 mod lease;
 mod local;
 mod names;
@@ -9,7 +9,7 @@ mod scripts;
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::local_cache::messages::{message, updates_log_name, CLEAR};
-use crate::collections::local_cache::LocalCache;
+use crate::collections::local_cache::{EvictionFeed, LocalCache};
 use crate::collections::map::entry::Target;
 use crate::collections::map::events::{self as map_events, MapEventKind, MapEvents};
 use crate::collections::map::key_hash::per_key_objects;
@@ -240,6 +240,36 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
 }
 
 /// Marks the cache `key` in Redis so every client's writes publish their entry events, as Redisson's `addListener` does.
+/// [`HashMapCache::length_prefix`] for the cache under `key`.
+pub(crate) async fn length_prefix_of(key: &Key) -> Result<LengthPrefix> {
+    let prefix = key
+        .core
+        .map_cache_length_prefix
+        .get_or_try_init(|| async {
+            let mut cmd = redis::cmd("INFO");
+            cmd.arg("server");
+            let info: String = key.query(cmd).await?;
+            Ok::<_, Error>(entry_events::length_prefix(&info))
+        })
+        .await?;
+    Ok(*prefix)
+}
+
+/// Subscribes to the removed and expired entry events of the cache under `key`, for a local cache to forget the entries the server drops.
+pub(crate) async fn eviction_feed(key: &Key) -> Result<EvictionFeed> {
+    let prefix = length_prefix_of(key).await?;
+    let pubsub = key.core.pubsub().await?;
+    let (mut subscriptions, mut receivers) = (std::vec::Vec::new(), std::vec::Vec::new());
+    for kind in [EntryEventKind::Removed, EntryEventKind::Expired] {
+        let (subscription, receiver) = pubsub
+            .subscribe_with_messages(&names::channel(kind, key.name()))
+            .await?;
+        subscriptions.push(subscription);
+        receivers.push(receiver);
+    }
+    Ok(EvictionFeed::new(subscriptions, receivers, prefix))
+}
+
 pub(crate) async fn mark_listeners(key: &Key) -> Result<()> {
     let options = names::options(key.name());
     let mut cmd = redis::cmd("HSET");
@@ -351,18 +381,7 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
 
     /// How the server writes the lengths in event payloads, read once per client with `INFO server`, as Redisson does when the first listener is added.
     pub(crate) async fn length_prefix(&self) -> Result<LengthPrefix> {
-        let prefix = self
-            .key
-            .core
-            .map_cache_length_prefix
-            .get_or_try_init(|| async {
-                let mut cmd = redis::cmd("INFO");
-                cmd.arg("server");
-                let info: String = self.key.query(cmd).await?;
-                Ok::<_, Error>(entry_events::length_prefix(&info))
-            })
-            .await?;
-        Ok(*prefix)
+        length_prefix_of(&self.key).await
     }
 
     pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
