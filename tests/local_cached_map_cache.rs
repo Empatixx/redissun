@@ -1,5 +1,6 @@
 mod common;
 
+use common::store::MemoryStore;
 use common::{client, raw_command, unique};
 use redissun::{Client, HashMapCache, JsonCodec, LocalCachedMapCache, SyncStrategy};
 use std::time::Duration;
@@ -282,4 +283,316 @@ async fn build_marks_the_cache_for_entry_events() {
     ])
     .await;
     assert_eq!(bulk(&reply).as_deref(), Some("1"));
+}
+
+async fn invalidating(client: &Client, name: &str) -> Cache {
+    lcmc(client, name).await
+}
+
+fn has(entries: &[(String, String)], k: &str, v: &str) -> bool {
+    entries.iter().any(|(ek, ev)| ek == k && ev == v)
+}
+
+#[tokio::test]
+async fn try_insert_announces_only_when_it_stored() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = updating(&first, &name).await;
+    let b = updating(&second, &name).await;
+    plain(&first, &name).insert("k", "v1").await.unwrap();
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v1"));
+    assert_eq!(a.try_insert("k", "x").await.unwrap().as_deref(), Some("v1"));
+    sleep(200 * MS).await;
+    assert!(has(&b.local_entries().unwrap(), "k", "v1"));
+    assert_eq!(a.try_insert("n", "v").await.unwrap(), None);
+    eventually("the stored value never arrived", || async {
+        has(&b.local_entries().unwrap(), "n", "v")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn set_with_a_wrong_lease_pushes_nothing() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = updating(&first, &name).await;
+    let b = updating(&second, &name).await;
+    let plain = plain(&first, &name);
+    plain.insert("k", "v1").await.unwrap();
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v1"));
+    plain.remove("k").await.unwrap();
+    let lease = plain.lease("k", Duration::from_secs(5)).await.unwrap();
+    assert!(matches!(lease, redissun::Lease::Acquired(_)));
+    assert!(!a.set("k", "v2").lease("wrong").await.unwrap());
+    // The reply does not tell whether it stored, so the key is invalidated (`Touch`), but the unwritten value is never pushed.
+    for _ in 0..6 {
+        assert!(!has(&b.local_entries().unwrap(), "k", "v2"));
+        assert_ne!(b.get("k").await.unwrap().as_deref(), Some("v2"));
+        assert!(!has(&a.local_entries().unwrap(), "k", "v2"));
+        sleep(50 * MS).await;
+    }
+    assert_eq!(plain.get("k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn replace_keeps_the_limits_and_invalidates() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = lcmc(&first, &name).await;
+    let b = lcmc(&second, &name).await;
+    let inserted = Instant::now();
+    a.insert("k", "v").ttl(1000 * MS).await.unwrap();
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(a.replace("k", "w").await.unwrap().as_deref(), Some("v"));
+    eventually("the replace never arrived", || async {
+        b.get("k").await.unwrap().as_deref() == Some("w")
+    })
+    .await;
+    tokio::time::sleep_until(inserted + 1100 * MS).await;
+    assert_eq!(b.get("k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn compare_and_set_and_remove_if_eq_announce_on_success_only() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = invalidating(&first, &name).await;
+    let b = invalidating(&second, &name).await;
+    plain(&first, &name).insert("k", "v").await.unwrap();
+    b.get("k").await.unwrap();
+    assert!(!a.compare_and_set("k", "wrong", "x").await.unwrap());
+    sleep(200 * MS).await;
+    assert_eq!(b.local_len(), 1);
+    assert!(a.compare_and_set("k", "v", "x").await.unwrap());
+    eventually("the change never arrived", || async { b.local_len() == 0 }).await;
+
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("x"));
+    assert!(!a.remove_if_eq("k", "wrong").await.unwrap());
+    sleep(200 * MS).await;
+    assert_eq!(b.local_len(), 1);
+    assert!(a.remove_if_eq("k", "x").await.unwrap());
+    eventually("the removal never arrived", || async { b.local_len() == 0 }).await;
+}
+
+#[tokio::test]
+async fn remove_many_invalidates_each_removed_key() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = updating(&first, &name).await;
+    let b = updating(&second, &name).await;
+    let plain = plain(&first, &name);
+    for k in ["a", "b", "c"] {
+        plain.insert(k, "1").await.unwrap();
+        b.get(k).await.unwrap();
+    }
+    assert_eq!(a.remove_many(&["a", "b", "zz"]).await.unwrap(), 2);
+    eventually("the removals never arrived", || async {
+        let keys: Vec<String> = b
+            .local_entries()
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        keys == vec!["c".to_string()]
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn incr_by_invalidates() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let build = |client: &Client| {
+        client
+            .local_cached_map_cache::<String, i64>(name.clone())
+            .sync_strategy(SyncStrategy::Update)
+            .build()
+    };
+    let a = build(&first).await.unwrap();
+    let b = build(&second).await.unwrap();
+    first
+        .hash_map_cache::<String, i64>(name.clone())
+        .insert("n", &1)
+        .await
+        .unwrap();
+    assert_eq!(b.get("n").await.unwrap(), Some(1));
+    assert_eq!(a.incr_by("n", 2).await.unwrap(), 3);
+    eventually("the increment never arrived", || async {
+        b.get("n").await.unwrap() == Some(3)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn extend_with_ttl_caches_and_announces_each_entry() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = updating(&first, &name).await;
+    let b = updating(&second, &name).await;
+    a.extend([("a", "1"), ("b", "2")])
+        .ttl(1000 * MS)
+        .await
+        .unwrap();
+    assert_eq!(a.local_len(), 2);
+    eventually("the entries never arrived", || async {
+        let entries = b.local_entries().unwrap();
+        has(&entries, "a", "1") && has(&entries, "b", "2")
+    })
+    .await;
+    sleep(1100 * MS).await;
+    assert_eq!(a.local_len(), 0);
+    assert_eq!(b.local_len(), 0);
+}
+
+#[tokio::test]
+async fn expire_entry_on_another_instance_shortens_my_copy() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = updating(&first, &name).await;
+    let b = updating(&second, &name).await;
+    plain(&first, &name).insert("k", "v").await.unwrap();
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    assert!(a.expire_entry("k").ttl(300 * MS).await.unwrap());
+    eventually("the expiry change never arrived", || async {
+        b.local_len() == 0
+    })
+    .await;
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    sleep(350 * MS).await;
+    assert_eq!(b.get("k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_invalidation_during_a_read_is_not_overwritten() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = lcmc(&first, &name).await;
+    let b = lcmc(&second, &name).await;
+    for round in 0..30 {
+        let value = round.to_string();
+        let (read, written) = tokio::join!(a.get("k"), b.insert("k", &value));
+        read.unwrap();
+        written.unwrap();
+        // Once the invalidation has arrived, a stale read must not have been cached.
+        sleep(30 * MS).await;
+        assert_eq!(
+            a.get("k").await.unwrap().as_deref(),
+            Some(value.as_str()),
+            "round {round}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn entry_reads_redis_and_announces_its_write() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = lcmc(&first, &name).await;
+    let b = lcmc(&second, &name).await;
+    let plain = plain(&first, &name);
+    a.insert("k", "v").await.unwrap();
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    plain.insert("k", "w").await.unwrap();
+    let redissun::hash_map::Entry::Occupied(entry) = a.entry("k").await.unwrap() else {
+        panic!("the entry is vacant");
+    };
+    assert_eq!(entry.get(), "w");
+    entry.insert("x".to_string()).await.unwrap();
+    eventually("the entry write never arrived", || async {
+        b.get("k").await.unwrap().as_deref() == Some("x")
+    })
+    .await;
+    plain.insert("k", "hidden").await.unwrap();
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("x"));
+}
+
+#[tokio::test]
+async fn lease_writes_invalidate_other_copies() {
+    let _gate = shared().await;
+    let name = unique("lcmc");
+    let (first, second) = (client().await, client().await);
+    let a = invalidating(&first, &name).await;
+    let b = invalidating(&second, &name).await;
+    let plain = plain(&first, &name);
+    plain.insert("k", "old").await.unwrap();
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("old"));
+    plain.remove("k").await.unwrap();
+    let redissun::Lease::Acquired(guard) = a.lease("k", Duration::from_secs(5)).await.unwrap()
+    else {
+        panic!("no lease");
+    };
+    guard.insert("v").await.unwrap();
+    eventually("the lease write never arrived", || async {
+        b.local_len() == 0
+    })
+    .await;
+    assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    assert!(a.invalidate("k").await.unwrap());
+    eventually("the invalidation never arrived", || async {
+        b.local_len() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_loader_fills_redis_and_every_local_cache() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let store = MemoryStore::with(&[("k", "v")]);
+    let a: Cache = client
+        .local_cached_map_cache::<String, String>(name.clone())
+        .loader(store.clone())
+        .store_cache_miss(true)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("v"));
+    let plain = plain(&client, &name);
+    assert_eq!(plain.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(plain.entry_ttl("k").await.unwrap(), None);
+    assert_eq!(a.local_len(), 1);
+    let loads = store.loads();
+    assert_eq!(a.get("none").await.unwrap(), None);
+    assert_eq!(a.local_len(), 2);
+    assert_eq!(a.get("none").await.unwrap(), None);
+    assert_eq!(store.loads(), loads + 1);
+}
+
+#[tokio::test]
+async fn the_writer_sees_each_write_once() {
+    let _gate = shared().await;
+    let client = client().await;
+    let store = MemoryStore::default();
+    let cache: Cache = client
+        .local_cached_map_cache::<String, String>(unique("lcmc"))
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap();
+    cache.insert("1", "11").await.unwrap();
+    cache.set("2", "22").await.unwrap();
+    cache.replace("1", "00").await.unwrap();
+    cache.replace("9", "99").await.unwrap();
+    cache.extend([("3", "33"), ("4", "44")]).await.unwrap();
+    assert_eq!(
+        store.write_calls(),
+        vec![vec!["1"], vec!["2"], vec!["1"], vec!["3", "4"]]
+    );
+    assert_eq!(cache.remove("1").await.unwrap().as_deref(), Some("00"));
+    assert_eq!(cache.remove_many(&["2", "3", "zz"]).await.unwrap(), 2);
+    assert_eq!(store.delete_calls(), vec![vec!["1"], vec!["2", "3"]]);
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot.get("4").map(String::as_str), Some("44"));
 }

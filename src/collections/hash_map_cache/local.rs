@@ -19,7 +19,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 /// What a write changes, which decides what it announces and what it leaves in the local cache.
-#[allow(dead_code)] // the other variants arrive with the rest of the writes
 pub(crate) enum Op<'a> {
     /// Unconditional writes of these entries with these limits (`0` for none): cached and announced.
     Put {

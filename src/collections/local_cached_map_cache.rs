@@ -1,7 +1,11 @@
 use crate::codec::Codec;
-use crate::collections::hash_map_cache::{mark_listeners, HashMapCache, Insert};
+use crate::collections::hash_map_cache::{
+    mark_listeners, EntryRequest, ExpireEntries, ExpireEntry, Extend, HashMapCache, Insert, Lease,
+    Set, TryInsert,
+};
 use crate::collections::local_cache::messages::{message, CLEAR};
 use crate::collections::local_cache::{local_options, start, LocalCache, LocalOptions, StoreMode};
+use crate::collections::map::load::LoadAll;
 use crate::collections::map::store::{store_options, StoreOptions};
 use crate::error::Result;
 use crate::lua::Lua;
@@ -209,6 +213,196 @@ where
     /// Same as [`HashMapCache::is_empty`].
     pub async fn is_empty(&self) -> Result<bool> {
         self.cache.is_empty().await
+    }
+
+    /// Same as [`HashMapCache::try_insert`]. A stored entry is cached here and announced; when a live entry was there, nothing is announced.
+    #[doc(alias = "putIfAbsent", alias = "fastPutIfAbsent")]
+    pub fn try_insert<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> TryInsert<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        self.cache.try_insert(k, v)
+    }
+
+    /// Same as [`HashMapCache::set`]. With [`Set::lease`] the result does not tell whether the value was stored, so the key is only invalidated everywhere.
+    #[doc(alias = "fastPut", alias = "putWithLease")]
+    pub fn set<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Set<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        self.cache.set(k, v)
+    }
+
+    /// Same as [`HashMapCache::replace`]. The entry keeps its limits in Redis, which the client does not know, so the key is invalidated everywhere and read again when needed.
+    #[doc(
+        alias = "putIfExists",
+        alias = "fastPutIfExists",
+        alias = "fastReplace"
+    )]
+    pub async fn replace<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        self.cache.replace(k, v).await
+    }
+
+    /// Same as [`HashMapCache::compare_and_set`]. The key is invalidated everywhere only when the value changed.
+    #[doc(alias = "replace")]
+    pub async fn compare_and_set<Q, W>(&self, k: &Q, old: &W, new: &W) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        self.cache.compare_and_set(k, old, new).await
+    }
+
+    /// Same as [`HashMapCache::remove_if_eq`]. The others are told only when the entry was removed.
+    #[doc(alias = "remove")]
+    pub async fn remove_if_eq<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        self.cache.remove_if_eq(k, v).await
+    }
+
+    /// Same as [`HashMapCache::remove_many`]. Each removed key is invalidated everywhere.
+    #[doc(alias = "fastRemove")]
+    pub async fn remove_many<Q>(&self, ks: &[&Q]) -> Result<usize>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.remove_many(ks).await
+    }
+
+    /// Same as [`HashMapCache::incr_by`]. The key is invalidated everywhere.
+    #[doc(alias = "addAndGet")]
+    pub async fn incr_by<Q>(&self, k: &Q, delta: i64) -> Result<i64>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.incr_by(k, delta).await
+    }
+
+    /// Same as [`HashMapCache::incr_by_float`]. The key is invalidated everywhere.
+    #[doc(alias = "addAndGet")]
+    pub async fn incr_by_float<Q>(&self, k: &Q, delta: f64) -> Result<f64>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.incr_by_float(k, delta).await
+    }
+
+    /// Same as [`HashMapCache::extend`]. Each entry is cached here with its limits and announced.
+    #[doc(alias = "putAll")]
+    pub fn extend<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> Extend<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        self.cache.extend(entries)
+    }
+
+    /// Same as [`HashMapCache::expire_entry`]. A changed entry is invalidated everywhere, so the next read caches it with its new limits.
+    #[doc(
+        alias = "expireEntry",
+        alias = "expireEntryIfNotSet",
+        alias = "updateEntryExpiration"
+    )]
+    pub fn expire_entry<'a, Q>(&'a self, k: &'a Q) -> ExpireEntry<'a, K, V, C, Q>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.expire_entry(k)
+    }
+
+    /// Same as [`HashMapCache::expire_entries`]. Every key is invalidated everywhere.
+    #[doc(alias = "expireEntries", alias = "expireEntriesIfNotSet")]
+    pub fn expire_entries<'a, Q>(&'a self, ks: &'a [&'a Q]) -> ExpireEntries<'a, K, V, C, Q>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.expire_entries(ks)
+    }
+
+    /// Same as [`HashMapCache::entry`]. Under the key's lock it reads Redis, not the local copy, so a late invalidation cannot feed a stale value to the change; its write is cached and announced like [`insert`](LocalCachedMapCache::insert).
+    #[doc(
+        alias = "compute",
+        alias = "computeIfAbsent",
+        alias = "computeIfPresent",
+        alias = "merge"
+    )]
+    pub fn entry<Q>(&self, k: &Q) -> EntryRequest<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.entry(k)
+    }
+
+    /// Same as [`HashMapCache::lease`]. It reads Redis, not the local cache; the guard's writes invalidate the key everywhere.
+    #[doc(alias = "getWithLease")]
+    pub async fn lease<Q>(&self, k: &Q, time: std::time::Duration) -> Result<Lease<'_, K, V, C>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.lease(k, time).await
+    }
+
+    /// Same as [`HashMapCache::invalidate`]. The key is invalidated everywhere when an entry was removed.
+    #[doc(alias = "removeWithLease")]
+    pub async fn invalidate<Q>(&self, k: &Q) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.invalidate(k).await
+    }
+
+    /// Same as [`HashMapCache::load_all`]. A loaded value is cached here and announced like an insert.
+    #[doc(alias = "loadAll")]
+    pub fn load_all(&self) -> LoadAll<'_, K, V, C> {
+        self.cache.load_all()
+    }
+
+    /// Same as [`HashMapCache::load_many`].
+    #[doc(alias = "loadAll")]
+    pub fn load_many<Q>(&self, ks: &[&Q]) -> LoadAll<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.cache.load_many(ks)
+    }
+
+    /// Same as [`HashMapCache::flush`]. It plays the part of Redisson's `destroy()` for pending writes; the listener stops with the last handle.
+    #[doc(alias = "destroy")]
+    pub async fn flush(&self) -> Result<()> {
+        self.cache.flush().await
     }
 
     /// Number of entries in the local cache of this instance, including cached misses.

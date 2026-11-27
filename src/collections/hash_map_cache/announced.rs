@@ -91,6 +91,54 @@ pub(super) static PUT_WITH_LIMITS: LazyLock<Lua> =
 /// redissun: REMOVE announced for LocalCachedMapCache
 pub(super) static REMOVE: LazyLock<Lua> = LazyLock::new(|| write_twin(&scripts::REMOVE));
 
+/// redissun: PUT_IF_ABSENT_WITH_LIMITS announced for LocalCachedMapCache
+pub(super) static PUT_IF_ABSENT_WITH_LIMITS: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::PUT_IF_ABSENT_WITH_LIMITS));
+
+/// redissun: FAST_PUT_WITH_LIMITS announced for LocalCachedMapCache
+pub(super) static FAST_PUT_WITH_LIMITS: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::FAST_PUT_WITH_LIMITS));
+
+/// redissun: REMOVE_IF announced for LocalCachedMapCache
+pub(super) static REMOVE_IF: LazyLock<Lua> = LazyLock::new(|| write_twin(&scripts::REMOVE_IF));
+
+/// redissun: FAST_REMOVE_BATCH announced for LocalCachedMapCache
+pub(super) static FAST_REMOVE_BATCH: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::FAST_REMOVE_BATCH));
+
+/// redissun: REPLACE announced for LocalCachedMapCache
+pub(super) static REPLACE: LazyLock<Lua> = LazyLock::new(|| write_twin(&scripts::REPLACE));
+
+/// redissun: REPLACE_IF announced for LocalCachedMapCache
+pub(super) static REPLACE_IF: LazyLock<Lua> = LazyLock::new(|| write_twin(&scripts::REPLACE_IF));
+
+/// redissun: ADD_AND_GET announced for LocalCachedMapCache
+pub(super) static ADD_AND_GET: LazyLock<Lua> = LazyLock::new(|| write_twin(&scripts::ADD_AND_GET));
+
+/// redissun: PUT_ALL_TTL_IDLE announced for LocalCachedMapCache
+pub(super) static PUT_ALL_TTL_IDLE: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::PUT_ALL_TTL_IDLE));
+
+/// redissun: EXPIRE_ENTRY announced for LocalCachedMapCache
+pub(super) static EXPIRE_ENTRY: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::EXPIRE_ENTRY));
+
+/// redissun: EXPIRE_ENTRY_IF_NOT_SET announced for LocalCachedMapCache
+pub(super) static EXPIRE_ENTRY_IF_NOT_SET: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::EXPIRE_ENTRY_IF_NOT_SET));
+
+/// redissun: EXPIRE_ENTRIES announced for LocalCachedMapCache
+pub(super) static EXPIRE_ENTRIES: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::EXPIRE_ENTRIES));
+
+/// redissun: EXPIRE_ENTRIES_IF_NOT_SET announced for LocalCachedMapCache
+pub(super) static EXPIRE_ENTRIES_IF_NOT_SET: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::EXPIRE_ENTRIES_IF_NOT_SET));
+
+/// redissun: LEASE_REMOVE announced for LocalCachedMapCache
+pub(super) static LEASE_REMOVE: LazyLock<Lua> =
+    LazyLock::new(|| write_twin(&scripts::LEASE_REMOVE));
+
 /// redissun: GET read with its deadlines for LocalCachedMapCache. Replies nil or `{value, ttl deadline, idle delta}`.
 pub(super) static GET_EXPIRY: LazyLock<Lua> =
     LazyLock::new(|| Lua::from_lua(wrap_read(scripts::GET.source(), false)));
@@ -120,6 +168,25 @@ mod tests {
             (&PUT_WITH_LIMITS, &scripts::PUT_WITH_LIMITS),
             (&REMOVE, &scripts::REMOVE),
             (&GET_EXPIRY, &scripts::GET),
+            (
+                &PUT_IF_ABSENT_WITH_LIMITS,
+                &scripts::PUT_IF_ABSENT_WITH_LIMITS,
+            ),
+            (&FAST_PUT_WITH_LIMITS, &scripts::FAST_PUT_WITH_LIMITS),
+            (&REMOVE_IF, &scripts::REMOVE_IF),
+            (&FAST_REMOVE_BATCH, &scripts::FAST_REMOVE_BATCH),
+            (&REPLACE, &scripts::REPLACE),
+            (&REPLACE_IF, &scripts::REPLACE_IF),
+            (&ADD_AND_GET, &scripts::ADD_AND_GET),
+            (&PUT_ALL_TTL_IDLE, &scripts::PUT_ALL_TTL_IDLE),
+            (&EXPIRE_ENTRY, &scripts::EXPIRE_ENTRY),
+            (&EXPIRE_ENTRY_IF_NOT_SET, &scripts::EXPIRE_ENTRY_IF_NOT_SET),
+            (&EXPIRE_ENTRIES, &scripts::EXPIRE_ENTRIES),
+            (
+                &EXPIRE_ENTRIES_IF_NOT_SET,
+                &scripts::EXPIRE_ENTRIES_IF_NOT_SET,
+            ),
+            (&LEASE_REMOVE, &scripts::LEASE_REMOVE),
         ]
     }
 

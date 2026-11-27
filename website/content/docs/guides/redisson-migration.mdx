@@ -531,6 +531,7 @@ Every `HashMapCache` method works and returns the same builders; see [`## HashMa
 | `LocalCachedMapCacheOptions.cacheSize`, `evictionPolicy`, `timeToLive`, `maxIdle`, `syncStrategy`, `reconnectionStrategy`, `storeCacheMiss`, `storeMode`, `cacheProvider`, `expirationEventPolicy`, `useKeyEventsPattern` | the builder setters of `LocalCachedMap` |
 | `getCachedMap()`, `cachedEntrySet()`, `cachedKeySet()`, `cachedValues()` | `local_entries()` |
 | `clearLocalCache()` | `clear_local_everywhere()` |
+| `loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)`, `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
 | `destroy()` | `flush().await`, then drop |
 
 ## VecDeque blocking

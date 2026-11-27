@@ -555,10 +555,9 @@ where
     {
         let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
         let raw: Option<Bytes> = self
-            .key
-            .core
-            .eval(
+            .eval_write(
                 &REPLACE,
+                &announced::REPLACE,
                 self.redis_keys(&[
                     Name::Main,
                     Name::Timeout,
@@ -567,6 +566,8 @@ where
                     Name::Options,
                 ]),
                 vec![now(), k.clone(), v.clone(), Bytes::from(PUBLISH)],
+                Op::IfSome(&k),
+                false,
             )
             .await?;
         if raw.is_some() {
@@ -600,12 +601,17 @@ where
             Bytes::from(PUBLISH),
         ];
         // With a writer, at most once: run again after a lost reply, the script would answer `0` and the writer would miss the change.
-        let core = &self.key.core;
-        let replaced: i64 = if self.writer().is_some() {
-            core.eval_once(&REPLACE_IF, keys, args).await?
-        } else {
-            core.eval(&REPLACE_IF, keys, args).await?
-        };
+        let once = self.writer().is_some();
+        let replaced: i64 = self
+            .eval_write(
+                &REPLACE_IF,
+                &announced::REPLACE_IF,
+                keys,
+                args,
+                Op::IfOne(&k),
+                once,
+            )
+            .await?;
         if replaced == 1 {
             self.written(&[(k, new)]).await?;
         }
@@ -637,12 +643,17 @@ where
             Bytes::from(PUBLISH),
         ];
         // With a writer, at most once, as in `compare_and_set`.
-        let core = &self.key.core;
-        let removed: i64 = if self.writer().is_some() {
-            core.eval_once(&REMOVE_IF, keys, args).await?
-        } else {
-            core.eval(&REMOVE_IF, keys, args).await?
-        };
+        let once = self.writer().is_some();
+        let removed: i64 = self
+            .eval_write(
+                &REMOVE_IF,
+                &announced::REMOVE_IF,
+                keys,
+                args,
+                Op::IfOne(&k),
+                once,
+            )
+            .await?;
         if removed == 1 {
             self.deleted(k).await?;
         }
@@ -672,20 +683,27 @@ where
             Name::LastAccess,
             Name::Options,
         ]);
-        if let Some(store) = self.writer() {
+        if self.writer().is_some() || self.local.is_some() {
+            let fields = args.get(1..).unwrap_or_default().to_vec();
             let flags: std::vec::Vec<i64> = self
-                .key
-                .core
                 // At most once: run again after a lost reply, it would report nothing removed and the writer would miss the deletes.
-                .eval_once(&FAST_REMOVE_BATCH, keys, args.clone())
+                .eval_write(
+                    &FAST_REMOVE_BATCH,
+                    &announced::FAST_REMOVE_BATCH,
+                    keys,
+                    args,
+                    Op::PerKey(&fields),
+                    true,
+                )
                 .await?;
-            let removed: std::vec::Vec<Bytes> = args
+            let removed: std::vec::Vec<Bytes> = fields
                 .into_iter()
-                .skip(1)
                 .zip(flags)
                 .filter_map(|(k, flag)| (flag == 1).then_some(k))
                 .collect();
-            store.deleted(&removed).await?;
+            if let Some(store) = self.writer() {
+                store.deleted(&removed).await?;
+            }
             return Ok(removed.len());
         }
         let removed: usize = self.key.core.eval(&FAST_REMOVE, keys, args).await?;
@@ -729,11 +747,11 @@ where
     {
         let k = self.codec.encode(k)?;
         // Not idempotent: a retried call would add twice.
+        let fields = [k.clone()];
         let outcome: Result<String> = self
-            .key
-            .core
-            .eval_once(
+            .eval_write(
                 &ADD_AND_GET,
+                &announced::ADD_AND_GET,
                 self.redis_keys(&[
                     Name::Main,
                     Name::Timeout,
@@ -745,6 +763,8 @@ where
                     Name::Options,
                 ]),
                 vec![now(), k.clone(), Bytes::from(delta), Bytes::from(PUBLISH)],
+                Op::Touch(&fields),
+                true,
             )
             .await;
         if let Err(Error::Redis(_)) = &outcome {
@@ -1444,11 +1464,12 @@ where
 
     /// Removes an encoded key with `FAST_REMOVE`, publishing `Removed` like [`remove_many`](HashMapCache::remove_many).
     pub(crate) async fn delete_encoded(&self, k: &Bytes) -> Result<()> {
-        let _: i64 = self
-            .key
-            .core
-            .eval(
+        let fields = [k.clone()];
+        // With a local cache, the announced twin of the batch variant, which replies per key, so only a removal is announced.
+        let _: redis::Value = self
+            .eval_write(
                 &FAST_REMOVE,
+                &announced::FAST_REMOVE_BATCH,
                 self.redis_keys(&[
                     Name::Main,
                     Name::Timeout,
@@ -1458,6 +1479,8 @@ where
                     Name::Options,
                 ]),
                 vec![Bytes::from(PUBLISH), k.clone()],
+                Op::PerKey(&fields),
+                false,
             )
             .await?;
         Ok(())
@@ -1525,13 +1548,29 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
         ]);
         // With a token the script frees the lease, so a second run would find no lease and report `false` for a stored value.
         let leased = !token.is_empty();
-        let args = limits.arguments(vec![k, v, Bytes::from(PUBLISH), token]);
-        let core = &self.key.core;
-        let inserted: i64 = if leased {
-            core.eval_once(&FAST_PUT_WITH_LIMITS, keys, args).await?
+        let entries = [(k.clone(), v.clone())];
+        let fields = [k.clone()];
+        // With a lease the reply is `0` both for "stored over a live entry" and for "wrong lease", so the client does not know whether it stored: only an invalidation.
+        let op = if leased {
+            Op::Touch(&fields)
         } else {
-            core.eval(&FAST_PUT_WITH_LIMITS, keys, args).await?
+            Op::Put {
+                entries: &entries,
+                ttl_timeout: limits.ttl_timeout,
+                idle_delta: limits.idle_delta,
+            }
         };
+        let args = limits.arguments(vec![k, v, Bytes::from(PUBLISH), token]);
+        let inserted: i64 = self
+            .eval_write(
+                &FAST_PUT_WITH_LIMITS,
+                &announced::FAST_PUT_WITH_LIMITS,
+                keys,
+                args,
+                op,
+                leased,
+            )
+            .await?;
         Ok(inserted == 1)
     }
 }

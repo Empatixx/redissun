@@ -33,6 +33,16 @@ Every `HashMapCache` method works and returns the same builders (`hash_map_cache
 | `contains_key(&k)` | a cached key answers without a round trip; a miss is cached only with `store_cache_miss` |
 | `insert(&k, &v)[.ttl(d)][.max_idle(d)]` | `HashMapCache::insert`; caches the new value with its limits and tells the others |
 | `remove(&k)` | tells the others when a live entry was removed |
+| `try_insert(&k, &v)[.ttl(d)][.max_idle(d)]` | caches and announces the value only when it stored it |
+| `set(&k, &v)[.ttl(d)][.max_idle(d)][.lease(token)]` | like `insert`; with a lease the key is only invalidated everywhere |
+| `replace`, `compare_and_set`, `remove_if_eq` | invalidate the key everywhere when they changed it |
+| `remove_many(&ks)` | invalidates each removed key |
+| `incr_by`, `incr_by_float` | invalidate the key everywhere |
+| `extend(entries)[.ttl(d)][.max_idle(d)][.batch_size(n)]` | caches and announces each entry |
+| `expire_entry(&k)…`, `expire_entries(&ks)…` | invalidate the keys, so the next read caches them with their new limits |
+| `entry(&k)` | reads Redis under the key's lock, not the local copy; its write is cached and announced like `insert` |
+| `lease(&k, d)`, `invalidate(&k)` | read Redis; the guard's writes and `invalidate` invalidate the key everywhere |
+| `load_all()`, `load_many(&ks)`, `flush()` | as on `HashMapCache`; a loaded value is cached and announced |
 | `clear()` | empties the cache for everybody; the others are told when something was deleted |
 | `len()`, `is_empty()` | ask Redis; expired entries count until the clean-up deletes them, as on `HashMapCache` |
 | `local_len()`, `local_entries()`, `clear_local()` | the local cache of this instance only |
@@ -62,9 +72,15 @@ Before a write, the key is forgotten locally. After the reply, an unconditional 
 
 | Write | Announced when | Message with `SyncStrategy::Update` | Local copy after |
 |---|---|---|---|
-| `insert` | always | the value and its deadlines | cached with the write's limits |
-| `remove` | a live entry was removed | an invalidation | forgotten |
+| `insert`, `set` without a lease, `extend`, `entry` writes, loader writes | always | the value and its deadlines | cached with the write's limits |
+| `try_insert` | it stored the value | the value and its deadlines | cached when stored |
+| `replace`, `remove` | a live entry was there | an invalidation (the kept limits are unknown) | forgotten |
+| `compare_and_set`, `remove_if_eq`, `expire_entry` | the change happened | an invalidation | forgotten |
+| `remove_many`, `invalidate`, a lease guard's `remove` | per removed key | an invalidation | forgotten |
+| `incr_by`, `incr_by_float`, `expire_entries`, `set(..).lease(t)`, a lease guard's `insert` | always | an invalidation | forgotten |
 | `clear`, `Object::del` | something was deleted | clear | all forgotten |
+
+`set(..).lease(t)` only invalidates because Redisson's script replies the same for "stored over a live entry" and "wrong lease": a write that did not happen is never pushed as a value.
 
 With `SyncStrategy::Invalidate` every write sends an invalidation (or clear); with `SyncStrategy::None` (and no `ReconnectionStrategy::Load`) nothing is published. Writes through a plain `HashMapCache` or Redisson are not announced; other instances see them when their copy's lifetime ends.
 

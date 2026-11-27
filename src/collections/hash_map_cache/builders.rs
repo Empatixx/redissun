@@ -158,10 +158,9 @@ where
             // Sent at most once: a second run would find this call's own value and return it as the existing one.
             let entry = [(key.clone(), value.clone())];
             let live: Option<Bytes> = cache
-                .key
-                .core
-                .eval_once(
+                .eval_write(
                     &PUT_IF_ABSENT_WITH_LIMITS,
+                    &announced::PUT_IF_ABSENT_WITH_LIMITS,
                     cache.redis_keys(&[
                         Name::Main,
                         Name::Timeout,
@@ -172,7 +171,14 @@ where
                         Name::Options,
                         Name::Lease,
                     ]),
-                    limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
+                    limits.arguments(vec![key.clone(), value.clone(), Bytes::from(PUBLISH)]),
+                    Op::TryPut {
+                        field: &key,
+                        value: &value,
+                        ttl_timeout: limits.ttl_timeout,
+                        idle_delta: limits.idle_delta,
+                    },
+                    true,
                 )
                 .await?;
             if live.is_none() {
@@ -357,10 +363,9 @@ where
                 }
                 let _: redis::Value = self
                     .cache
-                    .key
-                    .core
-                    .eval(
+                    .eval_write(
                         &PUT_ALL_TTL_IDLE,
+                        &announced::PUT_ALL_TTL_IDLE,
                         self.cache.redis_keys(&[
                             Name::Main,
                             Name::Timeout,
@@ -372,6 +377,12 @@ where
                             Name::Options,
                         ]),
                         limits.arguments(rest),
+                        Op::Put {
+                            entries: batch,
+                            ttl_timeout: limits.ttl_timeout,
+                            idle_delta: limits.idle_delta,
+                        },
+                        false,
                     )
                     .await?;
                 self.cache.written(batch).await?;
@@ -437,16 +448,18 @@ where
             let cache = self.cache;
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
-            let script = if self.if_not_set {
-                &*EXPIRE_ENTRY_IF_NOT_SET
+            let (script, announced) = if self.if_not_set {
+                (
+                    &*EXPIRE_ENTRY_IF_NOT_SET,
+                    &*announced::EXPIRE_ENTRY_IF_NOT_SET,
+                )
             } else {
-                &*EXPIRE_ENTRY
+                (&*EXPIRE_ENTRY, &*announced::EXPIRE_ENTRY)
             };
             let changed: i64 = cache
-                .key
-                .core
-                .eval(
+                .eval_write(
                     script,
+                    announced,
                     cache.redis_keys(&[
                         Name::Main,
                         Name::Timeout,
@@ -454,7 +467,9 @@ where
                         Name::LastAccess,
                         Name::Options,
                     ]),
-                    limits.arguments(vec![key]),
+                    limits.arguments(vec![key.clone()]),
+                    Op::IfOne(&key),
+                    false,
                 )
                 .await?;
             Ok(changed == 1)
@@ -526,16 +541,18 @@ where
                 .iter()
                 .map(|k| cache.codec.encode(*k))
                 .collect::<Result<std::vec::Vec<_>>>()?;
-            let script = if self.if_not_set {
-                &*EXPIRE_ENTRIES_IF_NOT_SET
+            let (script, announced) = if self.if_not_set {
+                (
+                    &*EXPIRE_ENTRIES_IF_NOT_SET,
+                    &*announced::EXPIRE_ENTRIES_IF_NOT_SET,
+                )
             } else {
-                &*EXPIRE_ENTRIES
+                (&*EXPIRE_ENTRIES, &*announced::EXPIRE_ENTRIES)
             };
             let changed: usize = cache
-                .key
-                .core
-                .eval(
+                .eval_write(
                     script,
+                    announced,
                     cache.redis_keys(&[
                         Name::Main,
                         Name::Timeout,
@@ -543,7 +560,9 @@ where
                         Name::LastAccess,
                         Name::Options,
                     ]),
-                    limits.arguments(keys),
+                    limits.arguments(keys.clone()),
+                    Op::Touch(&keys),
+                    false,
                 )
                 .await?;
             Ok(changed)
