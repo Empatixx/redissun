@@ -1,6 +1,6 @@
 //! The names of the objects Redisson keeps per map key (`RMap.getLock(key)` and friends).
 
-use crate::coordination::rate_limiter::suffix_name;
+use crate::object::suffix_name;
 use highway::{HighwayHash, HighwayHasher};
 
 /// The HighwayHash key of Redisson's `misc.Hash`, shared with the bloom filter.

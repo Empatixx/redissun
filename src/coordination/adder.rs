@@ -1,7 +1,7 @@
 use crate::client::request::Request;
-use crate::coordination::rate_limiter::suffix_name;
 use crate::coordination::semaphore::Semaphore;
 use crate::error::{Error, Result};
+use crate::object::suffix_name;
 use crate::object::{tagged, Key, Object};
 use crate::pending::Pending;
 use crate::pubsub::Subscription;

@@ -4,7 +4,7 @@ use crate::lua::Lua;
 use crate::object::Key;
 use bytes::Bytes;
 use std::sync::LazyLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::runtime::Handle;
 
 const REMOVE_STALE: &str = "while true do
@@ -161,11 +161,7 @@ pub(crate) static FORCE_UNLOCK: LazyLock<Lua> = LazyLock::new(|| {
 });
 
 pub(crate) fn now_millis() -> Bytes {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    Bytes::from(now.to_string())
+    Bytes::from(crate::object::now_millis().to_string())
 }
 
 pub(crate) fn queue_key(key: &Key) -> String {

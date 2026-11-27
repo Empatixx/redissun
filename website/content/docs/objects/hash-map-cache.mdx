@@ -18,16 +18,15 @@ let found = sessions.get("abc").await?;
 
 | Method | Notes |
 |---|---|
-| `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
+| `insert(&k, &v)` | no time limit. Replaces the entry and clears the limits the old entry had, like `HashMap::insert`. Returns the old live value. |
 | `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl`. Zero means no limit. |
 | `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` and `contains_key` starts the time again. |
-| `try_insert(&k, &v)` | inserts only when there is no live entry, like Redisson's `fastPutIfAbsent`. It takes `.ttl(..)` and `.max_idle(..)` too. Unlike `HashMap::try_insert` it returns a `bool`, because Redisson's script only reports whether it stored the entry. |
+| `try_insert(&k, &v)` | inserts only when there is no live entry, like Redisson's `putIfAbsent`. Returns `None` when it stored the entry, or `Some(live value)` and stores nothing, like `HashMap::try_insert`. It takes `.ttl(..)` and `.max_idle(..)` too. |
 | `get(&k)`, `contains_key(&k)` | never show an expired entry. Both start the idle time again and count as a use for the size limit. |
 | `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
 | `len()`, `is_empty()`, `clear()` | `len` is the number of entries in Redis; as in Redisson it counts expired entries until the clean-up deletes them |
 | `iter()`, `keys()`, `values()` | streams of live entries, 100 per page. Expired entries are skipped page by page, and returned entries start their idle time again. |
-| `evict_expired()` | deletes expired entries now and returns how many |
 | `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
 | `init_max_size(n, mode)` | the same, but only when no limit was set before |
 | `events()`, `events_of(kinds)` | start listening to changes. See below. |
@@ -36,9 +35,10 @@ let found = sessions.get("abc").await?;
 
 ## How expiry works
 
-- Time comes from the Redis server, so programs with different clocks agree. (Redisson uses the clock of the client.)
+- As in Redisson, time comes from the clock of the client that runs the command: a write stores `now + ttl` from its own clock, and a read hides an entry whose deadline has passed by its own clock. Keep the clocks of your clients in sync.
+- A plain write (`insert` without `.ttl()`/`.max_idle()`) replaces the entry and clears its limits, the way `HashMap::insert` replaces the value. A zero `ttl` or `max_idle` means no limit, as in Redisson.
 - An expired entry is hidden at once, but reads do not delete it.
-- A background task deletes expired entries, like Redisson's eviction task. It starts when you get the cache from the client and runs once per cache name and client. It first runs after `eviction_interval` (5 seconds by default) and cleans up to 100 entries from each set per run. As in Redisson, the pause grows by half (up to 30 minutes) after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. A lock key `redissun__execute_task_once_latch:{name}` that lives as long as the pause (at most 30 seconds) makes sure only one client cleans a cache per run.
+- A background task deletes expired entries, like Redisson's eviction task. It starts when you get the cache from the client and runs once per cache name and client. It first runs after `eviction_interval` (5 seconds by default) and cleans up to 100 entries from each set per run. As in Redisson, the pause grows by half (up to 30 minutes) after three runs in a row find nothing, and shrinks to a quarter after three full runs in a row. A lock key `redissun__execute_task_once_latch:{name}`, set with `SETNX` and kept for the pause in whole seconds (at least 1, at most 30), makes sure only one client cleans a cache per run, exactly as in Redisson.
 - The task stops when the client is dropped.
 
 ## Maximum size
@@ -70,6 +70,7 @@ while let Ok(event) = events.recv().await {
 
 - You get the changes made by every client, not only yours. `events_of(&[EventKind::Removed])` listens to some kinds only.
 - `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries the clean-up deleted.
+- The payload is Redisson's, so a listener also sees the changes Redisson clients make, and Redisson listeners see redissun's. As Redisson does, the first listener asks the server for its OS with `INFO server` to know how the lengths in the payload are written.
 - As in Redisson, each kind has its own channel, and the first listener sets `has-listeners` in the options hash. From then on every write publishes its changes, until the cache is deleted with `del`. Expired entries are always published by the clean-up.
 - Events of one kind arrive in order. When events of several kinds are waiting, `recv` returns removals first, then creations, updates and expirations.
 - A listener has a buffer of 256 events per kind. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
@@ -77,18 +78,21 @@ while let Ok(event) = events.recv().await {
 
 ## How it is stored
 
-The keys follow Redisson's `RMapCache`; the values are stored in redissun's own format.
+The keys, the values and the events are Redisson's `RMapCache` layout with the `redissun` prefix, so Redisson and redissun clients share the same data. Times are Unix milliseconds from the client clock. When the name contains `{`, it is used as it is (`{t}:cache` gives `redissun__timeout__set:{t}:cache` and `{t}:cache:redissun_options`), otherwise it is wrapped in `{}`.
 
 | Key | Type | Content |
 |---|---|---|
-| `{name}` | hash | the values, each with its idle time in front |
+| `name` | hash | the values, each stored as `struct.pack('dLc0', maxIdleMs, #value, value)`: the max idle time in ms as an 8-byte double (0 for none), the length of the value as the server's native `unsigned long` (8 bytes on Linux and macOS, 4 on Windows), then the value |
 | `redissun__timeout__set:{name}` | sorted set | entry and the time when its time to live ends |
-| `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends |
-| `redissun__map_cache_last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
-| `redissun__map_cache_options:{name}` | hash | `max-size`, `mode` and `has-listeners` |
+| `redissun__idle__set:{name}` | sorted set | entry and the time when its idle time ends, moved forward on each read |
+| `redissun__map_cache__last_access__set:{name}` | sorted set | entry and its last use (`Lru`) or use count (`Lfu`) |
+| `{name}:redissun_options` | hash | `max-size`, `mode` and `has-listeners` |
+| `redissun__map__lease:{name}:<key>` | string | a lease on one entry |
 
-Events are published on the channels `redissun_map_cache_created:{name}`, `redissun_map_cache_updated:{name}`, `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`.
+Events are published on the channels `redissun_map_cache_created:{name}`, `redissun_map_cache_updated:{name}`, `redissun_map_cache_removed:{name}` and `redissun_map_cache_expired:{name}`, each as `struct.pack('Lc0Lc0', #key, key, #value, value)`, and an update with the old value as a third part.
+
+Data written by redissun 0.23 and earlier uses another layout and cannot be read until it is migrated with `migrate_from_0_23()`.
 
 ## Object methods
 
-`del`, `expire`, `persist` and `rename` apply to all five Redis keys. As in Redisson, `expire` also covers the sorted sets that are created later, and it returns whether the cache itself exists. `clear` deletes the entries but keeps the size limit. The `{name}` hash tag keeps the keys in one slot in Redis Cluster.
+`del`, `expire`, `persist` and `rename` apply to all five Redis keys. As in Redisson, `expire` also covers the sorted sets that are created later, and it returns whether the cache itself exists. `clear` deletes the entries but keeps the size limit. The other keys carry the name as a hash tag, so they are in the slot of `name` in Redis Cluster.

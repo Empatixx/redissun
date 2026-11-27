@@ -25,7 +25,16 @@ pub(crate) fn arguments(latch: Option<Duration>) -> Vec<Bytes> {
     ]
 }
 
-pub(crate) fn schedule(core: &Arc<Core>, task: String, script: &'static Lua, keys: Vec<String>) {
+/// The arguments of an eviction script for one run, given the latch time of that run (`None` when it runs without a latch).
+pub(crate) type Arguments = fn(Option<Duration>) -> Vec<Bytes>;
+
+pub(crate) fn schedule(
+    core: &Arc<Core>,
+    task: String,
+    script: &'static Lua,
+    keys: Vec<String>,
+    args: Arguments,
+) {
     let Ok(runtime) = Handle::try_current() else {
         return;
     };
@@ -40,6 +49,7 @@ pub(crate) fn schedule(core: &Arc<Core>, task: String, script: &'static Lua, key
         Arc::downgrade(core),
         script,
         keys,
+        args,
         core.eviction_interval,
     ));
     tasks.insert(
@@ -89,7 +99,13 @@ impl Pacing {
     }
 }
 
-async fn run(core: Weak<Core>, script: &'static Lua, keys: Vec<String>, min: Duration) {
+async fn run(
+    core: Weak<Core>,
+    script: &'static Lua,
+    keys: Vec<String>,
+    args: Arguments,
+    min: Duration,
+) {
     let mut pacing = Pacing::new(min);
     loop {
         tokio::time::sleep(pacing.delay).await;
@@ -98,7 +114,7 @@ async fn run(core: Weak<Core>, script: &'static Lua, keys: Vec<String>, min: Dur
         };
         let latch = pacing.delay.min(MAX_LATCH);
         let outcome: Result<i64> = core
-            .eval_once(script, keys.clone(), arguments(Some(latch)))
+            .eval_once(script, keys.clone(), args(Some(latch)))
             .await;
         drop(core);
         if let Ok(size) = outcome {

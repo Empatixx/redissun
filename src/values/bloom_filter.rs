@@ -1,9 +1,10 @@
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::map::key_hash::HASH_KEY;
-use crate::coordination::rate_limiter::{suffix_name, EXPIRE_ANY, PERSIST_ANY};
+use crate::coordination::rate_limiter::{EXPIRE_ANY, PERSIST_ANY};
 use crate::error::{Error, Result};
 use crate::lua::Lua;
+use crate::object::suffix_name;
 use crate::object::{Key, Object};
 use bytes::Bytes;
 use highway::{HighwayHash, HighwayHasher};

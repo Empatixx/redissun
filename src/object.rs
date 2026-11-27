@@ -77,6 +77,33 @@ pub(crate) fn tagged(name: &str) -> String {
     }
 }
 
+/// Redisson's `RedissonObject.prefixName`: `prefix:{name}`, or `prefix:name` when the name already contains a `{`.
+pub(crate) fn prefix_name(prefix: &str, name: &str) -> String {
+    if name.contains('{') {
+        format!("{prefix}:{name}")
+    } else {
+        format!("{prefix}:{{{name}}}")
+    }
+}
+
+/// Redisson's `RedissonObject.suffixName`: `{name}:suffix`, or `name:suffix` when the name already contains a `{`.
+pub(crate) fn suffix_name(name: &str, suffix: &str) -> String {
+    if name.contains('{') {
+        format!("{name}:{suffix}")
+    } else {
+        format!("{{{name}}}:{suffix}")
+    }
+}
+
+/// The client's clock as Unix time in milliseconds, Redisson's `System.currentTimeMillis()`.
+pub(crate) fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
 pub(crate) fn block_seconds(timeout: Duration) -> f64 {
     if timeout.is_zero() {
         0.0
@@ -190,15 +217,12 @@ impl Key {
         script: &Lua,
         ttl: Duration,
         companions: Vec<String>,
+        extra: Vec<Bytes>,
     ) -> Result<bool> {
-        let applied: i64 = self
-            .core
-            .eval(
-                script,
-                self.with(companions),
-                vec![Bytes::from(millis(ttl)?.to_string())],
-            )
-            .await?;
+        let args = std::iter::once(Bytes::from(millis(ttl)?.to_string()))
+            .chain(extra)
+            .collect();
+        let applied: i64 = self.core.eval(script, self.with(companions), args).await?;
         Ok(applied == 1)
     }
 
@@ -334,6 +358,11 @@ mod sealed {
             None
         }
 
+        /// The arguments that [`expire_script`](HasKey::expire_script) takes after the time to live.
+        fn expire_args(&self) -> Vec<Bytes> {
+            Vec::new()
+        }
+
         fn persist_script(&self) -> Option<&'static Lua> {
             None
         }
@@ -379,9 +408,10 @@ impl<T: HasKey + Sync> Object for T {
     fn expire(&self, ttl: Duration) -> impl Future<Output = Result<bool>> + Send {
         let companions = self.companions();
         let script = self.expire_script();
+        let extra = self.expire_args();
         async move {
             match script {
-                Some(script) => self.key().expire_with(script, ttl, companions).await,
+                Some(script) => self.key().expire_with(script, ttl, companions, extra).await,
                 None => self.key().expire_all(ttl, companions).await,
             }
         }
@@ -405,7 +435,28 @@ impl<T: HasKey + Sync> Object for T {
 
 #[cfg(test)]
 mod tests {
-    use super::tagged;
+    use super::{prefix_name, suffix_name, tagged};
+
+    #[test]
+    fn prefix_and_suffix_names_follow_redisson() {
+        assert_eq!(prefix_name("p", "m"), "p:{m}");
+        assert_eq!(prefix_name("p", "{t}:m"), "p:{t}:m");
+        assert_eq!(suffix_name("m", "redissun_options"), "{m}:redissun_options");
+        assert_eq!(
+            suffix_name("{t}:m", "redissun_options"),
+            "{t}:m:redissun_options"
+        );
+    }
+
+    #[test]
+    fn now_millis_is_the_unix_time_in_milliseconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let now = super::now_millis();
+        assert!(now >= before && now - before < 1000);
+    }
 
     #[test]
     fn names_get_a_hash_tag_unless_they_already_have_a_real_one() {
