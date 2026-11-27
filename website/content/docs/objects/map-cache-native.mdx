@@ -6,8 +6,11 @@ description: A shared map whose entries expire on the server (Redis 7.4 hash fie
 **Experimental.** A `MapCacheNative` is a `HashMap` whose entries can each have a time to live, and the server deletes them when it runs out. It is Redisson's `RMapCacheNative`.
 
 ```rust
+use std::time::Duration;
+
 let tokens = client.map_cache_native::<String, String>("tokens");
 
+tokens.insert("abc", &token).ttl(Duration::from_secs(60)).await?;
 let left = tokens.entry_ttl("abc").await?;
 ```
 
@@ -29,8 +32,24 @@ Every `HashMap` method works the same way: `get`, `remove`, `contains_key`, `len
 
 | Method | Notes |
 |---|---|
+| `insert(&k, &v)[.ttl(d) / .expire_at(t)]` | returns the old value. Without a time the entry has none afterwards, like `HashMap::insert`; with one, it gets that time and loses the old one. Redisson's `put`. |
+| `set(&k, &v)[.ttl(d) / .expire_at(t)]` | the same write, returning whether the key was new. Redisson's `fastPut`. |
+| `try_insert(&k, &v)[.ttl(d) / .expire_at(t)]` | stores only when the key is missing: `None` when it stored, else the present value, whose value and TTL stay. Redisson's `putIfAbsent` and `fastPutIfAbsent`. |
+| `replace(&k, &v)[.ttl(d) / .expire_at(t)]` | replaces a present key and returns the old value; a missing key gives `None` and stays missing. **Without a time it keeps the entry's TTL**, like `HashMapCache::replace`; with one, it sets the new time. Redisson's `putIfExist`, `putIfExists`, `replace(k, v)`, `fastReplace`. |
+| `compare_and_set(&k, &old, &new)` | sets `new` only when the entry holds `old`, and **keeps the entry's TTL**. Redisson's `replace(k, old, new)`. |
+| `incr_by(&k, n)`, `incr_by_float(&k, x)` | keep the entry's TTL (`HINCRBY` does not clear it). |
 | `entry_ttl(&k)` | the time the entry has left (`HPTTL`). `None` when it has no time to live or is missing. |
-| `incr_by(&k, n)`, `incr_by_float(&k, x)` | keep the entry's time to live (`HINCRBY` does not clear it). |
+| `entry_ttls(&[&k, ..])` | the same for several keys, in key order; a key listed twice gives two items. |
+
+## Expiry
+
+A write takes `.ttl(Duration)` or `.expire_at(SystemTime)`; when both are set, the last one wins.
+
+- `.ttl(d)` counts on the **server's** clock from the write (`HPEXPIRE`). `.expire_at(t)` is a deadline on the **caller's** clock (`HPEXPIREAT` with Unix milliseconds).
+- `.ttl(Duration::ZERO)` means no time to live: the entry is stored without one, as Redisson does for `0`. It is never deleted at once.
+- A deadline in the past is passed through: the server deletes the entry at once, and `insert` still returns the old value. A `SystemTime` before 1970 is `Error::Config`, and nothing is written.
+- Which writes clear a TTL: `insert`, `set` and the other writes without a time go through `HSET`, which leaves the entry without one. `replace` and `compare_and_set` keep it (their scripts read `HPTTL` and put it back), and `incr_by`/`incr_by_float` keep it because `HINCRBY` does. This differs from Redisson's `replace`, which clears it.
+- The server deletes an expired entry itself; `get`, `len` and the iterators never see it.
 
 ## How it is stored
 

@@ -430,7 +430,15 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | Redisson | redissun |
 |---|---|
 | `getMapCacheNative(name)` | `client.map_cache_native(name)` |
+| `put(k, v, Duration)`, `put(k, v, Instant)` | `insert(&k, &v).ttl(d)`, `insert(&k, &v).expire_at(t)` |
+| `fastPut(k, v, Duration)`, `fastPut(k, v, Instant)` | `set(&k, &v).ttl(d)`, `set(&k, &v).expire_at(t)` → `bool` |
+| `putIfAbsent(k, v, Duration\|Instant)`, `fastPutIfAbsent(k, v, Duration\|Instant)` | `try_insert(&k, &v).ttl(d)` / `.expire_at(t)` → `None` when stored (Redisson's `null` / `true`) |
+| `putIfExist(k, v, Duration\|Instant)` | `replace(&k, &v).ttl(d)` / `.expire_at(t)` → `Option<V>` |
+| `replace(k, v)`, `putIfExists(k, v)`, `fastReplace(k, v)` | `replace(&k, &v)`; keeps the entry's TTL, where Redisson's clears it |
+| `replace(k, old, new)` | `compare_and_set(&k, &old, &new)`; keeps the entry's TTL, where Redisson's clears it |
+| a `Duration` of zero | `.ttl(Duration::ZERO)`: no TTL, as in Redisson |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` → `Option<Duration>`; `None` for both a missing entry (`-2`) and one without a time to live (`-1`) |
+| `remainTimeToLive(Set)` | `entry_ttls(&[&k, ..])` → `Vec<Option<Duration>>` in key order, `None` for both `-1` and `-2` |
 | `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)`; keep the entry's time to live |
 
 ## LocalCachedMap

@@ -1,6 +1,9 @@
 //! Redisson's `RMapCacheNative`: a hash whose fields expire on the server (Redis 7.4 hash field expiration).
 
+mod builders;
+mod scripts;
 mod support;
+mod ttl;
 
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
@@ -10,15 +13,18 @@ use crate::collections::map::scan::MapScan;
 use crate::collections::map::store::{store_options, StoreOptions};
 use crate::error::Result;
 use crate::object::{HasKey, Key};
+use bytes::Bytes;
 use futures::Stream;
+use scripts::{COMPARE_AND_SET_KEEP_TTL, REPLACE_KEEP_TTL};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
 use std::hash::Hash;
 use std::time::Duration;
-use support::{require, Needs};
+use support::{has_field_ttl, require, Needs};
 
+pub use builders::{Insert, Replace, Set, TryInsert};
 pub(crate) use support::HashFieldSupport;
 
 /// **Experimental.** A distributed map in one Redis hash whose entries can expire on their own, Redisson's `RMapCacheNative`.
@@ -137,6 +143,86 @@ where
         Ok(millis.first().and_then(|&ms| ttl_of(ms)))
     }
 
+    /// Inserts an entry and returns the value it replaced, like [`HashMap::insert`](crate::HashMap::insert). Await it as it is, or set a time first: `map.insert("a", &v).ttl(d).await`.
+    ///
+    /// Without a time, the entry is stored without one and loses any TTL it had (`HSET`). With [`ttl`](Insert::ttl) or [`expire_at`](Insert::expire_at), it gets that time, replacing the old one (Redis 7.4). With a writer, the entry is written after Redis stored it.
+    #[doc(alias = "put")]
+    pub fn insert<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Insert<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        Insert::new(self, k, v)
+    }
+
+    /// Stores the entry without reading the old value and returns whether the key was new, like [`HashMap::set`](crate::HashMap::set). A time works as on [`insert`](MapCacheNative::insert).
+    #[doc(alias = "fastPut")]
+    pub fn set<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Set<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        Set::new(self, k, v)
+    }
+
+    /// Stores the entry only when the key is missing, like [`HashMap::try_insert`](crate::HashMap::try_insert). Returns `None` when it stored it, or the present value, which keeps its value and its TTL. A time applies only to an entry it stores.
+    #[doc(alias = "putIfAbsent", alias = "fastPutIfAbsent")]
+    pub fn try_insert<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> TryInsert<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        TryInsert::new(self, k, v)
+    }
+
+    /// Replaces the value of a present key and returns the value it replaced, like [`HashMap::replace`](crate::HashMap::replace); a missing key stays missing and gives `None`.
+    ///
+    /// Without a time, the entry keeps its TTL, like [`HashMapCache::replace`](crate::HashMapCache::replace); Redisson's `replace` clears it. With [`ttl`](Replace::ttl) or [`expire_at`](Replace::expire_at), it gets the new time, and `.ttl(Duration::ZERO)` leaves it without one, as Redisson's `putIfExists(k, v)`.
+    #[doc(
+        alias = "putIfExist",
+        alias = "putIfExists",
+        alias = "fastPutIfExists",
+        alias = "fastReplace"
+    )]
+    pub fn replace<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Replace<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        Replace::new(self, k, v)
+    }
+
+    /// The time each entry has left, in the order of the keys, Redisson's `remainTimeToLive(keys)`. `None` for an entry without a TTL or a missing one. A key listed twice gives two items. Needs Redis 7.4.
+    #[doc(alias = "remainTimeToLive")]
+    pub async fn entry_ttls<Q>(&self, ks: &[&Q]) -> Result<Vec<Option<Duration>>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if ks.is_empty() {
+            return Ok(Vec::new());
+        }
+        require(&self.key, Needs::FieldTtl).await?;
+        let fields = ks
+            .iter()
+            .map(|k| self.codec.encode(*k))
+            .collect::<Result<Vec<Bytes>>>()?;
+        let mut cmd = self.key.key_cmd("HPTTL");
+        cmd.arg("FIELDS")
+            .arg(fields.len())
+            .arg(crate::client::request::binary(&fields));
+        let millis: Vec<i64> = self.key.read(cmd).await?;
+        Ok(millis.into_iter().map(ttl_of).collect())
+    }
+
     /// Same as [`HashMap::get`](crate::HashMap::get). An expired entry is missing.
     pub async fn get<Q>(&self, k: &Q) -> Result<Option<V>>
     where
@@ -224,7 +310,7 @@ where
         self.map.incr_by_float(k, delta).await
     }
 
-    /// Same as [`HashMap::compare_and_set`](crate::HashMap::compare_and_set), Redisson's `replace(key, old, new)`.
+    /// Same as [`HashMap::compare_and_set`](crate::HashMap::compare_and_set), Redisson's `replace(key, old, new)`, and keeps the entry's time to live, like [`HashMapCache::compare_and_set`](crate::HashMapCache::compare_and_set). Redisson's `replace(key, old, new)` clears it.
     #[doc(alias = "replace")]
     pub async fn compare_and_set<Q, W>(&self, k: &Q, old: &W, new: &W) -> Result<bool>
     where
@@ -233,7 +319,53 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        self.map.compare_and_set(k, old, new).await
+        // A server without field TTLs has no TTL to keep, and its script would fail at HPTTL.
+        if !has_field_ttl(&self.key).await? {
+            return self.map.compare_and_set(k, old, new).await;
+        }
+        let (k, new) = (self.codec.encode(k)?, self.codec.encode(new)?);
+        let args = vec![k.clone(), self.codec.encode(old)?, new.clone()];
+        let keys = vec![self.key.redis_key()];
+        let core = &self.key.core;
+        // At most once when a writer waits for the change, as HashMap::compare_and_set: a second run would answer 0.
+        let flag: i64 = if self.map.writer().is_some() {
+            core.eval_once(&COMPARE_AND_SET_KEEP_TTL, keys, args)
+                .await?
+        } else {
+            core.eval(&COMPARE_AND_SET_KEEP_TTL, keys, args).await?
+        };
+        if flag == 1 {
+            self.map.written(k, new).await?;
+        }
+        Ok(flag == 1)
+    }
+
+    /// `replace` without a time: Redisson's `replace(k, v)` script, keeping the entry's TTL where the server has field TTLs.
+    async fn replace_keeping_ttl<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        if !has_field_ttl(&self.key).await? {
+            return self.map.replace(k, v).await;
+        }
+        let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
+        // At most once: run again after a lost reply, it would return this call's own value as the old one.
+        let previous: Option<Bytes> = self
+            .key
+            .core
+            .eval_once(
+                &REPLACE_KEEP_TTL,
+                vec![self.key.redis_key()],
+                vec![k.clone(), v.clone()],
+            )
+            .await?;
+        if previous.is_some() {
+            self.map.written(k, v).await?;
+        }
+        self.map.decode_value(previous)
     }
 
     /// Same as [`HashMap::remove_if_eq`](crate::HashMap::remove_if_eq), Redisson's `remove(key, value)`.

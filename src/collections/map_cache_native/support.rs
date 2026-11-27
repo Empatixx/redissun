@@ -55,6 +55,11 @@ pub(crate) async fn require(key: &Key, needs: Needs) -> Result<()> {
     Ok(())
 }
 
+/// Whether the server has field TTLs, without failing when it has not: methods that also run on older servers ask it to pick their script.
+pub(crate) async fn has_field_ttl(key: &Key) -> Result<bool> {
+    Ok(probe(key).await?.field_ttl)
+}
+
 async fn probe(key: &Key) -> Result<HashFieldSupport> {
     let support = key
         .core

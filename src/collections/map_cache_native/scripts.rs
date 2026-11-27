@@ -1,0 +1,84 @@
+//! Redisson 4.8.0's `RedissonMapCacheNative` scripts, verbatim, with `KEYS` and `ARGV` in Redisson's order.
+
+use crate::lua::Lua;
+use std::sync::LazyLock;
+
+/// RedissonMapCacheNative.putOperationAsync: `ARGV` = `[ms, key, value, expire command]`; returns the old value.
+pub(super) static PUT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local currValue = redis.call('hget', KEYS[1], ARGV[2]); \
+         redis.call('hset', KEYS[1], ARGV[2], ARGV[3]); \
+         redis.call(ARGV[4], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); \
+         return currValue; ",
+    )
+});
+
+/// RedissonMapCacheNative.fastPutOperationAsync: `ARGV` = `[ms, key, value, expire command]`; returns `hset`'s reply.
+pub(super) static FAST_PUT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local added = redis.call('hset', KEYS[1], ARGV[2], ARGV[3]); \
+         redis.call(ARGV[4], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); \
+         return added;",
+    )
+});
+
+/// RedissonMapCacheNative.putIfAbsentOperationAsync: `ARGV` = `[ms, key, value, expire command]`; returns the present value, or nil when it stored.
+pub(super) static PUT_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local currValue = redis.call('hget', KEYS[1], ARGV[2]); \
+         if currValue ~= false then \
+         return currValue;\
+         end;\
+         redis.call('hset', KEYS[1], ARGV[2], ARGV[3]); \
+         redis.call(ARGV[4], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); \
+         return nil; ",
+    )
+});
+
+/// RedissonMapCacheNative.putIfExistOperationAsync: `ARGV` = `[ms, key, value, expire command]`; returns the old value, or nil when the key is missing.
+pub(super) static PUT_IF_EXIST: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local currValue = redis.call('hget', KEYS[1], ARGV[2]); \
+         if currValue == false then \
+         return nil;\
+         end;\
+         redis.call('hset', KEYS[1], ARGV[2], ARGV[3]); \
+         redis.call(ARGV[4], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); \
+         return currValue; ",
+    )
+});
+
+/// RedissonMap.replaceOperationAsync(key, value), the script of `HashMap::replace`: `ARGV` = `[key, value]`; returns the old value, or nil when the key is missing.
+///
+/// Deviation from Redisson: it reads the field's `HPTTL` before the `hset` and puts it back with `HPEXPIRE` after, so `replace` keeps the entry's time to live, as `HashMapCache::replace` does. Redisson's `replace` clears it.
+pub(super) static REPLACE_KEEP_TTL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+            local value = redis.call('HGET', KEYS[1], ARGV[1])
+            local ttl = redis.call('HPTTL', KEYS[1], 'FIELDS', 1, ARGV[1])[1]
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            if ttl > 0 then
+                redis.call('HPEXPIRE', KEYS[1], ttl, 'FIELDS', 1, ARGV[1])
+            end
+            return value
+        end
+        return nil",
+    )
+});
+
+/// RedissonMap.replaceOperationAsync(key, oldValue, newValue), the script of `HashMap::compare_and_set`: `ARGV` = `[key, old, new]`; returns `1` when it replaced.
+///
+/// Deviation from Redisson: it reads the field's `HPTTL` before the `HSET` and puts it back with `HPEXPIRE` after, so `compare_and_set` keeps the entry's time to live, as `HashMapCache::compare_and_set` does. Redisson's `replace(key, old, new)` clears it.
+pub(super) static COMPARE_AND_SET_KEEP_TTL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+            local ttl = redis.call('HPTTL', KEYS[1], 'FIELDS', 1, ARGV[1])[1]
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+            if ttl > 0 then
+                redis.call('HPEXPIRE', KEYS[1], ttl, 'FIELDS', 1, ARGV[1])
+            end
+            return 1
+        end
+        return 0",
+    )
+});
