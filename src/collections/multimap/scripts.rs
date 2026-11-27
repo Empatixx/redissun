@@ -376,3 +376,58 @@ pub(super) static SET_VALUES_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
         "return 0; ",
     ))
 });
+
+/// `RedissonListMultimap.putAllAsync`, for `ListMultimapCacheNative`. KEYS: map, values. ARGV: key, key hash, values….
+///
+/// Deviation from Redisson (D2): `hset` → `hsetnx`. `HSET` clears the field's TTL while the values key keeps its own; the field always holds the same hash, so `hsetnx` writes the same data.
+pub(super) static NATIVE_LIST_PUT_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "redis.call('hsetnx', KEYS[1], ARGV[1], ARGV[2]); ",
+        "local n = 0; ",
+        "for i=3, #ARGV, 5000 do ",
+        "n = n + redis.call('rpush', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
+        "end; ",
+        "return n; ",
+    ))
+});
+
+/// `RedissonSetMultimap.putAllAsync`, for `SetMultimapCacheNative`. KEYS: map, values. ARGV: key, key hash, values….
+///
+/// Deviation from Redisson (D2): `hset` → `hsetnx`. `HSET` clears the field's TTL while the values key keeps its own; the field always holds the same hash, so `hsetnx` writes the same data.
+pub(super) static NATIVE_SET_PUT_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "redis.call('hsetnx', KEYS[1], ARGV[1], ARGV[2]); ",
+        "local n = 0; ",
+        "for i=3, #ARGV, 5000 do ",
+        "n = n + redis.call('sadd', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
+        "end; ",
+        "",
+        "return n; ",
+    ))
+});
+
+/// `RedissonMultimapCacheNative.expireKeyAsync`. KEYS: map, values. ARGV: milliseconds, key.
+pub(super) static NATIVE_EXPIRE_KEY: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local res = redis.call('hpexpire', KEYS[1], ARGV[1], 'fields', 1, ARGV[2])",
+        "if res[1] == 1 then ",
+        "redis.call('pexpire', KEYS[2], ARGV[1]); ",
+        "return 1;",
+        "end; ",
+        "return 0; ",
+    ))
+});
+
+/// New, for `expire_key(&k, Duration::ZERO)` on the native multimaps. KEYS: map, values. ARGV: key.
+///
+/// Deviation from Redisson (D3): Redisson sends `hpexpire 0`, which deletes the field and leaves the values key behind; a zero TTL means "no TTL" crate-wide, so this clears the TTL of the field (`hpersist`) and of the values key (`persist`). Returns 1 when the key exists.
+pub(super) static NATIVE_PERSIST_KEY: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local res = redis.call('hpersist', KEYS[1], 'fields', 1, ARGV[1]); ",
+        "if res[1] == -2 then ",
+        "return 0; ",
+        "end; ",
+        "redis.call('persist', KEYS[2]); ",
+        "return 1; ",
+    ))
+});

@@ -1,6 +1,6 @@
 ---
 title: SetMultimap
-description: A map whose keys each hold a set of values, Redisson's RSetMultimap. Experimental.
+description: A map whose keys each hold a set of values, Redisson's RSetMultimap and RSetMultimapCacheNative. Experimental.
 ---
 
 **Experimental.** A `SetMultimap` maps each key to a set of values. A key holds each value at most once; values are equal when their encoded bytes are equal. It is Redisson's `RSetMultimap`, with the same data in Redis, so Java and Rust clients share it.
@@ -111,6 +111,29 @@ The `Object` methods cover the hash and the set of every key, with Redisson's sc
 | `exists()`, `ttl()` | `isExists`, `remainTimeToLive` | read the hash |
 
 The scripts name the sets from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`.
+
+## CacheNative
+
+**Experimental.** `client.set_multimap_cache_native(name)` returns a `SetMultimapCacheNative`, Redisson's `RSetMultimapCacheNative`. It is a `SetMultimap` with the same data and methods, plus `expire_key`, which gives one key a time to live with Redis 7.4 hash field expiry:
+
+```rust
+use std::time::Duration;
+
+let sessions = client.set_multimap_cache_native::<String, String>("sessions");
+sessions.insert("user-1", "tab-a").await?;
+sessions.expire_key("user-1", Duration::from_secs(60)).await?; // true: the key exists
+```
+
+| Method | Redisson | Notes |
+|---|---|---|
+| `expire_key(&k, ttl)` | `expireKey(key, ttl, unit)` | `HPEXPIRE` on the key's hash field and `PEXPIRE` on its set, so both expire together; `false` for a missing key |
+| `expire_key(&k, Duration::ZERO)` | — | clears both TTLs (`HPERSIST` + `PERSIST`); Redisson's `hpexpire 0` would delete the field and leave the set behind |
+
+- Only `expire_key` needs Redis 7.4 or newer (or Valkey 9). On an older server it fails with `Error::Unsupported` before writing anything; every other method runs on Redis 6.2.
+- When a key expires, the server removes its field and its set, so `len`, `key_len`, `contains_key` and `get_all` all show it gone.
+- `extend`, `insert` and the handle's writes keep a key's TTL. redissun's `extend` uses `hsetnx` where Redisson's script uses `hset`, which would clear the field's TTL while the set kept its own.
+- `replace_values` and `set_values` make the key permanent, as in Redisson: their scripts rewrite the field and recreate the set.
+- `Object::expire` and `persist` work on the whole multimap, as on the plain type.
 
 ## How it is stored
 

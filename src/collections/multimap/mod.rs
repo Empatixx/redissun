@@ -9,13 +9,15 @@ pub(crate) mod values;
 
 use crate::codec::Codec;
 use crate::collections::map::key_hash::hash128_base64;
-use crate::error::Result;
+use crate::collections::map_cache_native::support::{self, Needs};
+use crate::error::{Error, Result};
 use crate::lua::Lua;
-use crate::object::{suffix_name, Key};
+use crate::object::{millis, suffix_name, Key};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Which Redis type holds the values of a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,10 +30,7 @@ pub(crate) enum Shape {
 
 /// How the keys of a multimap expire.
 #[derive(Clone, Debug)]
-#[expect(
-    dead_code,
-    reason = "the native variants (Task 7) and the cache variants (PR 3b) build the other modes"
-)]
+#[expect(dead_code, reason = "the cache variants (PR 3b) build `Cache`")]
 pub(crate) enum Mode {
     /// No key TTLs, Redisson's `RedissonListMultimap`/`RedissonSetMultimap`.
     Plain,
@@ -238,9 +237,15 @@ impl<C: Codec> Ops<'_, C> {
         let core = &self.key.core;
         let keys = Self::slot_keys(slot);
         let args = Self::key_and_values(slot, values);
-        match self.shape {
-            Shape::List => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await,
-            Shape::Set => core.eval(&scripts::SET_PUT_ALL, keys, args).await,
+        let native = matches!(self.mode, Mode::Native);
+        match (self.shape, native) {
+            (Shape::List, false) => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await,
+            (Shape::List, true) => {
+                core.eval_once(&scripts::NATIVE_LIST_PUT_ALL, keys, args)
+                    .await
+            }
+            (Shape::Set, false) => core.eval(&scripts::SET_PUT_ALL, keys, args).await,
+            (Shape::Set, true) => core.eval(&scripts::NATIVE_SET_PUT_ALL, keys, args).await,
         }
     }
 
@@ -392,6 +397,42 @@ impl<C: Codec> Ops<'_, C> {
     /// `readAllKeySet`: `HKEYS`.
     pub(crate) async fn keys_to_vec(&self) -> Result<Vec<Bytes>> {
         self.key.read(self.key.key_cmd("HKEYS")).await
+    }
+
+    /// `expireKey` of the native variants: sets the TTL of the key's field and values key (`HPEXPIRE` + `PEXPIRE`), or clears both for a zero TTL. Whether the key exists. Needs Redis 7.4, checked before the write; `type_name` names the type in the error.
+    pub(crate) async fn expire_key(
+        &self,
+        slot: &Slot,
+        ttl: Duration,
+        type_name: &str,
+    ) -> Result<bool> {
+        support::require(self.key, Needs::FieldTtl)
+            .await
+            .map_err(|error| match error {
+                Error::Unsupported(_) => {
+                    Error::Unsupported(format!("{type_name} needs Redis 7.4 or newer (HPEXPIRE)"))
+                }
+                other => other,
+            })?;
+        let keys = Self::slot_keys(slot);
+        let core = &self.key.core;
+        let done: i64 = if ttl.is_zero() {
+            core.eval(
+                &scripts::NATIVE_PERSIST_KEY,
+                keys,
+                vec![slot.encoded_key.clone()],
+            )
+            .await?
+        } else {
+            let ms = Bytes::from(millis(ttl)?.to_string());
+            core.eval(
+                &scripts::NATIVE_EXPIRE_KEY,
+                keys,
+                vec![ms, slot.encoded_key.clone()],
+            )
+            .await?
+        };
+        Ok(done == 1)
     }
 
     /// `delete`: the hash and every values key; whether any key was deleted.
@@ -832,6 +873,58 @@ multimap_type!(
     Shape::Set,
     "getSetMultimap"
 );
+
+/// Adds `expire_key` over field expiry to a native multimap type.
+macro_rules! native_expire_key {
+    ($name:ident) => {
+        impl<K, V, C> $name<K, V, C>
+        where
+            K: ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync,
+            V: ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync,
+            C: $crate::codec::Codec,
+        {
+            /// Sets the time to live of the key `k` and its values, Redisson's `expireKey`: `HPEXPIRE` on the key's hash field and `PEXPIRE` on its values, so both go together. [`Duration::ZERO`](::std::time::Duration::ZERO) clears both TTLs instead. Returns whether the key exists.
+            ///
+            /// It needs Redis 7.4 or newer (or Valkey 9) and fails with [`Error::Unsupported`]($crate::Error::Unsupported) before writing anything on an older server; every other method runs on 6.2. [`extend`](Self::extend) and the handle's writes keep the TTL; [`replace_values`](Self::replace_values) and [`set_values`](Self::set_values) make the key permanent, as in Redisson.
+            #[doc(alias = "expireKey")]
+            pub async fn expire_key<Q>(
+                &self,
+                k: &Q,
+                ttl: ::std::time::Duration,
+            ) -> $crate::error::Result<bool>
+            where
+                K: ::std::borrow::Borrow<Q>,
+                Q: ::serde::Serialize + ?Sized + Sync,
+            {
+                let ops = self.ops();
+                let slot = ops.slot(k)?;
+                ops.expire_key(&slot, ttl, stringify!($name)).await
+            }
+        }
+    };
+}
+
+multimap_type!(
+    /// **Experimental.** A [`ListMultimap`] whose keys can expire one by one, Redisson's `RListMultimapCacheNative`. [`expire_key`](Self::expire_key) sets a key's TTL with Redis 7.4 hash field expiry; everything else is a plain `ListMultimap` and runs on Redis 6.2.
+    ///
+    /// It uses Redisson's layout, so Redisson clients read and write the same data. Get one with [`Client::list_multimap_cache_native`](crate::Client::list_multimap_cache_native).
+    ListMultimapCacheNative,
+    ListMultimapValues,
+    Shape::List,
+    "getListMultimapCacheNative"
+);
+native_expire_key!(ListMultimapCacheNative);
+
+multimap_type!(
+    /// **Experimental.** A [`SetMultimap`] whose keys can expire one by one, Redisson's `RSetMultimapCacheNative`. [`expire_key`](Self::expire_key) sets a key's TTL with Redis 7.4 hash field expiry; everything else is a plain `SetMultimap` and runs on Redis 6.2.
+    ///
+    /// It uses Redisson's layout, so Redisson clients read and write the same data. Get one with [`Client::set_multimap_cache_native`](crate::Client::set_multimap_cache_native).
+    SetMultimapCacheNative,
+    SetMultimapValues,
+    Shape::Set,
+    "getSetMultimapCacheNative"
+);
+native_expire_key!(SetMultimapCacheNative);
 
 #[cfg(test)]
 mod tests {

@@ -18,7 +18,10 @@ use crate::collections::hash_map_cache::{HashMapCache, HashMapCacheBuilder};
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
 use crate::collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
-use crate::collections::multimap::{ListMultimap, Mode as MultimapMode, SetMultimap};
+use crate::collections::multimap::{
+    ListMultimap, ListMultimapCacheNative, Mode as MultimapMode, SetMultimap,
+    SetMultimapCacheNative,
+};
 use crate::collections::sorted_set::SortedSet;
 use crate::coordination::adder::{Adder, Summable};
 use crate::coordination::gcra::Gcra;
@@ -244,6 +247,32 @@ impl<C: Codec> Client<C> {
             Key::new(self.core.clone(), name),
             self.codec.clone(),
             MultimapMode::Plain,
+        )
+    }
+
+    /// Returns the [`ListMultimapCacheNative`] stored under `name`, Redisson's `getListMultimapCacheNative`: a `ListMultimap` whose keys expire with Redis 7.4 field expiry. **Experimental.**
+    #[doc(alias = "getListMultimapCacheNative")]
+    pub fn list_multimap_cache_native<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> ListMultimapCacheNative<K, V, C> {
+        ListMultimapCacheNative::new(
+            Key::new(self.core.clone(), name),
+            self.codec.clone(),
+            MultimapMode::Native,
+        )
+    }
+
+    /// Returns the [`SetMultimapCacheNative`] stored under `name`, Redisson's `getSetMultimapCacheNative`: a `SetMultimap` whose keys expire with Redis 7.4 field expiry. **Experimental.**
+    #[doc(alias = "getSetMultimapCacheNative")]
+    pub fn set_multimap_cache_native<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> SetMultimapCacheNative<K, V, C> {
+        SetMultimapCacheNative::new(
+            Key::new(self.core.clone(), name),
+            self.codec.clone(),
+            MultimapMode::Native,
         )
     }
 

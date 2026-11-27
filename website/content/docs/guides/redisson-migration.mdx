@@ -32,6 +32,8 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RSetCache` | `HashSetCache` |
 | `RListMultimap` | `ListMultimap` |
 | `RSetMultimap` | `SetMultimap` |
+| `RListMultimapCacheNative` | `ListMultimapCacheNative` |
+| `RSetMultimapCacheNative` | `SetMultimapCacheNative` |
 | `RTopic` | `Topic` |
 | `RPatternTopic` | `PatternTopic` |
 | `RReliableTopic` | `ReliableTopic` |
@@ -460,11 +462,13 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 
 ## Multimaps
 
-`ListMultimap` and `SetMultimap` use Redisson's layout and scripts, so Redisson and redissun clients share the data.
+`ListMultimap`, `SetMultimap`, `ListMultimapCacheNative` and `SetMultimapCacheNative` use Redisson's layout and scripts, so Redisson and redissun clients share the data.
 
 | Redisson | redissun |
 |---|---|
 | `redisson.getListMultimap("x")`, `redisson.getSetMultimap("x")` | `client.list_multimap("x")`, `client.set_multimap("x")` |
+| `redisson.getListMultimapCacheNative("x")`, `redisson.getSetMultimapCacheNative("x")` | `client.list_multimap_cache_native("x")`, `client.set_multimap_cache_native("x")` |
+| `expireKey(k, ttl, unit)` (CacheNative) | `expire_key(&k, ttl)` → `bool`; `Duration::ZERO` clears the key's TTL (Redisson's `hpexpire 0` deletes the field instead); Redis 7.4 |
 | `put(k, v)` | `insert(&k, &v)` → `bool` |
 | `getAll(k)` | `get_all(&k)` → `Vec<V>` (also for the set) |
 | `containsKey(k)` | `contains_key(&k)` |

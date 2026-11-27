@@ -49,7 +49,7 @@ async fn remove_values(slot: &Slot, shape: Shape, values: std::vec::Vec<Bytes>) 
     Ok(removed == 1)
 }
 
-/// **Experimental.** The values of one key of a [`ListMultimap`](crate::ListMultimap), Redisson's `RList` from `get(key)`. Get one with `get(&k)`.
+/// **Experimental.** The values of one key of a [`ListMultimap`](crate::ListMultimap) or [`ListMultimapCacheNative`](crate::ListMultimapCacheNative), Redisson's `RList` from `get(key)`. Get one with `get(&k)`.
 ///
 /// The handle is lazy: building it sends nothing. [`push`](Self::push), [`extend`](Self::extend), [`remove_value`](Self::remove_value), [`remove_values`](Self::remove_values) and [`clear`](Self::clear) go through the multimap, so a new key joins the key index and a key whose last value goes leaves it. Reads and index writes run on the list itself. An index write that empties the list ([`pop`](Self::pop), [`remove`](Self::remove), [`trim`](Self::trim), [`retain_values`](Self::retain_values)) keeps the key in the index, as in Redisson: [`contains_key`](crate::ListMultimap::contains_key) is `false`, but `key_len` and `keys` count it until `remove_all` or `remove_many` removes it.
 pub struct ListMultimapValues<V, C: Codec> {
@@ -389,7 +389,7 @@ where
     }
 }
 
-/// **Experimental.** The values of one key of a [`SetMultimap`](crate::SetMultimap), Redisson's `RSet` from `get(key)`. Get one with `get(&k)`.
+/// **Experimental.** The values of one key of a [`SetMultimap`](crate::SetMultimap) or [`SetMultimapCacheNative`](crate::SetMultimapCacheNative), Redisson's `RSet` from `get(key)`. Get one with `get(&k)`.
 ///
 /// The handle is lazy: building it sends nothing. [`insert`](Self::insert), [`extend`](Self::extend), [`remove`](Self::remove), [`remove_values`](Self::remove_values) and [`clear`](Self::clear) go through the multimap, so a new key joins the key index and a key whose last value goes leaves it. Reads and [`retain`](Self::retain) run on the set itself; a `retain` that empties the set keeps the key in the index, as in Redisson.
 pub struct SetMultimapValues<V, C: Codec> {
