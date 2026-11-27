@@ -482,13 +482,12 @@ async fn an_invalidation_during_a_read_is_not_overwritten() {
         let (read, written) = tokio::join!(a.get("k"), b.insert("k", &value));
         read.unwrap();
         written.unwrap();
-        // Once the invalidation has arrived, a stale read must not have been cached.
-        sleep(30 * MS).await;
-        assert_eq!(
-            a.get("k").await.unwrap().as_deref(),
-            Some(value.as_str()),
-            "round {round}"
-        );
+        // Once the invalidation has arrived, a stale read must not have been cached:
+        // a stale copy would stay, so waiting for the new value still catches it.
+        eventually(&format!("round {round}: a stale read stayed cached"), || async {
+            a.get("k").await.unwrap().as_deref() == Some(value.as_str())
+        })
+        .await;
     }
 }
 
