@@ -56,6 +56,8 @@ pub(crate) struct Core {
     pub(crate) sharded: crate::messaging::sharded_topic::Registry,
     /// The adders of this client by name, so that one name is one counter.
     pub(crate) adders: crate::coordination::adder::Registry,
+    /// The write-behind of each map name this client drains, so that one name has one drainer.
+    pub(crate) write_behind: crate::collections::map::write_behind::Registry,
     /// One permit for each connection that batches may use at the same time, `pool_size` in all, like the connections of Redisson's pool.
     pub(crate) batch_connections: Arc<tokio::sync::Semaphore>,
     /// How the server writes lengths in `struct.pack` payloads, read with `INFO server` when the first map cache listener is added.
@@ -95,6 +97,7 @@ impl Core {
             exclusive: std::sync::Mutex::new(std::collections::HashMap::new()),
             sharded: Default::default(),
             adders: Default::default(),
+            write_behind: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
             map_cache_length_prefix: tokio::sync::OnceCell::new(),
         });

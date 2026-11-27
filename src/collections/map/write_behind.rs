@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::object::{suffix_name, Key};
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::de::DeserializeOwned;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -20,6 +21,17 @@ const VERSION: u8 = 1;
 /// The queue of the map `name`: `{name}:redissun_write-behind-queue`, in the map's slot.
 pub(crate) fn queue_name(name: &str) -> String {
     suffix_name(name, "redissun_write-behind-queue")
+}
+
+/// The write-behind of each queue a client drains, by queue name, as Redisson's `WriteBehindService` keeps one task per map name: every build of one name in one client shares one drainer and one background task, so a key's changes reach the writer in the order they were queued.
+///
+/// Each entry holds the shared [`WriteBehind`] part (`Weak<Shared<K, V, C>>`, erased) and the drain lock. A build whose key, value or codec types differ from the live one gets its own drainer, which still takes the same drain lock.
+pub(crate) type Registry = std::sync::Mutex<HashMap<String, Registered>>;
+
+/// One entry of the [`Registry`].
+pub(crate) struct Registered {
+    shared: Weak<dyn Any + Send + Sync>,
+    lock: Weak<tokio::sync::Mutex<()>>,
 }
 
 /// One change of the map, with the key and value as the map's codec encoded them.
@@ -219,8 +231,8 @@ pub(crate) struct Drainer<K, V, C: Codec> {
     codec: C,
     attempts: usize,
     interval: Duration,
-    /// One drain at a time, so that a key's operations reach the writer in order.
-    lock: tokio::sync::Mutex<()>,
+    /// One drain at a time, so that a key's operations reach the writer in order; shared by every drainer of the queue in this client.
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<K, V, C> Drainer<K, V, C>
@@ -236,7 +248,8 @@ where
         let mut first: Option<Error> = None;
         let mut popped = 0usize;
         loop {
-            let payload: Option<Vec<u8>> = match queue.query(queue.key_cmd("LPOP")).await {
+            // At most once: a pop whose reply was lost took a task; popping again would skip it without a word.
+            let payload: Option<Vec<u8>> = match queue.query_once(queue.key_cmd("LPOP")).await {
                 Ok(payload) => payload,
                 Err(e) => {
                     tracing::error!(map = &*self.name, error = %e, "write-behind queue poll failed");
@@ -358,10 +371,15 @@ impl Drop for Liveness {
     }
 }
 
-/// The write-behind part of a map's store.
-pub(crate) struct WriteBehind<K, V, C: Codec> {
+/// What every build of one map name in one client shares: the drainer and the liveness of its background task.
+struct Shared<K, V, C: Codec> {
     drainer: Arc<Drainer<K, V, C>>,
     alive: Liveness,
+}
+
+/// The write-behind part of a map's store. Builds of one name in one client share it through the core's [`Registry`]; the background task drains once more and stops when the last of them is dropped.
+pub(crate) struct WriteBehind<K, V, C: Codec> {
+    shared: Arc<Shared<K, V, C>>,
 }
 
 /// The settings of [`WriteBehind::start`].
@@ -379,11 +397,30 @@ where
     V: DeserializeOwned + Send + Sync + 'static,
     C: Codec,
 {
-    /// Starts the background task of the map `map`; it needs a running tokio runtime.
+    /// Joins the write-behind of the map `map` that this client runs already, or starts its background task; that needs a running tokio runtime.
+    ///
+    /// A build that joins keeps the first build's writer, batch size, delay and retries, as Redisson's `WriteBehindService.getOrCreateTask` does.
     pub(crate) fn start(map: &Key, codec: C, settings: Settings<K, V>) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| Error::Config("write-behind needs a running tokio runtime".into()))?;
         let queue_name: Arc<str> = queue_name(map.name()).into();
+        let mut registry = map
+            .core
+            .write_behind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let live = registry.get(&*queue_name);
+        let lock = live.and_then(|entry| entry.lock.upgrade());
+        if let Some(shared) = live.and_then(|entry| entry.shared.upgrade()) {
+            if let Ok(shared) = shared.downcast::<Shared<K, V, C>>() {
+                return Ok(Self { shared });
+            }
+            tracing::warn!(
+                map = map.name(),
+                "another write-behind build of this name has other types; it gets its own drainer, which shares the drain lock"
+            );
+        }
+        let lock = lock.unwrap_or_default();
         let queue = Key::new(map.core.clone(), queue_name.clone());
         let drainer = Arc::new(Drainer {
             name: map.name.clone(),
@@ -392,23 +429,39 @@ where
             codec,
             attempts: settings.attempts,
             interval: settings.interval,
-            lock: tokio::sync::Mutex::new(()),
+            lock: lock.clone(),
         });
         let (last, stopped) = oneshot::channel();
         runtime.spawn(run(
             Arc::downgrade(&map.core),
-            queue_name,
+            queue_name.clone(),
             drainer.clone(),
             settings.delay,
             stopped,
         ));
-        Ok(Self {
+        let shared = Arc::new(Shared {
             drainer,
             alive: Liveness {
                 queue,
                 last: Some(last),
             },
-        })
+        });
+        let erased: Arc<dyn Any + Send + Sync> = shared.clone();
+        registry
+            .retain(|_, entry| entry.shared.strong_count() > 0 || entry.lock.strong_count() > 0);
+        let replace = registry
+            .get(&*queue_name)
+            .is_none_or(|entry| entry.shared.strong_count() == 0);
+        if replace {
+            registry.insert(
+                queue_name.to_string(),
+                Registered {
+                    shared: Arc::downgrade(&erased),
+                    lock: Arc::downgrade(&lock),
+                },
+            );
+        }
+        Ok(Self { shared })
     }
 }
 
@@ -418,18 +471,18 @@ where
     V: DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    /// Queues one task; an error of `RPUSH` is the caller's.
+    /// Queues one task; an error of `RPUSH` is the caller's. It is sent at most once, so a lost reply does not queue the task twice.
     pub(crate) async fn push(&self, task: &Task) -> Result<()> {
-        let queue = &self.alive.queue;
+        let queue = &self.shared.alive.queue;
         let mut cmd = queue.key_cmd("RPUSH");
         cmd.arg(encode(task).as_ref());
-        let _: i64 = queue.query(cmd).await?;
+        let _: i64 = queue.query_once(cmd).await?;
         Ok(())
     }
 
     /// Drains the queue now.
     pub(crate) async fn drain(&self) -> Result<()> {
-        self.drainer.drain(&self.alive.queue).await
+        self.shared.drainer.drain(&self.shared.alive.queue).await
     }
 }
 

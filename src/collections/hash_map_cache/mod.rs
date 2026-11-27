@@ -523,27 +523,27 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let (k, new) = (self.codec.encode(k)?, self.codec.encode(new)?);
-        let replaced: i64 = self
-            .key
-            .core
-            .eval(
-                &REPLACE_IF,
-                self.redis_keys(&[
-                    Name::Main,
-                    Name::Timeout,
-                    Name::Idle,
-                    Name::Updated,
-                    Name::Options,
-                ]),
-                vec![
-                    now(),
-                    k.clone(),
-                    self.codec.encode(old)?,
-                    new.clone(),
-                    Bytes::from(PUBLISH),
-                ],
-            )
-            .await?;
+        let keys = self.redis_keys(&[
+            Name::Main,
+            Name::Timeout,
+            Name::Idle,
+            Name::Updated,
+            Name::Options,
+        ]);
+        let args = vec![
+            now(),
+            k.clone(),
+            self.codec.encode(old)?,
+            new.clone(),
+            Bytes::from(PUBLISH),
+        ];
+        // With a writer, at most once: run again after a lost reply, the script would answer `0` and the writer would miss the change.
+        let core = &self.key.core;
+        let replaced: i64 = if self.writer().is_some() {
+            core.eval_once(&REPLACE_IF, keys, args).await?
+        } else {
+            core.eval(&REPLACE_IF, keys, args).await?
+        };
         if replaced == 1 {
             self.written(&[(k, new)]).await?;
         }
@@ -560,27 +560,27 @@ where
         W: Serialize + ?Sized + Sync,
     {
         let k = self.codec.encode(k)?;
-        let removed: i64 = self
-            .key
-            .core
-            .eval(
-                &REMOVE_IF,
-                self.redis_keys(&[
-                    Name::Main,
-                    Name::Timeout,
-                    Name::Idle,
-                    Name::Removed,
-                    Name::LastAccess,
-                    Name::Options,
-                ]),
-                vec![
-                    now(),
-                    k.clone(),
-                    self.codec.encode(v)?,
-                    Bytes::from(PUBLISH),
-                ],
-            )
-            .await?;
+        let keys = self.redis_keys(&[
+            Name::Main,
+            Name::Timeout,
+            Name::Idle,
+            Name::Removed,
+            Name::LastAccess,
+            Name::Options,
+        ]);
+        let args = vec![
+            now(),
+            k.clone(),
+            self.codec.encode(v)?,
+            Bytes::from(PUBLISH),
+        ];
+        // With a writer, at most once, as in `compare_and_set`.
+        let core = &self.key.core;
+        let removed: i64 = if self.writer().is_some() {
+            core.eval_once(&REMOVE_IF, keys, args).await?
+        } else {
+            core.eval(&REMOVE_IF, keys, args).await?
+        };
         if removed == 1 {
             self.deleted(k).await?;
         }
@@ -614,7 +614,8 @@ where
             let flags: std::vec::Vec<i64> = self
                 .key
                 .core
-                .eval(&FAST_REMOVE_BATCH, keys, args.clone())
+                // At most once: run again after a lost reply, it would report nothing removed and the writer would miss the deletes.
+                .eval_once(&FAST_REMOVE_BATCH, keys, args.clone())
                 .await?;
             let removed: std::vec::Vec<Bytes> = args
                 .into_iter()

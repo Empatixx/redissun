@@ -1267,3 +1267,186 @@ async fn loader_and_writer_work_on_a_cluster() {
         assert_eq!(store.write_calls(), vec![vec!["a"]]);
     }
 }
+
+// Review fix: every build of one name in one client shares one write-behind drainer, as Redisson's WriteBehindService keeps one task per name, so one key's writes reach the writer in order.
+#[tokio::test]
+async fn two_builds_of_one_name_share_one_drainer() {
+    let store = MemoryStore::default();
+    store.slow(Duration::from_millis(300));
+    let name = unique("ms");
+    let client = client().await;
+    let fast = Duration::from_millis(50);
+    let first = behind_on(&client, &name, &store, 50, fast).await;
+    let second = behind_on(&client, &name, &store, 50, fast).await;
+    first.insert("a", "1").await.unwrap();
+    // A drain pops `a=1` and sits in the slow writer.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    second.insert("a", "2").await.unwrap();
+    // A second drainer would pop `a=2` now and call the writer next to the first call.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    first.flush().await.unwrap();
+    second.flush().await.unwrap();
+    assert_eq!(store.max_in_flight(), 1, "two drains ran at once");
+    assert_eq!(store.write_calls(), vec![vec!["a"], vec!["a"]]);
+    assert_eq!(store.snapshot(), expected(&[("a", "2")]));
+}
+
+// Review fix: a cut reply must not be retried into a wrong answer when a writer depends on it.
+async fn cut_writing(cutter: &common::cutter::Cutter, store: &MemoryStore, name: &str) -> Map {
+    cutter
+        .client()
+        .await
+        .hash_map_builder::<String, String>(name)
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn hash_map_compare_and_set_with_a_writer_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let map = cut_writing(&cutter, &store, &name).await;
+    map.insert("1", "11").await.unwrap();
+    map.compare_and_set("warm", "x", "y").await.unwrap();
+    cutter.arm(&["EVALSHA", &name, "\"00\""]);
+    let replaced = map.compare_and_set("1", "11", "00").await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(replaced.is_err(), "a retry answered {replaced:?}");
+    assert_eq!(map.get("1").await.unwrap(), Some("00".to_string()));
+}
+
+#[tokio::test]
+async fn hash_map_remove_if_eq_with_a_writer_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let map = cut_writing(&cutter, &store, &name).await;
+    map.insert("1", "11").await.unwrap();
+    map.remove_if_eq("warm", "x").await.unwrap();
+    cutter.arm(&["EVALSHA", &name, "\"1\""]);
+    let removed = map.remove_if_eq("1", "11").await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(removed.is_err(), "a retry answered {removed:?}");
+    assert!(store.delete_calls().is_empty());
+}
+
+#[tokio::test]
+async fn hash_map_remove_many_with_a_writer_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let map = cut_writing(&cutter, &store, &name).await;
+    map.insert("1", "11").await.unwrap();
+    map.remove_many(&["warm"]).await.unwrap();
+    cutter.arm(&["EVALSHA", &name, "\"1\""]);
+    let removed = map.remove_many(&["1"]).await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(removed.is_err(), "a retry answered {removed:?}");
+}
+
+async fn cut_cache(cutter: &common::cutter::Cutter, store: &MemoryStore, name: &str) -> Cache {
+    cutter
+        .client()
+        .await
+        .hash_map_cache_builder::<String, String>(name)
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cache_compare_and_set_with_a_writer_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let cache = cut_cache(&cutter, &store, &name).await;
+    cache.insert("1", "11").await.unwrap();
+    cache.compare_and_set("warm", "x", "y").await.unwrap();
+    cutter.arm(&["EVALSHA", &name, "\"00\""]);
+    let replaced = cache.compare_and_set("1", "11", "00").await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(replaced.is_err(), "a retry answered {replaced:?}");
+}
+
+#[tokio::test]
+async fn cache_remove_if_eq_with_a_writer_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let cache = cut_cache(&cutter, &store, &name).await;
+    cache.insert("1", "11").await.unwrap();
+    cache.remove_if_eq("warm", "x").await.unwrap();
+    cutter.arm(&["EVALSHA", &name, "\"1\""]);
+    let removed = cache.remove_if_eq("1", "11").await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(removed.is_err(), "a retry answered {removed:?}");
+    assert!(store.delete_calls().is_empty());
+}
+
+#[tokio::test]
+async fn cache_remove_many_with_a_writer_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let cache = cut_cache(&cutter, &store, &name).await;
+    cache.insert("1", "11").await.unwrap();
+    cache.remove_many(&["warm"]).await.unwrap();
+    cutter.arm(&["EVALSHA", &name, "\"1\""]);
+    let removed = cache.remove_many(&["1"]).await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(removed.is_err(), "a retry answered {removed:?}");
+}
+
+#[tokio::test]
+async fn write_behind_push_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let client = cutter.client().await;
+    let map = behind_on(&client, &name, &store, 50, LATER).await;
+    cutter.arm(&["RPUSH", &queue_of(&name)]);
+    let pushed = map.insert("a", "1").await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(pushed.is_err(), "a retry answered {pushed:?}");
+    assert_eq!(queue_len(&name).await, ":1\r\n");
+}
+
+#[tokio::test]
+async fn write_behind_poll_is_not_retried_after_a_lost_reply() {
+    let cutter = common::cutter::Cutter::start().await;
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let client = cutter.client().await;
+    let map = behind_on(&client, &name, &store, 50, LATER).await;
+    map.insert("a", "1").await.unwrap();
+    map.insert("b", "2").await.unwrap();
+    cutter.arm(&["LPOP", &queue_of(&name)]);
+    let flushed = map.flush().await;
+    assert_eq!(cutter.cuts(), 1);
+    assert!(flushed.is_err(), "a retry answered {flushed:?}");
+    // The popped task is lost, as in Redisson; the rest stays queued for the next drain.
+    assert_eq!(queue_len(&name).await, ":1\r\n");
+    map.flush().await.unwrap();
+    assert_eq!(store.snapshot(), expected(&[("b", "2")]));
+}
+
+// Review fix: a get cancelled while it loads must not keep the key out of the local cache.
+#[tokio::test]
+async fn local_a_cancelled_read_does_not_stop_caching() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let name = unique("ms");
+    let map = local_on(&client().await, &name, &store).await;
+    store.slow(Duration::from_millis(500));
+    assert!(timeout(Duration::from_millis(100), map.get("1"))
+        .await
+        .is_err());
+    map.clear_local();
+    // Another client stores the key, so the next get reads it from Redis and caches it.
+    raw_command(&["HSET", &name, "\"1\"", "\"11\""]).await;
+    assert_eq!(map.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(map.local_len(), 1, "the key was not cached");
+}

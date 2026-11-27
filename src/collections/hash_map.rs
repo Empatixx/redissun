@@ -529,12 +529,15 @@ where
         self.decode_value(raw)
     }
 
-    async fn eval_flag(&self, script: &Lua, args: Vec<Bytes>) -> Result<bool> {
-        let flag: i64 = self
-            .key
-            .core
-            .eval(script, vec![self.key.redis_key()], args)
-            .await?;
+    /// Runs a script that answers `0`/`1`. With `once` it is sent at most once ([`Core::eval_once`](crate::client::core::Core::eval_once)): a script that changed the map and lost its reply would answer `0` when run again, and the writer would miss the change.
+    async fn eval_flag(&self, script: &Lua, args: Vec<Bytes>, once: bool) -> Result<bool> {
+        let core = &self.key.core;
+        let keys = vec![self.key.redis_key()];
+        let flag: i64 = if once {
+            core.eval_once(script, keys, args).await?
+        } else {
+            core.eval(script, keys, args).await?
+        };
         Ok(flag == 1)
     }
 
@@ -622,6 +625,7 @@ where
             .eval_flag(
                 &REPLACE_IF,
                 vec![k.clone(), self.codec.encode(old)?, new.clone()],
+                self.writer().is_some(),
             )
             .await?;
         if replaced {
@@ -640,7 +644,11 @@ where
     {
         let k = self.codec.encode(k)?;
         let removed = self
-            .eval_flag(&REMOVE_IF, vec![k.clone(), self.codec.encode(v)?])
+            .eval_flag(
+                &REMOVE_IF,
+                vec![k.clone(), self.codec.encode(v)?],
+                self.writer().is_some(),
+            )
             .await?;
         if removed {
             self.deleted(k).await?;
@@ -666,7 +674,8 @@ where
             let flags: Vec<i64> = self
                 .key
                 .core
-                .eval(
+                // At most once: run again after a lost reply, it would report nothing removed and the writer would miss the deletes.
+                .eval_once(
                     &FAST_REMOVE_BATCH,
                     vec![self.key.redis_key()],
                     fields.clone(),
@@ -708,7 +717,7 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
-        self.eval_flag(&CONTAINS_VALUE, vec![self.codec.encode(v)?])
+        self.eval_flag(&CONTAINS_VALUE, vec![self.codec.encode(v)?], false)
             .await
     }
 

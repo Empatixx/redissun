@@ -483,6 +483,30 @@ impl Cache {
     }
 }
 
+/// A read of one key from Redis in flight; see [`Local::begin_read`].
+struct ReadGuard<'a> {
+    local: &'a Local,
+    /// `None` once the read is finished.
+    key: Option<Bytes>,
+}
+
+impl ReadGuard<'_> {
+    /// Ends the read; `Some(value)` caches `value` unless the key changed meanwhile.
+    fn finish(mut self, value: Option<Option<Bytes>>) {
+        if let Some(key) = self.key.take() {
+            self.local.cache().finish_read(key, value);
+        }
+    }
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.local.cache().finish_read(key, None);
+        }
+    }
+}
+
 struct Local {
     cache: Mutex<Cache>,
     id: [u8; ID_LEN],
@@ -506,12 +530,13 @@ impl Local {
         cache.store.put(key, value);
     }
 
-    fn begin_read(&self, key: &Bytes) {
+    /// Opens a read of `key` from Redis. The guard ends it: [`ReadGuard::finish`] with what was read, or its drop, caching nothing, when the read is cancelled or fails.
+    fn begin_read(&self, key: &Bytes) -> ReadGuard<'_> {
         self.cache().begin_read(key);
-    }
-
-    fn finish_read(&self, key: Bytes, value: Option<Option<Bytes>>) {
-        self.cache().finish_read(key, value);
+        ReadGuard {
+            local: self,
+            key: Some(key.clone()),
+        }
     }
 
     fn forget(&self, key: &Bytes) {
@@ -985,14 +1010,14 @@ where
     }
 
     /// Asks the loader for a key that missed, for a read that [`Local::begin_read`] opened. A loaded value is cached by [`put_encoded`](Self::put_encoded); a value another caller stored meanwhile is cached here, and a key the loader lacks only with `store_cache_miss`, as Redisson's `getAsync`.
-    async fn load_missing(&self, field: Bytes) -> Result<Option<V>> {
+    async fn load_missing(&self, field: Bytes, read: ReadGuard<'_>) -> Result<Option<V>> {
         let loaded = load_value(&Target::Local(self), &field, false).await;
         let cached = match &loaded {
             Ok(Some(value)) => self.codec.encode(value).ok().map(Some),
             Ok(None) if self.store_cache_miss => Some(None),
             _ => None,
         };
-        self.local.finish_read(field, cached);
+        read.finish(cached);
         loaded
     }
 
@@ -1121,25 +1146,19 @@ where
             if !self.loads() {
                 return Ok(None);
             }
-            self.local.begin_read(&field);
-            return self.load_missing(field).await;
+            let read = self.local.begin_read(&field);
+            return self.load_missing(field, read).await;
         }
-        self.local.begin_read(&field);
+        let read = self.local.begin_read(&field);
         let mut cmd = self.key.key_cmd("HGET");
         cmd.arg(&field[..]);
-        let read: Result<Option<Bytes>> = self.key.query(cmd).await;
-        let raw = match read {
-            Ok(raw) => raw,
-            Err(error) => {
-                self.local.finish_read(field, None);
-                return Err(error);
-            }
-        };
+        // An error or a cancelled call drops `read`, which caches nothing.
+        let raw: Option<Bytes> = self.key.query(cmd).await?;
         if raw.is_none() && self.loads() {
-            return self.load_missing(field).await;
+            return self.load_missing(field, read).await;
         }
         let cached = (raw.is_some() || self.store_cache_miss).then(|| raw.clone());
-        self.local.finish_read(field, cached);
+        read.finish(cached);
         raw.map(|raw| self.codec.decode(&raw)).transpose()
     }
 
@@ -1188,19 +1207,19 @@ where
             if !self.loads() {
                 return Ok(false);
             }
-            self.local.begin_read(&field);
-            return Ok(self.load_missing(field).await?.is_some());
+            let read = self.local.begin_read(&field);
+            return Ok(self.load_missing(field, read).await?.is_some());
         }
-        self.local.begin_read(&field);
+        let read = self.local.begin_read(&field);
         // From the master, as `get`: a miss read from a replica could be cached after the write that ends it.
         let mut cmd = self.key.key_cmd("HEXISTS");
         cmd.arg(&field[..]);
         let found: Result<bool> = self.key.query(cmd).await;
         if matches!(found, Ok(false)) && self.loads() {
-            return Ok(self.load_missing(field).await?.is_some());
+            return Ok(self.load_missing(field, read).await?.is_some());
         }
         let miss = matches!(found, Ok(false)) && self.store_cache_miss;
-        self.local.finish_read(field, miss.then_some(None));
+        read.finish(miss.then_some(None));
         found
     }
 
