@@ -24,7 +24,7 @@ use std::hash::Hash;
 use std::time::Duration;
 use support::{has_field_ttl, require, Needs};
 
-pub use builders::{Insert, Replace, Set, TryInsert};
+pub use builders::{ExpireEntries, ExpireEntry, Insert, Replace, Set, TryInsert};
 pub(crate) use support::HashFieldSupport;
 
 /// **Experimental.** A distributed map in one Redis hash whose entries can expire on their own, Redisson's `RMapCacheNative`.
@@ -221,6 +221,86 @@ where
             .arg(crate::client::request::binary(&fields));
         let millis: Vec<i64> = self.key.read(cmd).await?;
         Ok(millis.into_iter().map(ttl_of).collect())
+    }
+
+    /// Sets a new time to live on a present entry, Redisson's `expireEntry` and its `IfNotSet`/`IfGreater`/`IfLess` forms. Await it after [`ttl`](ExpireEntry::ttl) or [`expire_at`](ExpireEntry::expire_at), optionally with [`if_not_set`](ExpireEntry::if_not_set), [`if_greater`](ExpireEntry::if_greater) or [`if_less`](ExpireEntry::if_less). Returns whether it changed the entry; a missing entry gives `false`. No writer is called. Needs Redis 7.4.
+    ///
+    /// Without a time, or with `.ttl(Duration::ZERO)`, it removes the TTL and returns whether the entry exists, as [`HashMapCache::expire_entry`](crate::HashMapCache::expire_entry) does; Redisson's `expireEntry(k, ZERO)` deletes the entry instead. A condition without a time is an [`Error::Config`](crate::Error::Config).
+    ///
+    /// ```no_run
+    /// # async fn run(map: redissun::MapCacheNative<String, String, redissun::JsonCodec>) -> redissun::Result<()> {
+    /// use std::time::Duration;
+    /// map.expire_entry("a").ttl(Duration::from_secs(60)).if_greater().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(
+        alias = "expireEntry",
+        alias = "expireEntryIfNotSet",
+        alias = "expireEntryIfGreater",
+        alias = "expireEntryIfLess"
+    )]
+    pub fn expire_entry<'a, Q>(&'a self, k: &'a Q) -> ExpireEntry<'a, K, V, C, Q>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        ExpireEntry::new(self, k)
+    }
+
+    /// [`expire_entry`](MapCacheNative::expire_entry) for several entries in one script, Redisson's `expireEntries` and its `IfNotSet`/`IfGreater`/`IfLess` forms. Returns how many entries it changed; a key listed twice is counted twice. Without a time it removes the TTLs and counts the entries that exist. An empty list gives `0` without a call.
+    #[doc(
+        alias = "expireEntries",
+        alias = "expireEntriesIfNotSet",
+        alias = "expireEntriesIfGreater",
+        alias = "expireEntriesIfLess"
+    )]
+    pub fn expire_entries<'a, Q>(&'a self, ks: &'a [&'a Q]) -> ExpireEntries<'a, K, V, C, Q>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        ExpireEntries::new(self, ks)
+    }
+
+    /// Removes the entry's time to live (`HPERSIST`), Redisson's `clearExpire(key)`. Returns `true` only when there was one to remove; an entry without a TTL or a missing one gives `false`. No writer is called. Needs Redis 7.4.
+    #[doc(alias = "clearExpire")]
+    pub async fn persist_entry<Q>(&self, k: &Q) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        require(&self.key, Needs::FieldTtl).await?;
+        let replies = self.persist_fields(&[self.codec.encode(k)?]).await?;
+        Ok(replies.first() == Some(&1))
+    }
+
+    /// [`persist_entry`](MapCacheNative::persist_entry) for several entries in one `HPERSIST`, Redisson's `clearExpire(keys)`: one flag per key, in key order. An empty list gives `[]` without a call.
+    #[doc(alias = "clearExpire")]
+    pub async fn persist_entries<Q>(&self, ks: &[&Q]) -> Result<Vec<bool>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if ks.is_empty() {
+            return Ok(Vec::new());
+        }
+        require(&self.key, Needs::FieldTtl).await?;
+        let fields = ks
+            .iter()
+            .map(|k| self.codec.encode(*k))
+            .collect::<Result<Vec<Bytes>>>()?;
+        let replies = self.persist_fields(&fields).await?;
+        Ok(replies.into_iter().map(|reply| reply == 1).collect())
+    }
+
+    /// `HPERSIST key FIELDS n …`: per field `1` (TTL removed), `-1` (no TTL) or `-2` (missing).
+    async fn persist_fields(&self, fields: &[Bytes]) -> Result<Vec<i64>> {
+        let mut cmd = self.key.key_cmd("HPERSIST");
+        cmd.arg("FIELDS")
+            .arg(fields.len())
+            .arg(crate::client::request::binary(fields));
+        self.key.query(cmd).await
     }
 
     /// Same as [`HashMap::get`](crate::HashMap::get). An expired entry is missing.

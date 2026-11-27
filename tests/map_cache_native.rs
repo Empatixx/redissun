@@ -216,6 +216,11 @@ async fn ttl_methods_need_redis_7_4_and_write_nothing() {
         map.try_insert("b", "1").ttl(minute).await.map(|_| ()),
         map.replace("a", "9").ttl(minute).await.map(|_| ()),
         map.entry_ttls(&["a"]).await.map(|_| ()),
+        map.expire_entry("a").ttl(minute).await.map(|_| ()),
+        map.expire_entry("a").await.map(|_| ()),
+        map.expire_entries(&["a"]).ttl(minute).await.map(|_| ()),
+        map.persist_entry("a").await.map(|_| ()),
+        map.persist_entries(&["a"]).await.map(|_| ()),
     ] {
         match outcome {
             Err(Error::Unsupported(message)) => assert!(message.contains("7.4"), "{message}"),
@@ -822,4 +827,373 @@ async fn redisson_add_and_get_ttl() {
     floats.incr_by_float("4", 1.0).await.unwrap();
     assert_eq!(floats.get("4").await.unwrap(), Some(3.23));
     floats.del().await.unwrap();
+}
+
+// --- Task 3: expire_entry, expire_entries, persist_entry, persist_entries ---
+
+async fn native_ints(name: &str) -> Native<i64, i64> {
+    client().await.map_cache_native(name.to_string())
+}
+
+fn between(left: Option<Duration>, low: Duration, high: Duration) {
+    let left = left.expect("the entry has no TTL");
+    assert!(
+        left >= low && left <= high,
+        "{left:?} not in {low:?}..={high:?}"
+    );
+}
+
+// Redisson testExpireEntry, testUpdateEntryExpiration.
+#[tokio::test]
+async fn expire_entry_sets_and_replaces_the_ttl() {
+    let map = native(&unique("mcn-expire-entry")).await;
+    map.insert("key", "value").await.unwrap();
+    assert!(map.expire_entry("key").ttl(ms(20000)).await.unwrap());
+    between(map.entry_ttl("key").await.unwrap(), ms(19800), ms(20000));
+
+    map.insert("key2", "value").await.unwrap();
+    assert!(map
+        .expire_entry("key2")
+        .expire_at(SystemTime::now() + ms(20000))
+        .await
+        .unwrap());
+    between(map.entry_ttl("key2").await.unwrap(), ms(19800), ms(20500));
+
+    // A new time replaces the old one, shorter or longer.
+    assert!(map.expire_entry("key").ttl(secs(5)).await.unwrap());
+    between(map.entry_ttl("key").await.unwrap(), ms(4800), secs(5));
+
+    // HPEXPIRE revives a field whose time ran out until the server deletes it (Redis 7.4 and 8.8); a read deletes it first.
+    map.insert("short", "value").ttl(ms(200)).await.unwrap();
+    sleep(ms(400)).await;
+    assert_eq!(map.get("short").await.unwrap(), None);
+    assert!(!map.expire_entry("short").ttl(secs(2)).await.unwrap());
+}
+
+// The first half of Redisson testEntryEntryIfNotSet, for every condition.
+#[tokio::test]
+async fn expire_entry_on_a_missing_key_is_false() {
+    let map = native(&unique("mcn-expire-missing")).await;
+    assert!(!map.expire_entry("x").ttl(secs(2)).await.unwrap());
+    assert!(!map
+        .expire_entry("x")
+        .expire_at(SystemTime::now() + secs(2))
+        .await
+        .unwrap());
+    assert!(!map
+        .expire_entry("x")
+        .ttl(secs(2))
+        .if_not_set()
+        .await
+        .unwrap());
+    assert_eq!(map.get("x").await.unwrap(), None);
+}
+
+// Review Focus 2: zero and no time clear the TTL, unlike Redisson's expireEntry(k, ZERO), which deletes.
+#[tokio::test]
+async fn expire_entry_with_zero_clears_the_ttl() {
+    let map = native(&unique("mcn-expire-zero")).await;
+    map.insert("a", "1").ttl(secs(60)).await.unwrap();
+    assert!(map.expire_entry("a").ttl(Duration::ZERO).await.unwrap());
+    assert_eq!(map.entry_ttl("a").await.unwrap(), None);
+    assert_eq!(map.get("a").await.unwrap(), s("1"));
+
+    map.insert("b", "1").ttl(secs(60)).await.unwrap();
+    assert!(map.expire_entry("b").await.unwrap());
+    assert_eq!(map.entry_ttl("b").await.unwrap(), None);
+    assert_eq!(map.get("b").await.unwrap(), s("1"));
+
+    // An entry without a TTL is still there: true, as HashMapCache::expire_entry.
+    assert!(map.expire_entry("b").await.unwrap());
+    assert!(!map.expire_entry("missing").await.unwrap());
+    assert!(!map
+        .expire_entry("missing")
+        .ttl(Duration::ZERO)
+        .await
+        .unwrap());
+
+    map.insert("c", "1").ttl(secs(60)).await.unwrap();
+    map.insert("d", "1").await.unwrap();
+    assert_eq!(map.expire_entries(&["c", "d", "missing"]).await.unwrap(), 2);
+    assert_eq!(map.entry_ttl("c").await.unwrap(), None);
+    assert_eq!(map.get("c").await.unwrap(), s("1"));
+}
+
+#[tokio::test]
+async fn a_condition_without_a_time_is_a_config_error() {
+    let map = native(&unique("mcn-condition-config")).await;
+    map.insert("a", "1").ttl(secs(60)).await.unwrap();
+    for outcome in [
+        map.expire_entry("a").if_not_set().await,
+        map.expire_entry("a").if_greater().await,
+        map.expire_entry("a").ttl(Duration::ZERO).if_less().await,
+    ] {
+        match outcome {
+            Err(Error::Config(message)) => {
+                assert!(message.contains("ttl or expire_at"), "{message}")
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+    for outcome in [
+        map.expire_entries(&["a"]).if_greater().await,
+        map.expire_entries::<str>(&[]).if_less().await,
+    ] {
+        assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
+    }
+    // Nothing changed.
+    assert!(map.entry_ttl("a").await.unwrap().is_some());
+}
+
+// Review Focus 4: in Redis, a field without a TTL counts as an infinite TTL.
+#[tokio::test]
+async fn conditions_follow_redis_on_persistent_and_missing_entries() {
+    let map = native(&unique("mcn-conditions")).await;
+    for k in ["p1", "p2", "p3"] {
+        map.insert(k, "1").await.unwrap();
+    }
+    assert!(!map
+        .expire_entry("p1")
+        .ttl(secs(10))
+        .if_greater()
+        .await
+        .unwrap());
+    assert_eq!(map.entry_ttl("p1").await.unwrap(), None);
+    assert!(map
+        .expire_entry("p2")
+        .ttl(secs(10))
+        .if_less()
+        .await
+        .unwrap());
+    assert!(map.entry_ttl("p2").await.unwrap().is_some());
+    assert!(map
+        .expire_entry("p3")
+        .ttl(secs(10))
+        .if_not_set()
+        .await
+        .unwrap());
+    assert!(map.entry_ttl("p3").await.unwrap().is_some());
+
+    assert!(!map
+        .expire_entry("x")
+        .ttl(secs(10))
+        .if_greater()
+        .await
+        .unwrap());
+    assert!(!map.expire_entry("x").ttl(secs(10)).if_less().await.unwrap());
+    assert!(!map
+        .expire_entry("x")
+        .ttl(secs(10))
+        .if_not_set()
+        .await
+        .unwrap());
+
+    map.insert("t", "1").ttl(secs(60)).await.unwrap();
+    assert!(!map
+        .expire_entry("t")
+        .ttl(secs(10))
+        .if_greater()
+        .await
+        .unwrap());
+    between(map.entry_ttl("t").await.unwrap(), secs(50), secs(60));
+    assert!(map
+        .expire_entry("t")
+        .ttl(secs(120))
+        .if_greater()
+        .await
+        .unwrap());
+    between(map.entry_ttl("t").await.unwrap(), secs(110), secs(120));
+    assert!(map.expire_entry("t").ttl(secs(10)).if_less().await.unwrap());
+    between(map.entry_ttl("t").await.unwrap(), secs(9), secs(10));
+    assert!(!map
+        .expire_entry("t")
+        .ttl(secs(30))
+        .if_not_set()
+        .await
+        .unwrap());
+    assert!(map
+        .expire_entry("t")
+        .expire_at(SystemTime::now() + secs(5))
+        .if_less()
+        .await
+        .unwrap());
+    between(map.entry_ttl("t").await.unwrap(), secs(4), ms(5500));
+
+    // The last condition wins.
+    map.insert("w", "1").await.unwrap();
+    assert!(map
+        .expire_entry("w")
+        .ttl(secs(10))
+        .if_greater()
+        .if_less()
+        .await
+        .unwrap());
+
+    // The same rules for several entries.
+    for k in ["q1", "q2"] {
+        map.insert(k, "1").await.unwrap();
+    }
+    map.insert("q3", "1").ttl(secs(60)).await.unwrap();
+    assert_eq!(
+        map.expire_entries(&["q1", "q3", "x"])
+            .ttl(secs(10))
+            .if_greater()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        map.expire_entries(&["q1", "q3", "x"])
+            .ttl(secs(10))
+            .if_less()
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        map.expire_entries(&["q1", "q2", "x"])
+            .expire_at(SystemTime::now() + secs(30))
+            .if_not_set()
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+// Redisson testExpireEntries, testEntryEntries, testEntryEntriesIfNotSet, testExpireEntriesIfNotSet.
+#[tokio::test]
+async fn expire_entries_counts_changed_entries() {
+    let map = native(&unique("mcn-expire-entries")).await;
+    for k in ["key1", "key2", "key3", "key4"] {
+        map.insert(k, "value").await.unwrap();
+    }
+    assert_eq!(
+        map.expire_entries(&["key1", "key2", "missing"])
+            .ttl(ms(20000))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        map.expire_entries(&["key3", "key4"])
+            .expire_at(SystemTime::now() + ms(20000))
+            .await
+            .unwrap(),
+        2
+    );
+    between(map.entry_ttl("key1").await.unwrap(), ms(19800), ms(20000));
+    between(map.entry_ttl("key3").await.unwrap(), ms(19800), ms(20500));
+
+    map.insert("plain", "value").await.unwrap();
+    assert_eq!(
+        map.expire_entries(&["key1", "plain"])
+            .ttl(secs(2))
+            .if_not_set()
+            .await
+            .unwrap(),
+        1
+    );
+    between(map.entry_ttl("key1").await.unwrap(), ms(19000), ms(20000));
+    between(map.entry_ttl("plain").await.unwrap(), ms(1900), secs(2));
+
+    // A key listed twice counts twice.
+    assert_eq!(
+        map.expire_entries(&["key2", "key2"])
+            .ttl(ms(300))
+            .await
+            .unwrap(),
+        2
+    );
+    sleep(ms(500)).await;
+    // A read deletes the expired field; HPEXPIRE alone would revive it until the server's own clean-up runs.
+    assert_eq!(map.get("key2").await.unwrap(), None);
+    assert_eq!(map.expire_entries(&["key2"]).ttl(secs(2)).await.unwrap(), 0);
+    assert_eq!(
+        map.expire_entries::<str>(&[]).ttl(secs(2)).await.unwrap(),
+        0
+    );
+    assert_eq!(map.expire_entries::<str>(&[]).await.unwrap(), 0);
+}
+
+// Redisson testClearExpire for entries: clearExpire(K) and clearExpire(Set).
+#[tokio::test]
+async fn persist_entry_reports_a_removed_ttl() {
+    let map = native(&unique("mcn-persist")).await;
+    map.insert("ttl", "1").ttl(secs(60)).await.unwrap();
+    map.insert("plain", "1").await.unwrap();
+    assert!(map.persist_entry("ttl").await.unwrap());
+    assert_eq!(map.entry_ttl("ttl").await.unwrap(), None);
+    assert_eq!(map.get("ttl").await.unwrap(), s("1"));
+    assert!(!map.persist_entry("plain").await.unwrap());
+    assert!(!map.persist_entry("missing").await.unwrap());
+
+    map.insert("ttl", "1").ttl(secs(60)).await.unwrap();
+    assert_eq!(
+        map.persist_entries(&["ttl", "plain", "missing"])
+            .await
+            .unwrap(),
+        vec![true, false, false]
+    );
+    assert_eq!(map.entry_ttl("ttl").await.unwrap(), None);
+    assert!(map.persist_entries::<str>(&[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn redisson_expire_entry_if_not_set() {
+    let map = native(&unique("mcn-map")).await;
+    map.insert("key", "value").await.unwrap();
+    map.expire_entry("key")
+        .ttl(ms(20000))
+        .if_not_set()
+        .await
+        .unwrap();
+    between(map.entry_ttl("key").await.unwrap(), ms(19800), ms(20000));
+
+    map.insert("key2", "value").await.unwrap();
+    map.expire_entry("key2")
+        .expire_at(SystemTime::now() + ms(20000))
+        .if_not_set()
+        .await
+        .unwrap();
+    between(map.entry_ttl("key2").await.unwrap(), ms(19800), ms(20500));
+}
+
+#[tokio::test]
+async fn redisson_entry_entry_if_not_set() {
+    let cache = native_ints(&unique("mcn-testUpdateEntryExpiration")).await;
+    cache.insert(&1, &10).await.unwrap();
+    cache.insert(&2, &20).await.unwrap();
+    cache.insert(&3, &30).ttl(secs(1)).await.unwrap();
+    cache
+        .insert(&4, &30)
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+
+    assert!(cache
+        .expire_entry(&2)
+        .ttl(secs(2))
+        .if_not_set()
+        .await
+        .unwrap());
+    assert!(!cache
+        .expire_entry(&3)
+        .ttl(secs(4))
+        .if_not_set()
+        .await
+        .unwrap());
+    assert!(!cache
+        .expire_entry(&4)
+        .expire_at(SystemTime::now() + secs(4))
+        .if_not_set()
+        .await
+        .unwrap());
+    between(cache.entry_ttl(&2).await.unwrap(), ms(1900), secs(2));
+
+    sleep(ms(1200)).await;
+    assert!(cache.contains_key(&2).await.unwrap());
+    assert!(!cache.contains_key(&3).await.unwrap());
+    assert!(!cache.contains_key(&4).await.unwrap());
+    sleep(ms(1300)).await;
+    assert!(!cache.contains_key(&2).await.unwrap());
 }

@@ -440,6 +440,12 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `remainTimeToLive(k)` | `entry_ttl(&k)` → `Option<Duration>`; `None` for both a missing entry (`-2`) and one without a time to live (`-1`) |
 | `remainTimeToLive(Set)` | `entry_ttls(&[&k, ..])` → `Vec<Option<Duration>>` in key order, `None` for both `-1` and `-2` |
 | `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)`; keep the entry's time to live |
+| `expireEntry(k, Duration\|Instant)` | `expire_entry(&k).ttl(d)` / `.expire_at(t)` → `bool`; `.ttl(Duration::ZERO)` removes the TTL, where Redisson's `expireEntry(k, ZERO)` deletes the entry |
+| `expireEntryIfNotSet(k, Duration\|Instant)`, `expireEntryIfGreater(..)`, `expireEntryIfLess(..)` | `expire_entry(&k).ttl(d)` / `.expire_at(t)` with `.if_not_set()`, `.if_greater()`, `.if_less()` |
+| `expireEntries(keys, Duration\|Instant)` | `expire_entries(&[&k, ..]).ttl(d)` / `.expire_at(t)` → `usize` |
+| `expireEntriesIfNotSet(keys, ..)`, `expireEntriesIfGreater(keys, ..)`, `expireEntriesIfLess(keys, ..)` | `expire_entries(&[&k, ..])…` with `.if_not_set()`, `.if_greater()`, `.if_less()` |
+| `clearExpire(k)` | `persist_entry(&k)` → `bool` |
+| `clearExpire(Set)` | `persist_entries(&[&k, ..])` → `Vec<bool>` in key order |
 
 ## LocalCachedMap
 

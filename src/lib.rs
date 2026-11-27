@@ -66,7 +66,9 @@ pub mod hash_map_cache {
 pub mod map_cache_native {
     pub use crate::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};
     pub use crate::collections::map::load::LoadAll;
-    pub use crate::collections::map_cache_native::{Insert, Replace, Set, TryInsert};
+    pub use crate::collections::map_cache_native::{
+        ExpireEntries, ExpireEntry, Insert, Replace, Set, TryInsert,
+    };
 }
 
 /// The builders [`SortedSet`] methods return.

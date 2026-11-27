@@ -82,3 +82,53 @@ pub(super) static COMPARE_AND_SET_KEEP_TTL: LazyLock<Lua> = LazyLock::new(|| {
         return 0",
     )
 });
+
+/// RedissonMapCacheNative.expireEntryAsyncInternal: `ARGV` = `[ms, key, expire command]`; returns `1` when it set the time.
+pub(super) static EXPIRE_ENTRY: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local expireSet = redis.call(ARGV[3], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); \
+         if #expireSet > 0 and expireSet[1] >= 1 then \
+         return 1;\
+         end; \
+         return 0; ",
+    )
+});
+
+/// RedissonMapCacheNative.expireEntryAsync(param, …): `ARGV` = `[ms, key, NX|GT|LT, expire command]`; returns `1` when it set the time.
+pub(super) static EXPIRE_ENTRY_IF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local expireSet = redis.call(ARGV[4], KEYS[1], ARGV[1], ARGV[3], 'fields', 1, ARGV[2]); \
+         if #expireSet > 0 and expireSet[1] >= 1 then \
+         return 1;\
+         end; \
+         return 0; ",
+    )
+});
+
+/// RedissonMapCacheNative.expireEntriesAsyncInternal(keys, ms, …): `ARGV` = `[ms, expire command, key…]`; returns how many it changed.
+pub(super) static EXPIRE_ENTRIES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local result = 0;\
+         for j = 3, #ARGV, 1 do \
+         local expireSet = redis.call(ARGV[2], KEYS[1], ARGV[1], 'fields', 1, ARGV[j]); \
+         if #expireSet > 0 and expireSet[1] >= 1 then \
+         result = result + 1;\
+         end; \
+         end; \
+         return result; ",
+    )
+});
+
+/// RedissonMapCacheNative.expireEntriesAsyncInternal(param, keys, ms, …): `ARGV` = `[NX|GT|LT, ms, expire command, key…]`; returns how many it changed.
+pub(super) static EXPIRE_ENTRIES_IF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local result = 0;\
+         for j = 4, #ARGV, 1 do \
+         local expireSet = redis.call(ARGV[3], KEYS[1], ARGV[2], ARGV[1], 'fields', 1, ARGV[j]); \
+         if #expireSet > 0 and expireSet[1] >= 1 then \
+         result = result + 1;\
+         end; \
+         end; \
+         return result; ",
+    )
+});

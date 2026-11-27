@@ -40,6 +40,11 @@ Every `HashMap` method works the same way: `get`, `remove`, `contains_key`, `len
 | `incr_by(&k, n)`, `incr_by_float(&k, x)` | keep the entry's TTL (`HINCRBY` does not clear it). |
 | `entry_ttl(&k)` | the time the entry has left (`HPTTL`). `None` when it has no time to live or is missing. |
 | `entry_ttls(&[&k, ..])` | the same for several keys, in key order; a key listed twice gives two items. |
+| `expire_entry(&k).ttl(d) / .expire_at(t)` | gives a present entry a new time, longer or shorter, and returns whether it changed it; a missing entry gives `false`. Takes `.if_not_set()`, `.if_greater()` or `.if_less()` (see [Conditions](#conditions)). Redisson's `expireEntry` and its `IfNotSet`/`IfGreater`/`IfLess` forms. |
+| `expire_entry(&k)` | without a time, or with `.ttl(Duration::ZERO)`: removes the TTL and returns whether the entry exists. |
+| `expire_entries(&[&k, ..])…` | the same for several entries in one script; returns how many it changed. A key listed twice counts twice. An empty list sends nothing. |
+| `persist_entry(&k)` | removes the TTL (`HPERSIST`); `true` only when there was one. Redisson's `clearExpire(k)`. |
+| `persist_entries(&[&k, ..])` | the same for several keys: one `bool` per key, in key order. Redisson's `clearExpire(keys)`. |
 
 ## Expiry
 
@@ -54,3 +59,13 @@ A write takes `.ttl(Duration)` or `.expire_at(SystemTime)`; when both are set, t
 ## How it is stored
 
 One hash at the raw name, with no braces added and no other keys, the same hash a `HashMap` of that name and a Redisson `RMapCacheNative` use. The server stores each field's deadline. Redisson and redissun clients share the data, and the per-key objects have Redisson's names (`{name}:<hash of the key>:lock`).
+
+## Conditions
+
+`.if_not_set()`, `.if_greater()` and `.if_less()` are Redis's `NX`, `GT` and `LT`; the last one set wins, and each needs `.ttl(d)` or `.expire_at(t)` (without a time it is `Error::Config`). Redis counts an entry without a TTL as one that never expires, so on such an entry `.if_greater()` changes nothing (`false`), `.if_less()` sets the time (`true`), and `.if_not_set()` sets it (`true`). A missing entry is never changed.
+
+`expire_entry(&k)` without a time removes the TTL, as `HashMapCache::expire_entry` removes its limits. Redisson's `expireEntry(k, Duration.ZERO)` sends `hpexpire 0`, which deletes the entry; here `.ttl(Duration::ZERO)` means no time to live, as in every other method.
+
+`expire_entry` and `expire_entries` call no writer, like `persist_entry` and `persist_entries`.
+
+The server deletes a field whose time ran out when it is read, or a little later on its own. Until then, `expire_entry` and `expire_entries` (`HPEXPIRE`) still find it and give it the new time, on Redis 7.4 and 8.8 alike, as with Redisson.

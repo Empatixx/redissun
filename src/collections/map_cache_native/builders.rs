@@ -1,11 +1,14 @@
 //! The builders [`MapCacheNative`] write methods return: await them, optionally after setting a time with `.ttl(d)` or `.expire_at(t)`.
 
-use super::scripts::{FAST_PUT, PUT, PUT_IF_ABSENT, PUT_IF_EXIST};
+use super::scripts::{
+    EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF, EXPIRE_ENTRY, EXPIRE_ENTRY_IF, FAST_PUT, PUT, PUT_IF_ABSENT,
+    PUT_IF_EXIST,
+};
 use super::support::{require, Needs};
 use super::ttl::FieldTtl;
 use super::MapCacheNative;
 use crate::codec::Codec;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -242,6 +245,245 @@ where
                 map.map.written(k, v).await?;
             }
             map.map.decode_value(previous)
+        })
+    }
+}
+
+/// Which entries [`ExpireEntry`] and [`ExpireEntries`] change: Redis's `NX`, `GT` and `LT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Condition {
+    Always,
+    IfNotSet,
+    IfGreater,
+    IfLess,
+}
+
+impl Condition {
+    fn param(self) -> Option<&'static str> {
+        match self {
+            Condition::Always => None,
+            Condition::IfNotSet => Some("NX"),
+            Condition::IfGreater => Some("GT"),
+            Condition::IfLess => Some("LT"),
+        }
+    }
+}
+
+/// What an expire builder sends, checked before the server is asked.
+enum ExpirePlan {
+    /// `HPERSIST`: no time, or a zero one.
+    Persist,
+    /// A script with the time and maybe a condition.
+    Set {
+        ms: i64,
+        command: &'static str,
+        param: Option<&'static str>,
+    },
+}
+
+fn expire_plan(ttl: Option<FieldTtl>, condition: Condition) -> Result<ExpirePlan> {
+    let args = ttl.map(FieldTtl::script_args).transpose()?.flatten();
+    match (args, condition.param()) {
+        (None, None) => Ok(ExpirePlan::Persist),
+        (None, Some(_)) => Err(Error::Config(
+            "expire_entry with a condition needs ttl or expire_at".into(),
+        )),
+        (Some((ms, command)), param) => Ok(ExpirePlan::Set { ms, command, param }),
+    }
+}
+
+/// The options both expire builders share: the struct's `ttl`, `expire_at` and the three conditions.
+macro_rules! expire_options {
+    () => {
+        /// Gives the entry `ttl` from now, on the server's clock (`HPEXPIRE`). Zero, like no time, removes the TTL. The last of `ttl` and `expire_at` wins.
+        pub fn ttl(mut self, ttl: Duration) -> Self {
+            self.ttl = Some(FieldTtl::After(ttl));
+            self
+        }
+
+        /// Makes the entry expire at `time`, on the caller's clock (`HPEXPIREAT`). A time in the past deletes it at once. The last of `ttl` and `expire_at` wins.
+        pub fn expire_at(mut self, time: SystemTime) -> Self {
+            self.ttl = Some(FieldTtl::At(time));
+            self
+        }
+
+        /// Changes only an entry without a TTL (`NX`), Redisson's `expireEntryIfNotSet`. Needs a time. The last condition wins.
+        #[doc(alias = "expireEntryIfNotSet", alias = "expireEntriesIfNotSet")]
+        pub fn if_not_set(mut self) -> Self {
+            self.condition = Condition::IfNotSet;
+            self
+        }
+
+        /// Changes only an entry whose new time is later than its current one (`GT`); an entry without a TTL counts as never expiring, so it is not changed. Needs a time. The last condition wins.
+        #[doc(alias = "expireEntryIfGreater", alias = "expireEntriesIfGreater")]
+        pub fn if_greater(mut self) -> Self {
+            self.condition = Condition::IfGreater;
+            self
+        }
+
+        /// Changes only an entry whose new time is earlier than its current one (`LT`); an entry without a TTL counts as never expiring, so it is changed. Needs a time. The last condition wins.
+        #[doc(alias = "expireEntryIfLess", alias = "expireEntriesIfLess")]
+        pub fn if_less(mut self) -> Self {
+            self.condition = Condition::IfLess;
+            self
+        }
+    };
+}
+
+/// A pending [`MapCacheNative::expire_entry`]. Await it after [`ExpireEntry::ttl`] or [`ExpireEntry::expire_at`], and optionally a condition; without a time it removes the TTL.
+#[must_use = "an expire does nothing until it is awaited"]
+pub struct ExpireEntry<'a, K, V, C: Codec, Q: ?Sized> {
+    map: &'a MapCacheNative<K, V, C>,
+    k: &'a Q,
+    ttl: Option<FieldTtl>,
+    condition: Condition,
+}
+
+impl<'a, K, V, C: Codec, Q: ?Sized> ExpireEntry<'a, K, V, C, Q> {
+    pub(super) fn new(map: &'a MapCacheNative<K, V, C>, k: &'a Q) -> Self {
+        Self {
+            map,
+            k,
+            ttl: None,
+            condition: Condition::Always,
+        }
+    }
+
+    expire_options!();
+}
+
+impl<K, V, C: Codec, Q: ?Sized> fmt::Debug for ExpireEntry<'_, K, V, C, Q> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExpireEntry")
+            .field("map", &self.map)
+            .field("ttl", &self.ttl)
+            .field("condition", &self.condition)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, K, V, C, Q> IntoFuture for ExpireEntry<'a, K, V, C, Q>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+    Q: Serialize + ?Sized + Sync + 'a,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let map = self.map;
+            let plan = expire_plan(self.ttl, self.condition)?;
+            require(&map.key, Needs::FieldTtl).await?;
+            let k = map.codec.encode(self.k)?;
+            let (ms, command, param) = match plan {
+                ExpirePlan::Persist => {
+                    let replies = map.persist_fields(std::slice::from_ref(&k)).await?;
+                    // 1: the TTL was removed; -1: the entry has none. Either way it is there and has no TTL now.
+                    return Ok(matches!(replies.first(), Some(1 | -1)));
+                }
+                ExpirePlan::Set { ms, command, param } => (ms, command, param),
+            };
+            let ms = Bytes::from(ms.to_string());
+            let command = Bytes::copy_from_slice(command.as_bytes());
+            let (script, args) = match param {
+                None => (&*EXPIRE_ENTRY, vec![ms, k, command]),
+                Some(param) => (
+                    &*EXPIRE_ENTRY_IF,
+                    vec![ms, k, Bytes::copy_from_slice(param.as_bytes()), command],
+                ),
+            };
+            let flag: i64 = map
+                .key
+                .core
+                .eval(script, vec![map.key.redis_key()], args)
+                .await?;
+            Ok(flag == 1)
+        })
+    }
+}
+
+/// A pending [`MapCacheNative::expire_entries`]. Await it after [`ExpireEntries::ttl`] or [`ExpireEntries::expire_at`], and optionally a condition; without a time it removes the TTLs.
+#[must_use = "an expire does nothing until it is awaited"]
+pub struct ExpireEntries<'a, K, V, C: Codec, Q: ?Sized> {
+    map: &'a MapCacheNative<K, V, C>,
+    ks: &'a [&'a Q],
+    ttl: Option<FieldTtl>,
+    condition: Condition,
+}
+
+impl<'a, K, V, C: Codec, Q: ?Sized> ExpireEntries<'a, K, V, C, Q> {
+    pub(super) fn new(map: &'a MapCacheNative<K, V, C>, ks: &'a [&'a Q]) -> Self {
+        Self {
+            map,
+            ks,
+            ttl: None,
+            condition: Condition::Always,
+        }
+    }
+
+    expire_options!();
+}
+
+impl<K, V, C: Codec, Q: ?Sized> fmt::Debug for ExpireEntries<'_, K, V, C, Q> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExpireEntries")
+            .field("map", &self.map)
+            .field("keys", &self.ks.len())
+            .field("ttl", &self.ttl)
+            .field("condition", &self.condition)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, K, V, C, Q> IntoFuture for ExpireEntries<'a, K, V, C, Q>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+    Q: Serialize + ?Sized + Sync + 'a,
+{
+    type Output = Result<usize>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let map = self.map;
+            let plan = expire_plan(self.ttl, self.condition)?;
+            if self.ks.is_empty() {
+                return Ok(0);
+            }
+            require(&map.key, Needs::FieldTtl).await?;
+            let fields = self
+                .ks
+                .iter()
+                .map(|k| map.codec.encode(*k))
+                .collect::<Result<Vec<Bytes>>>()?;
+            let (ms, command, param) = match plan {
+                ExpirePlan::Persist => {
+                    let replies = map.persist_fields(&fields).await?;
+                    return Ok(replies.iter().filter(|&&r| r == 1 || r == -1).count());
+                }
+                ExpirePlan::Set { ms, command, param } => (ms, command, param),
+            };
+            let ms = Bytes::from(ms.to_string());
+            let command = Bytes::copy_from_slice(command.as_bytes());
+            let (script, mut args) = match param {
+                None => (&*EXPIRE_ENTRIES, vec![ms, command]),
+                Some(param) => (
+                    &*EXPIRE_ENTRIES_IF,
+                    vec![Bytes::copy_from_slice(param.as_bytes()), ms, command],
+                ),
+            };
+            args.extend(fields);
+            let changed: usize = map
+                .key
+                .core
+                .eval(script, vec![map.key.redis_key()], args)
+                .await?;
+            Ok(changed)
         })
     }
 }
