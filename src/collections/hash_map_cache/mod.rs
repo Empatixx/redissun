@@ -252,7 +252,6 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
     }
 }
 
-/// Marks the cache `key` in Redis so every client's writes publish their entry events, as Redisson's `addListener` does.
 /// [`HashMapCache::length_prefix`] for the cache under `key`.
 pub(crate) async fn length_prefix_of(key: &Key) -> Result<LengthPrefix> {
     let prefix = key
@@ -283,6 +282,7 @@ pub(crate) async fn eviction_feed(key: &Key) -> Result<EvictionFeed> {
     Ok(EvictionFeed::new(subscriptions, receivers, prefix))
 }
 
+/// Marks the cache `key` in Redis so every client's writes publish their entry events, as Redisson's `addListener` does.
 pub(crate) async fn mark_listeners(key: &Key) -> Result<()> {
     let options = names::options(key.name());
     let mut cmd = redis::cmd("HSET");
