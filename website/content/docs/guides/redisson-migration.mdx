@@ -392,6 +392,11 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 | `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)` |
 | `putAll(map[, ttl, unit[, maxIdle, unit]])`, `putAll(map, batchSize)` | `extend(entries)[.ttl(ttl)][.max_idle(idle)][.batch_size(n)]`; clears the TTL without `.ttl()`, unlike Redisson's `putAll(map)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
+| `expireEntry(k, ttl, maxIdle)`, `updateEntryExpiration(k, ttl, unit, maxIdle, unit)` | `expire_entry(&k)[.ttl(ttl)][.max_idle(idle)]` → `bool`; leaving both out is Redisson's `expireEntry(k, ZERO, ZERO)` |
+| `expireEntryIfNotSet(k, ttl, maxIdle)` | `expire_entry(&k).ttl(ttl).if_not_set()` |
+| `expireEntries(keys, ttl, maxIdle)`, `expireEntriesIfNotSet(keys, ttl, maxIdle)` | `expire_entries(&[&k, ..])[.ttl(ttl)][.max_idle(idle)][.if_not_set()]` → `usize` |
+| `getWithTTLOnly(k)` | `peek(&k)` |
+| `getAllWithTTLOnly(keys)` | `peek_many(&[&k, ..])` → `Vec<Option<V>>` in key order |
 | `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `hash_map::Entry`; a write clears the entry's TTL and max idle, unlike Redisson's `compute`, which keeps them |
 | `compute(k, ttl, f)`, `computeIfAbsent(k, ttl, f)` | `entry(&k).ttl(ttl)` |
 | `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |

@@ -55,7 +55,9 @@ pub mod hash_map {
 
 /// The builders [`HashMapCache`] methods return.
 pub mod hash_map_cache {
-    pub use crate::collections::hash_map_cache::{EntryRequest, Extend, Insert, Set, TryInsert};
+    pub use crate::collections::hash_map_cache::{
+        EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Set, TryInsert,
+    };
 }
 
 /// The builders [`SortedSet`] methods return.

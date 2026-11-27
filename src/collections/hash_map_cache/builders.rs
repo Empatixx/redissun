@@ -1,6 +1,9 @@
 //! The builders [`HashMapCache`] write methods return: await them, optionally after setting a time limit.
 
-use super::scripts::{PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS};
+use super::scripts::{
+    EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF_NOT_SET, EXPIRE_ENTRY, EXPIRE_ENTRY_IF_NOT_SET,
+    PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS,
+};
 use super::{limits, HashMapCache, Name, PUBLISH};
 use crate::codec::Codec;
 use crate::collections::map::entry::{Entry, Target};
@@ -333,6 +336,176 @@ where
                     .await?;
             }
             Ok(())
+        })
+    }
+}
+
+/// A pending [`HashMapCache::expire_entry`]. Await it, optionally after setting [`ExpireEntry::ttl`], [`ExpireEntry::max_idle`] or [`ExpireEntry::if_not_set`].
+#[must_use = "an expire_entry does nothing until it is awaited"]
+pub struct ExpireEntry<'a, K, V, C: Codec, Q: ?Sized> {
+    cache: &'a HashMapCache<K, V, C>,
+    k: &'a Q,
+    ttl: Option<Duration>,
+    max_idle: Option<Duration>,
+    if_not_set: bool,
+}
+
+impl<'a, K, V, C: Codec, Q: ?Sized> ExpireEntry<'a, K, V, C, Q> {
+    pub(super) fn new(cache: &'a HashMapCache<K, V, C>, k: &'a Q) -> Self {
+        Self {
+            cache,
+            k,
+            ttl: None,
+            max_idle: None,
+            if_not_set: false,
+        }
+    }
+
+    /// Makes the entry expire after `ttl` from now, whether it is read or not. Zero, like leaving it out, removes the time to live.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Makes the entry expire when nobody has read it for `max_idle`, starting now. Every read starts the time again. Zero, like leaving it out, removes the idle limit.
+    pub fn max_idle(mut self, max_idle: Duration) -> Self {
+        self.max_idle = Some(max_idle);
+        self
+    }
+
+    /// Changes the entry only when it has neither a time to live nor an idle limit, Redisson's `expireEntryIfNotSet`.
+    #[doc(alias = "expireEntryIfNotSet")]
+    pub fn if_not_set(mut self) -> Self {
+        self.if_not_set = true;
+        self
+    }
+}
+
+impl<'a, K, V, C, Q> IntoFuture for ExpireEntry<'a, K, V, C, Q>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
+    V: Send + Sync + 'a,
+    C: Codec,
+    Q: Serialize + ?Sized + Sync + 'a,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let cache = self.cache;
+            let limits = limits(self.ttl, self.max_idle)?;
+            let key = cache.codec.encode(self.k)?;
+            let script = if self.if_not_set {
+                &*EXPIRE_ENTRY_IF_NOT_SET
+            } else {
+                &*EXPIRE_ENTRY
+            };
+            let changed: i64 = cache
+                .key
+                .core
+                .eval(
+                    script,
+                    cache.redis_keys(&[
+                        Name::Main,
+                        Name::Timeout,
+                        Name::Idle,
+                        Name::LastAccess,
+                        Name::Options,
+                    ]),
+                    limits.arguments(vec![key]),
+                )
+                .await?;
+            Ok(changed == 1)
+        })
+    }
+}
+
+/// A pending [`HashMapCache::expire_entries`]. Await it, optionally after setting [`ExpireEntries::ttl`], [`ExpireEntries::max_idle`] or [`ExpireEntries::if_not_set`].
+#[must_use = "an expire_entries does nothing until it is awaited"]
+pub struct ExpireEntries<'a, K, V, C: Codec, Q: ?Sized> {
+    cache: &'a HashMapCache<K, V, C>,
+    ks: &'a [&'a Q],
+    ttl: Option<Duration>,
+    max_idle: Option<Duration>,
+    if_not_set: bool,
+}
+
+impl<'a, K, V, C: Codec, Q: ?Sized> ExpireEntries<'a, K, V, C, Q> {
+    pub(super) fn new(cache: &'a HashMapCache<K, V, C>, ks: &'a [&'a Q]) -> Self {
+        Self {
+            cache,
+            ks,
+            ttl: None,
+            max_idle: None,
+            if_not_set: false,
+        }
+    }
+
+    /// Makes each entry expire after `ttl` from now, whether it is read or not. Zero, like leaving it out, removes the time to live.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Makes each entry expire when nobody has read it for `max_idle`, starting now. Every read starts the time again. Zero, like leaving it out, removes the idle limit.
+    pub fn max_idle(mut self, max_idle: Duration) -> Self {
+        self.max_idle = Some(max_idle);
+        self
+    }
+
+    /// Changes only the entries that have neither a time to live nor an idle limit, Redisson's `expireEntriesIfNotSet`.
+    #[doc(alias = "expireEntriesIfNotSet")]
+    pub fn if_not_set(mut self) -> Self {
+        self.if_not_set = true;
+        self
+    }
+}
+
+impl<'a, K, V, C, Q> IntoFuture for ExpireEntries<'a, K, V, C, Q>
+where
+    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
+    V: Send + Sync + 'a,
+    C: Codec,
+    Q: Serialize + ?Sized + Sync + 'a,
+{
+    type Output = Result<usize>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let cache = self.cache;
+            // Checked before anything else, so a bad duration fails even with no keys.
+            let limits = limits(self.ttl, self.max_idle)?;
+            if self.ks.is_empty() {
+                return Ok(0);
+            }
+            let keys = self
+                .ks
+                .iter()
+                .map(|k| cache.codec.encode(*k))
+                .collect::<Result<std::vec::Vec<_>>>()?;
+            let script = if self.if_not_set {
+                &*EXPIRE_ENTRIES_IF_NOT_SET
+            } else {
+                &*EXPIRE_ENTRIES
+            };
+            let changed: usize = cache
+                .key
+                .core
+                .eval(
+                    script,
+                    cache.redis_keys(&[
+                        Name::Main,
+                        Name::Timeout,
+                        Name::Idle,
+                        Name::LastAccess,
+                        Name::Options,
+                    ]),
+                    limits.arguments(keys),
+                )
+                .await?;
+            Ok(changed)
         })
     }
 }

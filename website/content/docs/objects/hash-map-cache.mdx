@@ -37,6 +37,8 @@ let found = sessions.get("abc").await?;
 | `to_hash_map()` | every live entry in one call |
 | `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
+| `expire_entry(&k)`, `expire_entries(&[&k, ..])` | set new limits on live entries, starting now: `.ttl(d)`, `.max_idle(d)`, and `.if_not_set()` to touch only entries without a limit. Without `.ttl`/`.max_idle` both limits are removed. Return whether the entry was changed (`bool`) or how many were (`usize`); a missing or expired entry is not changed. Count as a use for the size limit. |
+| `peek(&k)`, `peek_many(&[&k, ..])` | read without it counting as a read, like `lru::LruCache::peek`: they honour the time to live but ignore max idle, do not start the idle time again and are not a use for the size limit |
 | `entry(&k)`, `entry(&k).ttl(d)` | the key's value under its lock, like `HashMap::entry`. See "Entries" below. |
 | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` | the object Redisson keeps for one key, the same names as Redisson's `getLock(key)` and friends (`{name}:<key hash>:lock`) |
 | `len()`, `is_empty()`, `clear()` | `len` is the number of entries in Redis; as in Redisson it counts expired entries until the clean-up deletes them |

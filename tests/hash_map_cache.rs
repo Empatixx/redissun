@@ -2983,3 +2983,235 @@ async fn entry_with_a_huge_ttl_is_a_config_error() {
     let outcome = cache.entry("a").ttl(Duration::MAX).await;
     assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
 }
+
+#[tokio::test]
+async fn expire_entry_sets_and_replaces_limits() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.insert("a", &1u32).await.unwrap();
+    assert!(cache
+        .expire_entry("a")
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap());
+    let left = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left <= Duration::from_millis(300), "{left:?}");
+    assert_eq!(cache.get("a").await.unwrap(), Some(1));
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn expire_entry_without_limits_clears_them() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache
+        .insert("a", &1u32)
+        .ttl(Duration::from_secs(60))
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(cache.expire_entry("a").await.unwrap());
+    assert_eq!(cache.entry_ttl("a").await.unwrap(), None);
+    assert_eq!(cache.get("a").await.unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn expire_entry_on_missing_or_expired_is_false() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    assert!(!cache
+        .expire_entry("missing")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap());
+    cache
+        .insert("a", &1u32)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(200)).await;
+    assert!(!cache
+        .expire_entry("a")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap());
+    assert!(!cache.expire_entry("a").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn expire_entry_if_not_set_only_touches_unlimited_entries() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache
+        .insert("a", &1u32)
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    cache.insert("b", &2u32).await.unwrap();
+    assert!(!cache
+        .expire_entry("a")
+        .ttl(Duration::from_secs(5))
+        .if_not_set()
+        .await
+        .unwrap());
+    let left = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left > Duration::from_secs(50), "{left:?}");
+    assert!(cache
+        .expire_entry("b")
+        .ttl(Duration::from_secs(5))
+        .if_not_set()
+        .await
+        .unwrap());
+    let left = cache.entry_ttl("b").await.unwrap().unwrap();
+    assert!(left <= Duration::from_secs(5), "{left:?}");
+    assert!(!cache
+        .expire_entry("missing")
+        .ttl(Duration::from_secs(5))
+        .if_not_set()
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn expire_entry_max_idle_restarts_on_read() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.insert("a", &1u32).await.unwrap();
+    assert!(cache
+        .expire_entry("a")
+        .max_idle(Duration::from_millis(300))
+        .await
+        .unwrap());
+    for _ in 0..4 {
+        sleep(Duration::from_millis(150)).await;
+        assert_eq!(cache.get("a").await.unwrap(), Some(1));
+    }
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn expire_entries_counts_live_keys() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.insert("a", &1u32).await.unwrap();
+    cache.insert("b", &2u32).await.unwrap();
+    cache.insert("c", &3u32).await.unwrap();
+    assert_eq!(
+        cache
+            .expire_entries(&["a", "b", "missing"])
+            .ttl(Duration::from_secs(60))
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(cache.entry_ttl("b").await.unwrap().is_some());
+    assert_eq!(
+        cache
+            .expire_entries(&["a", "c"])
+            .ttl(Duration::from_secs(5))
+            .if_not_set()
+            .await
+            .unwrap(),
+        1
+    );
+    let left = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left > Duration::from_secs(50), "{left:?}");
+    let left = cache.entry_ttl("c").await.unwrap().unwrap();
+    assert!(left <= Duration::from_secs(5), "{left:?}");
+    assert_eq!(cache.expire_entries(&["a", "b"]).await.unwrap(), 2);
+    assert_eq!(cache.entry_ttl("a").await.unwrap(), None);
+    let none: [&str; 0] = [];
+    assert_eq!(cache.expire_entries(&none).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn expire_entry_with_a_huge_ttl_is_a_config_error() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    let outcome = cache.expire_entry("a").ttl(Duration::MAX).await;
+    assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
+    let outcome = cache.expire_entries(&["a"]).max_idle(Duration::MAX).await;
+    assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn peek_ignores_max_idle_and_does_not_refresh_it() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache
+        .insert("a", &1u32)
+        .max_idle(Duration::from_millis(200))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(cache.peek("a").await.unwrap(), Some(1));
+    }
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    cache
+        .insert("b", &2u32)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    assert_eq!(cache.peek("b").await.unwrap(), Some(2));
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(cache.peek("b").await.unwrap(), None);
+    assert_eq!(cache.peek("missing").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn peek_does_not_count_as_a_use() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.set_max_size(2, EvictionMode::Lru).await.unwrap();
+    cache.insert("a", &1u32).await.unwrap();
+    pause().await;
+    cache.insert("b", &2u32).await.unwrap();
+    pause().await;
+    assert_eq!(cache.peek("a").await.unwrap(), Some(1));
+    pause().await;
+    cache.insert("c", &3u32).await.unwrap();
+    assert_eq!(cache.peek("a").await.unwrap(), None);
+    assert_eq!(cache.peek("b").await.unwrap(), Some(2));
+}
+
+#[tokio::test]
+async fn peek_many_keeps_order() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, u32>(unique("cache"));
+    cache.insert("a", &1u32).await.unwrap();
+    cache.insert("b", &2u32).await.unwrap();
+    cache
+        .insert("gone", &3u32)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    cache
+        .insert("idle", &4u32)
+        .max_idle(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        cache
+            .peek_many(&["b", "missing", "gone", "a", "idle"])
+            .await
+            .unwrap(),
+        vec![Some(2), None, None, Some(1), Some(4)]
+    );
+    let none: [&str; 0] = [];
+    assert!(cache.peek_many(&none).await.unwrap().is_empty());
+}

@@ -16,8 +16,9 @@ use bytes::Bytes;
 use futures::{stream, Stream, TryStreamExt};
 use scripts::{
     ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, CONTAINS_VALUE, EVICT, EXPIRE, FAST_PUT_WITH_LIMITS,
-    FAST_REMOVE, GET, GET_ALL, PUT, RANDOM_ENTRIES, RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE,
-    REMOVE_IF, REPLACE, REPLACE_IF, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
+    FAST_REMOVE, GET, GET_ALL, GET_ALL_WITH_TTL_ONLY, GET_WITH_TTL_ONLY, PUT, RANDOM_ENTRIES,
+    RANDOM_KEYS, READ_ALL, REMAIN_TTL, REMOVE, REMOVE_IF, REPLACE, REPLACE_IF, SCAN_ENTRIES,
+    SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -27,7 +28,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-pub use builders::{EntryRequest, Extend, Insert, Set, TryInsert};
+pub use builders::{EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Set, TryInsert};
 pub(crate) use entry_events::LengthPrefix;
 
 /// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
@@ -689,6 +690,82 @@ where
             )
             .await?;
         raw.into_iter().map(|raw| self.decode_value(raw)).collect()
+    }
+
+    /// Returns the value for the key without counting it as a read, like `lru::LruCache::peek`: `None` when it is missing or its time to live has passed. It ignores the idle limit, does not start the idle time again and is not a use for the size limit.
+    #[doc(alias = "getWithTTLOnly")]
+    pub async fn peek<Q>(&self, k: &Q) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let raw: Option<Bytes> = self
+            .key
+            .core
+            .eval(
+                &GET_WITH_TTL_ONLY,
+                self.redis_keys(&[Name::Main, Name::Timeout]),
+                vec![now(), self.codec.encode(k)?],
+            )
+            .await?;
+        self.decode_value(raw)
+    }
+
+    /// Returns the values for several keys like [`HashMapCache::peek`], in the order of the keys: `None` for a key that is missing or whose time to live has passed. Nothing is sent for no keys.
+    #[doc(alias = "getAllWithTTLOnly")]
+    pub async fn peek_many<Q>(&self, ks: &[&Q]) -> Result<std::vec::Vec<Option<V>>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if ks.is_empty() {
+            return Ok(std::vec::Vec::new());
+        }
+        let mut args = std::vec::Vec::with_capacity(ks.len() + 1);
+        args.push(now());
+        for k in ks {
+            args.push(self.codec.encode(*k)?);
+        }
+        let raw: std::vec::Vec<Option<Bytes>> = self
+            .key
+            .core
+            .eval(
+                &GET_ALL_WITH_TTL_ONLY,
+                self.redis_keys(&[Name::Main, Name::Timeout]),
+                args,
+            )
+            .await?;
+        raw.into_iter().map(|raw| self.decode_value(raw)).collect()
+    }
+
+    /// Sets new limits on a live entry and returns whether there was one. Without [`ExpireEntry::ttl`] and [`ExpireEntry::max_idle`] both limits are removed; [`ExpireEntry::if_not_set`] changes only an entry that has no limit. The deadlines start now, and the call counts as a use for the size limit.
+    ///
+    /// ```ignore
+    /// cache.expire_entry("a").ttl(Duration::from_secs(60)).await?;
+    /// cache.expire_entry("b").max_idle(Duration::from_secs(30)).if_not_set().await?;
+    /// cache.expire_entry("c").await?; // never expires
+    /// ```
+    #[doc(
+        alias = "expireEntry",
+        alias = "expireEntryIfNotSet",
+        alias = "updateEntryExpiration"
+    )]
+    pub fn expire_entry<'a, Q>(&'a self, k: &'a Q) -> ExpireEntry<'a, K, V, C, Q>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        ExpireEntry::new(self, k)
+    }
+
+    /// Sets new limits on several entries like [`HashMapCache::expire_entry`] and returns how many live entries it changed. Nothing is sent for no keys.
+    #[doc(alias = "expireEntries", alias = "expireEntriesIfNotSet")]
+    pub fn expire_entries<'a, Q>(&'a self, ks: &'a [&'a Q]) -> ExpireEntries<'a, K, V, C, Q>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        ExpireEntries::new(self, ks)
     }
 
     /// Returns whether a live entry holds `v`, compared by its encoded bytes. It reads every value on the server. As in Redisson, only the first entry that holds `v` is looked at: when that one has expired, the answer is `false`.
