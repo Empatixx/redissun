@@ -22,6 +22,10 @@ Every pop is one atomic Redis command. If many programs pop from the same deque,
 | `push_front(&v)` | `LPUSH` | |
 | `pop_back()` | `RPOP` | returns `None` when empty |
 | `pop_front()` | `LPOP` | returns `None` when empty |
+| `extend_back(values)`, `extend_front(values)` | `RPUSH`, `LPUSH` | return the new length. Add `.if_exists()` to push only onto an existing deque (`RPUSHX`, `LPUSHX`). |
+| `pop_front_many(n)`, `pop_back_many(n)` | Lua script | up to `n` values, atomically |
+| `remove_value(&v)`, `remove_last_value(&v)` | `LREM` | removes the equal value nearest the front or the back |
+| `to_vec()`, `drain()` | `LRANGE`, Lua script | all values; `drain` also empties the deque |
 | `front()` and `back()` | `LINDEX` | read without removing |
 | `len()` and `is_empty()` | `LLEN` | |
 | `clear()` | `DEL` | |

@@ -811,8 +811,9 @@ where
         self.local.len()
     }
 
-    /// Returns the entries in the local cache of this instance.
-    pub fn cached_entries(&self) -> Result<std::vec::Vec<(K, V)>> {
+    /// Returns the entries in the local cache of this instance. Redisson's `getCachedMap`.
+    #[doc(alias = "getCachedMap")]
+    pub fn local_entries(&self) -> Result<std::vec::Vec<(K, V)>> {
         let entries = self.local.store().entries();
         entries
             .iter()

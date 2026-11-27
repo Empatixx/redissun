@@ -67,27 +67,27 @@ async fn inserting_again_replaces_the_ttl() {
 }
 
 #[tokio::test]
-async fn insert_nx_keeps_a_live_value_and_its_ttl() {
+async fn try_insert_keeps_a_live_value_and_its_ttl() {
     let set = client().await.hash_set_cache::<String>(unique("sc"));
     assert!(set
-        .insert_nx("a")
+        .try_insert("a")
         .ttl(Duration::from_secs(60))
         .await
         .unwrap());
-    assert!(!set.insert_nx("a").await.unwrap());
+    assert!(!set.try_insert("a").await.unwrap());
     let left = set.entry_ttl("a").await.unwrap().unwrap();
     assert!(left > Duration::from_secs(50));
 }
 
 #[tokio::test]
-async fn insert_nx_replaces_an_expired_value() {
+async fn try_insert_replaces_an_expired_value() {
     let set = client().await.hash_set_cache::<String>(unique("sc"));
     set.insert("a")
         .ttl(Duration::from_millis(200))
         .await
         .unwrap();
     sleep(Duration::from_millis(400)).await;
-    assert!(set.insert_nx("a").await.unwrap());
+    assert!(set.try_insert("a").await.unwrap());
     assert!(set.contains("a").await.unwrap());
 }
 
@@ -243,31 +243,31 @@ fn object(name: &str, value: &str) -> TestObject {
 
 // Redisson: testAddIfAbsent
 #[tokio::test]
-async fn insert_nx_with_a_ttl_accepts_the_value_after_expiry() {
+async fn try_insert_with_a_ttl_accepts_the_value_after_expiry() {
     let set = client().await.hash_set_cache::<String>(unique("test"));
     let ttl = Duration::from_millis(500);
-    assert!(set.insert_nx("200").ttl(ttl).await.unwrap());
-    assert!(!set.insert_nx("200").ttl(ttl).await.unwrap());
+    assert!(set.try_insert("200").ttl(ttl).await.unwrap());
+    assert!(!set.try_insert("200").ttl(ttl).await.unwrap());
     assert!(set.contains("200").await.unwrap());
-    assert!(set.insert_nx("100").ttl(ttl).await.unwrap());
-    assert!(!set.insert_nx("100").ttl(ttl).await.unwrap());
+    assert!(set.try_insert("100").ttl(ttl).await.unwrap());
+    assert!(!set.try_insert("100").ttl(ttl).await.unwrap());
     assert!(set.contains("100").await.unwrap());
     sleep(ttl + Duration::from_millis(50)).await;
     assert!(!set.contains("100").await.unwrap());
     assert!(!set.contains("200").await.unwrap());
-    assert!(set.insert_nx("100").ttl(ttl).await.unwrap());
-    assert!(set.insert_nx("200").ttl(ttl).await.unwrap());
+    assert!(set.try_insert("100").ttl(ttl).await.unwrap());
+    assert!(set.try_insert("200").ttl(ttl).await.unwrap());
 }
 
 // Redisson: testTryAdd
 #[tokio::test]
-async fn insert_nx_refuses_a_value_already_in_the_set() {
+async fn try_insert_refuses_a_value_already_in_the_set() {
     let set = client().await.hash_set_cache::<String>(unique("list"));
     for i in 0..200 {
-        assert!(set.insert_nx(&format!("name{i}")).await.unwrap());
+        assert!(set.try_insert(&format!("name{i}")).await.unwrap());
     }
     assert_eq!(set.len().await.unwrap(), 200);
-    assert!(!set.insert_nx("name10").await.unwrap());
+    assert!(!set.try_insert("name10").await.unwrap());
     assert_eq!(set.len().await.unwrap(), 200);
 }
 

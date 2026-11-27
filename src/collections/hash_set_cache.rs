@@ -104,7 +104,7 @@ static SCAN: LazyLock<Lua> = LazyLock::new(|| {
     )
 });
 
-/// A pending [`HashSetCache::insert`] or [`HashSetCache::insert_nx`]. Await it, optionally after setting [`SetInsert::ttl`].
+/// A pending [`HashSetCache::insert`] or [`HashSetCache::try_insert`]. Await it, optionally after setting [`SetInsert::ttl`].
 #[must_use = "an insert does nothing until it is awaited"]
 pub struct SetInsert<'a, V, C: Codec, Q: ?Sized> {
     set: &'a HashSetCache<V, C>,
@@ -275,7 +275,8 @@ where
     }
 
     /// Adds a value only when there is no live one, and keeps the time limit of a live one, like Redisson's `tryAdd`; returns whether it was added.
-    pub fn insert_nx<'a, Q>(&'a self, v: &'a Q) -> SetInsert<'a, V, C, Q>
+    #[doc(alias = "tryAdd")]
+    pub fn try_insert<'a, Q>(&'a self, v: &'a Q) -> SetInsert<'a, V, C, Q>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,

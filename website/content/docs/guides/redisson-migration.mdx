@@ -152,20 +152,20 @@ Redisson's `range(a, b)` and `trim(a, b)` include both ends. In redissun they ta
 | `add(v)` | `push(&v)` |
 | `addAll(c)` | `extend(&c)` |
 | `add(i, v)` | `insert(i, &v)` |
-| `addAll(i, c)` | `insert_all(i, &c)` |
+| `addAll(i, c)` | `insert_many(i, &c)` |
 | `addBefore(e, v)`, `addAfter(e, v)` | `insert_before(&e, &v)`, `insert_after(&e, &v)` |
 | `get(i)` | `get(i)` |
-| `set(i, v)` | `set(i, &v)`, returns the old value |
-| `fastSet(i, v)` | `fast_set(i, &v)` |
-| `remove(i)` | `remove(i)` |
-| `fastRemove(i)` | `fast_remove(i)` |
+| `set(i, v)` | `replace(i, &v)`, returns the old value |
+| `fastSet(i, v)` | `set(i, &v)` |
+| `remove(i)`, `fastRemove(i)` | `remove(i)` |
 | `remove(v)` | `remove_value(&v)` |
 | `remove(v, n)` | `remove_value_n(&v, n)` |
+| `removeAll(singleton(v))` | `remove_value_all(&v)`, returns how many were removed |
 | `removeAll(c)`, `retainAll(c)` | `remove_values(&c)`, `retain_values(&c)` |
 | `contains(v)`, `containsAll(c)` | `contains(&v)`, `contains_all(&c)` |
 | `indexOf(v)`, `lastIndexOf(v)` | `position(&v)`, `rposition(&v)` |
 | `size()` | `len()` |
-| `readAll()` | `read_all()` |
+| `readAll()` | `to_vec()` |
 | `range(a, b)` | `range(a..=b)` |
 | `range(to)` | `range(..=to)` |
 | `trim(a, b)` | `trim(a..=b)` |
@@ -177,16 +177,17 @@ Redisson's `range(a, b)` and `trim(a, b)` include both ends. In redissun they ta
 | `addLast(v)`, `offer(v)` | `push_back(&v)` |
 | `addFirst(v)` | `push_front(&v)` |
 | `addLast(v...)`, `addFirst(v...)` | `extend_back(&vs)`, `extend_front(&vs)` |
-| `addLastIfExists(v...)`, `addFirstIfExists(v...)` | `extend_back_if_exists(&vs)`, `extend_front_if_exists(&vs)` |
+| `addLastIfExists(v...)`, `addFirstIfExists(v...)` | `extend_back(&vs).if_exists()`, `extend_front(&vs).if_exists()` |
 | `pollFirst()`, `poll()` | `pop_front()` |
 | `pollLast()` | `pop_back()` |
 | `poll(n)`, `pollLast(n)` | `pop_front_many(n)`, `pop_back_many(n)` |
 | `peekFirst()`, `peek()` | `front()` |
 | `peekLast()` | `back()` |
-| `removeFirstOccurrence(v)`, `removeLastOccurrence(v)` | `remove_first_occurrence(&v)`, `remove_last_occurrence(&v)` |
+| `removeFirstOccurrence(v)`, `removeLastOccurrence(v)` | `remove_value(&v)`, `remove_last_value(&v)` |
 | `pollLastAndOfferFirstTo(name)` | `pop_back_push_front(&dest)` |
 | `descendingIterator()` | `iter_rev()` |
-| `drainTo(c)`, `drainTo(c, n)` | `drain()`, `drain_up_to(n)` |
+| `drainTo(c)`, `drainTo(c, n)` | `drain()`, `pop_front_many(n)` |
+| `readAll()` | `to_vec()` |
 
 ## HashSet
 
@@ -213,14 +214,15 @@ Redisson's `range(a, b)` and `trim(a, b)` include both ends. In redissun they ta
 
 ## SortedSet
 
-Redisson's rank ranges include both ends; redissun takes an exclusive Rust range, so `valueRange(a, b)` is `range(a..b + 1)`. Score ranges take any `f64` range, which covers Redisson's inclusive flags. Iteration uses `ZSCAN`, as in Redisson, so its order is not guaranteed.
+Redisson's rank ranges include both ends; redissun takes any Rust range, so `valueRange(a, b)` is `range(a..=b)`. Score ranges take any `f64` range, which covers Redisson's inclusive flags. Iteration uses `ZSCAN`, as in Redisson, so its order is not guaranteed.
 
 | Redisson | redissun |
 |---|---|
 | `add(score, v)` | `insert(&v, score)` |
 | `tryAdd(score, v)`, `addIfAbsent(score, v)` | `try_insert(&v, score)` |
-| `addIfExists`, `addIfGreater`, `addIfLess` | `insert_if_exists`, `insert_if_greater`, `insert_if_less` |
-| `addAll(map)` and the `addAllIf...` variants | `extend` and `extend_if_...` |
+| `addIfExists`, `addIfGreater`, `addIfLess` | `update`, `insert_if_greater`, `insert_if_less` |
+| `addAll(map)` | `extend(entries)` |
+| `addAllIfAbsent`, `addAllIfExist`, `addAllIfGreater`, `addAllIfLess` | `extend(entries).if_absent()`, `.if_exists()`, `.if_greater()`, `.if_less()` |
 | `addAndGetRank`, `addAndGetRevRank` | `insert_and_rank`, `insert_and_rev_rank` |
 | `addScore(v, d)` | `add_score(&v, d)` |
 | `getScore(v)`, `getScore(list)` | `score(&v)`, `scores(&list)` |
@@ -232,13 +234,13 @@ Redisson's rank ranges include both ends; redissun takes an exclusive Rust range
 | `pollFirst(time, unit)`, `takeFirst()` | `pop_first_wait().timeout(t)`, `pop_first_wait()` |
 | `pollLast(time, unit)`, `takeLast()` | `pop_last_wait().timeout(t)`, `pop_last_wait()` |
 | `pollFirst(duration, n)` | `pop_first_many_wait(n).timeout(duration)` |
-| `valueRange(a, b)`, `entryRange(a, b)` | `range(a..b + 1)` |
-| `valueRangeReversed(a, b)` | `rev_range(a..b + 1)` |
+| `valueRange(a, b)`, `entryRange(a, b)` | `range(a..=b)` |
+| `valueRangeReversed(a, b)` | `rev_range(a..=b)` |
 | `valueRange(s, si, e, ei)` | `range_by_score(bounds)` |
 | `valueRange(s, si, e, ei, offset, count)` | `range_by_score_limit(bounds, offset, count)` |
 | `count(s, si, e, ei)` | `count_by_score(bounds)` |
 | `removeRangeByScore(...)` | `remove_by_score(bounds)` |
-| `removeRangeByRank(a, b)` | `remove_range(a..b + 1)` |
+| `removeRangeByRank(a, b)` | `remove_range(a..=b)` |
 | `readUnion`, `readIntersection`, `readDiff` | `union`, `intersection`, `difference` |
 | `union(names)`, `intersection(names)` | `store_union`, `store_intersection` (`_with` for weights and aggregate) |
 
@@ -380,10 +382,10 @@ They map like `Topic`. A `ReliableTopic` also has `size()`, and each `client.rel
 |---|---|
 | `put(k, v)` | `insert(&k, &v)` |
 | `put(k, v, ttl, unit)` | `insert(&k, &v).ttl(ttl)` |
-| `fastPutIfAbsent(k, v)` | `insert_nx(&k, &v)` |
+| `fastPutIfAbsent(k, v)`, `putIfAbsent(k, v)` | `try_insert(&k, &v)`, returns whether it stored the entry |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
 
-Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, and `addListener(...)` is `events()` or `events_of(kinds)` followed by `recv()`. Redisson takes expiry times from the client clock; redissun takes them from the Redis server.
+Both delete expired entries with a background task that is paced the same way. `put(k, v, ttl, unit, maxIdle, unit)` is `insert(&k, &v).ttl(ttl).max_idle(idle)`. `setMaxSize(n, mode)` is `set_max_size(n, mode)`, `trySetMaxSize(n, mode)` is `init_max_size(n, mode)`, and `addListener(...)` is `events()` or `events_of(kinds)` followed by `recv()`. Redisson takes expiry times from the client clock; redissun takes them from the Redis server.
 
 ## VecDeque blocking
 

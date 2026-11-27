@@ -401,7 +401,7 @@ fn years() -> [(&'static str, f64); 4] {
 #[tokio::test]
 async fn extend_if_absent_keeps_scores_of_existing_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984")]).await;
-    assert_eq!(set.extend_if_absent(years()).await.unwrap(), 2);
+    assert_eq!(set.extend(years()).if_absent().await.unwrap(), 2);
     assert_eq!(set.score("1981").await.unwrap(), Some(10.0));
     assert_eq!(set.score("1984").await.unwrap(), Some(11.0));
     assert!(set
@@ -414,7 +414,7 @@ async fn extend_if_absent_keeps_scores_of_existing_values() {
 #[tokio::test]
 async fn extend_if_exists_updates_only_existing_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984")]).await;
-    assert_eq!(set.extend_if_exists(years()).await.unwrap(), 2);
+    assert_eq!(set.extend(years()).if_exists().await.unwrap(), 2);
     assert_eq!(set.score("1981").await.unwrap(), Some(111.0));
     assert_eq!(set.score("1984").await.unwrap(), Some(114.0));
 }
@@ -433,7 +433,7 @@ fn mixed() -> [(&'static str, f64); 5] {
 #[tokio::test]
 async fn extend_if_greater_raises_scores_and_adds_new_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984"), (13.0, "1985")]).await;
-    assert_eq!(set.extend_if_greater(mixed()).await.unwrap(), 3);
+    assert_eq!(set.extend(mixed()).if_greater().await.unwrap(), 3);
     assert_eq!(set.len().await.unwrap(), 5);
     assert_eq!(
         set.scores(&["1981", "1982", "1983", "1984", "1985"])
@@ -453,7 +453,7 @@ async fn extend_if_greater_raises_scores_and_adds_new_values() {
 #[tokio::test]
 async fn extend_if_less_lowers_scores_and_adds_new_values() {
     let set = strings(&[(10.0, "1981"), (11.0, "1984"), (13.0, "1985")]).await;
-    assert_eq!(set.extend_if_less(mixed()).await.unwrap(), 4);
+    assert_eq!(set.extend(mixed()).if_less().await.unwrap(), 4);
     assert_eq!(set.len().await.unwrap(), 5);
     assert_eq!(
         set.scores(&["1981", "1982", "1983", "1984", "1985"])
@@ -485,12 +485,12 @@ async fn insert_if_less_updates_only_with_a_lower_score() {
 
 // Redisson: testAddIfExists
 #[tokio::test]
-async fn insert_if_exists_updates_only_an_existing_value() {
+async fn update_changes_only_an_existing_value() {
     let set = client().await.sorted_set::<String>(unique("zset"));
-    assert!(!set.insert_if_exists("1980", 123.81).await.unwrap());
+    assert!(!set.update("1980", 123.81).await.unwrap());
     assert_eq!(set.score("1980").await.unwrap(), None);
     set.insert("1980", 111.0).await.unwrap();
-    assert!(set.insert_if_exists("1980", 32.0).await.unwrap());
+    assert!(set.update("1980", 32.0).await.unwrap());
     assert_eq!(set.score("1980").await.unwrap(), Some(32.0));
 }
 

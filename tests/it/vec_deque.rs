@@ -132,19 +132,19 @@ async fn deque() -> redissun::VecDeque<i32, redissun::JsonCodec> {
 }
 
 async fn all(deque: &redissun::VecDeque<i32, redissun::JsonCodec>) -> Vec<i32> {
-    deque.read_all().await.unwrap()
+    deque.to_vec().await.unwrap()
 }
 
 // Redisson: testAddIfExists
 #[tokio::test]
 async fn extend_if_exists_only_adds_to_an_existing_deque() {
     let deque = deque().await;
-    assert_eq!(deque.extend_front_if_exists(&[4, 5]).await.unwrap(), 0);
+    assert_eq!(deque.extend_front(&[4, 5]).if_exists().await.unwrap(), 0);
     assert!(!deque.exists().await.unwrap());
     deque.extend_back(&[1, 2, 3]).await.unwrap();
-    assert_eq!(deque.extend_front_if_exists(&[4, 5]).await.unwrap(), 5);
+    assert_eq!(deque.extend_front(&[4, 5]).if_exists().await.unwrap(), 5);
     assert_eq!(all(&deque).await, [5, 4, 1, 2, 3]);
-    assert_eq!(deque.extend_back_if_exists(&[6]).await.unwrap(), 6);
+    assert_eq!(deque.extend_back(&[6]).if_exists().await.unwrap(), 6);
     assert_eq!(all(&deque).await, [5, 4, 1, 2, 3, 6]);
 }
 
@@ -165,24 +165,24 @@ async fn pop_push_moves_an_element_between_two_deques() {
 
 // Redisson: testRemoveLastOccurrence
 #[tokio::test]
-async fn remove_last_occurrence_removes_the_value_nearest_the_back() {
+async fn remove_last_value_removes_the_value_nearest_the_back() {
     let deque = deque().await;
     for value in [3, 1, 2, 3] {
         deque.push_front(&value).await.unwrap();
     }
-    assert!(deque.remove_last_occurrence(&3).await.unwrap());
+    assert!(deque.remove_last_value(&3).await.unwrap());
     assert_eq!(all(&deque).await, [3, 2, 1]);
-    assert!(!deque.remove_last_occurrence(&9).await.unwrap());
+    assert!(!deque.remove_last_value(&9).await.unwrap());
 }
 
 // Redisson: testRemoveFirstOccurrence
 #[tokio::test]
-async fn remove_first_occurrence_removes_the_value_nearest_the_front() {
+async fn remove_value_removes_the_value_nearest_the_front() {
     let deque = deque().await;
     for value in [3, 1, 2, 3] {
         deque.push_front(&value).await.unwrap();
     }
-    assert!(deque.remove_first_occurrence(&3).await.unwrap());
+    assert!(deque.remove_value(&3).await.unwrap());
     assert_eq!(all(&deque).await, [2, 1, 3]);
 }
 
@@ -374,20 +374,20 @@ async fn drain_takes_a_single_value_and_empties_the_deque() {
 
 // Redisson: testDrainTo
 #[tokio::test]
-async fn drain_up_to_takes_the_values_in_order_in_chunks() {
+async fn pop_front_many_takes_the_values_in_order_in_chunks() {
     let deque = deque().await;
     let values: Vec<i32> = (0..100).collect();
     deque.extend_back(values.iter()).await.unwrap();
     assert_eq!(deque.len().await.unwrap(), 100);
-    let mut batch = deque.drain_up_to(10).await.unwrap();
+    let mut batch = deque.pop_front_many(10).await.unwrap();
     assert_eq!(batch, (0..10).collect::<Vec<_>>());
     assert_eq!(deque.len().await.unwrap(), 90);
     for max in [10, 20, 60] {
-        batch.extend(deque.drain_up_to(max).await.unwrap());
+        batch.extend(deque.pop_front_many(max).await.unwrap());
     }
     assert_eq!(deque.len().await.unwrap(), 0);
     assert_eq!(batch, values);
-    assert!(deque.drain_up_to(0).await.unwrap().is_empty());
+    assert!(deque.pop_front_many(0).await.unwrap().is_empty());
 }
 
 // Redisson: testDrainToCollection
@@ -408,7 +408,7 @@ async fn drain_returns_mixed_json_values_in_order() {
 
 // Redisson: testDrainToCollectionLimited
 #[tokio::test]
-async fn drain_up_to_stops_at_the_limit() {
+async fn pop_front_many_stops_at_the_limit() {
     let deque = client()
         .await
         .vec_deque::<serde_json::Value>(unique("deque"));
@@ -418,7 +418,7 @@ async fn drain_up_to_stops_at_the_limit() {
         serde_json::json!("e"),
     ];
     deque.extend_back(values.iter()).await.unwrap();
-    assert_eq!(deque.drain_up_to(2).await.unwrap(), values[..2]);
+    assert_eq!(deque.pop_front_many(2).await.unwrap(), values[..2]);
     assert_eq!(deque.len().await.unwrap(), 1);
-    assert_eq!(deque.drain_up_to(2).await.unwrap(), values[2..]);
+    assert_eq!(deque.pop_front_many(2).await.unwrap(), values[2..]);
 }

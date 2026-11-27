@@ -17,7 +17,7 @@ let again = seen.contains("request-1").await?;
 | Method | Notes |
 |---|---|
 | `insert(&v)` | returns `true` when the value was new or expired. Add `.ttl(time)` to make it expire (zero means never); a new insert replaces the old time limit. |
-| `insert_nx(&v)` | adds only when there is no live value and keeps the time limit of a live one, like Redisson's `tryAdd`. Takes `.ttl(time)` too. |
+| `try_insert(&v)` | adds only when there is no live value and keeps the time limit of a live one, like Redisson's `tryAdd`. Takes `.ttl(time)` too. |
 | `contains(&v)` | live values only |
 | `remove(&v)` | returns `true` when the value was stored, even if it had expired, as in Redisson |
 | `entry_ttl(&v)` | time left. `None` means no limit or not in the set. |

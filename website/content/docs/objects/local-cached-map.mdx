@@ -44,7 +44,7 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `contains_key(&k)` | a cached key answers without a round trip |
 | `len()`, `is_empty()` | ask Redis |
 | `clear()` | empties the map for everybody; returns whether there was anything to remove, and tells the others only then |
-| `local_len()`, `cached_entries()`, `clear_local()` | the local cache of this instance only |
+| `local_len()`, `local_entries()`, `clear_local()` | the local cache of this instance only |
 | `clear_local_everywhere()` | empties the local cache of every instance without changing Redis, like Redisson's `clearLocalCache` (it does not wait for the others) |
 | `iter()`, `keys()`, `values()` | stream from Redis and do not use the cache |
 

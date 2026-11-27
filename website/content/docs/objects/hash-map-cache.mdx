@@ -21,7 +21,7 @@ let found = sessions.get("abc").await?;
 | `insert(&k, &v)` | no time limit. Removes a limit the old entry had. Returns the old live value. |
 | `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl`. Zero means no limit. |
 | `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` and `contains_key` starts the time again. |
-| `insert_nx(&k, &v)` | inserts only when there is no live entry, like Redisson's `fastPutIfAbsent`. It takes `.ttl(..)` and `.max_idle(..)` too. |
+| `try_insert(&k, &v)` | inserts only when there is no live entry, like Redisson's `fastPutIfAbsent`. It takes `.ttl(..)` and `.max_idle(..)` too. Unlike `HashMap::try_insert` it returns a `bool`, because Redisson's script only reports whether it stored the entry. |
 | `get(&k)`, `contains_key(&k)` | never show an expired entry. Both start the idle time again and count as a use for the size limit. |
 | `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
@@ -29,7 +29,7 @@ let found = sessions.get("abc").await?;
 | `iter()`, `keys()`, `values()` | streams of live entries, 100 per page. Expired entries are skipped page by page, and returned entries start their idle time again. |
 | `evict_expired()` | deletes expired entries now and returns how many |
 | `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
-| `try_set_max_size(n, mode)` | the same, but only when no limit was set before |
+| `init_max_size(n, mode)` | the same, but only when no limit was set before |
 | `events()`, `events_of(kinds)` | start listening to changes. See below. |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
