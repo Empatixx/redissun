@@ -20,6 +20,7 @@ use crate::collections::local_cached_map::LocalCachedMapBuilder;
 use crate::collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 use crate::collections::sorted_set::SortedSet;
 use crate::coordination::adder::{Adder, Summable};
+use crate::coordination::gcra::Gcra;
 use crate::coordination::latch::CountDownLatch;
 use crate::coordination::rate_limiter::RateLimiter;
 use crate::coordination::semaphore::Semaphore;
@@ -359,5 +360,11 @@ impl<C: Codec> Client<C> {
     /// Returns the [`RateLimiter`] named `name`.
     pub fn rate_limiter(&self, name: impl Into<Arc<str>>) -> RateLimiter {
         RateLimiter::new(Key::new(self.core.clone(), name))
+    }
+
+    /// **Experimental.** A [`Gcra`] rate limiter stored under `name` (the state) and `{name}:config` (the settings), Redisson's `getGcra`.
+    #[doc(alias = "getGcra")]
+    pub fn gcra(&self, name: impl Into<Arc<str>>) -> Gcra {
+        Gcra::new(Key::new(self.core.clone(), name))
     }
 }

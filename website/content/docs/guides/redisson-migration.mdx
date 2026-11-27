@@ -47,6 +47,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RPermitExpirableSemaphore` | `PermitExpirableSemaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
+| `RGcra` | `Gcra` |
 | `RScript` | `Script` (`client.script()`) |
 | `RFunction` | `Function` (`client.function()`) |
 | `StringCodec`, `ByteArrayCodec` | `StringCodec`, `BytesCodec` |
@@ -566,6 +567,26 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `availablePermits()` | `available_permits()` |
 | `getConfig()` | `config()`, `None` when the limiter is not set |
 | `RateType.OVERALL`, `PER_CLIENT` | `RateType::Overall`, `RateType::PerClient` |
+
+## Gcra
+
+| Redisson | redissun |
+|---|---|
+| `getGcra(name)` | `client.gcra(name)` |
+| `getGcra(CommonOptions)` | `client.gcra(name)`; the timeouts and retries are the client's, except that `try_acquire` and `init_rate` are sent once and never retried. Redisson also sends `trySetRate` once, but retries `tryAcquire`: redissun does not, since a retried acquire whose first reply was lost takes its tokens twice |
+| `trySetRate(maxBurst, tokensPerPeriod, period)` | `init_rate(max_burst, tokens_per_period, period)` → `bool` |
+| `setRate(maxBurst, tokensPerPeriod, period)` | `set_rate(max_burst, tokens_per_period, period)` |
+| `getConfig()` | `config()`, `None` instead of `null` when no rate is set |
+| `GcraConfig.getMaxBurst()`, `getTokensPerPeriod()`, `getPeriod()` | the fields `max_burst`, `tokens_per_period`, `period` |
+| `tryAcquire()` | `try_acquire()` → `GcraResult` |
+| `tryAcquire(tokens)` | `try_acquire().tokens(n)` |
+| `GcraResult.isLimited()`, `getMaxTokens()`, `getAvailableTokens()` | the fields `limited`, `max_tokens`, `available_tokens` |
+| `GcraResult.getRetryAfterSeconds()` | `retry_after: Option<Duration>`; `-1` is `None` |
+| `GcraResult.getFullBurstAfterSeconds()` | `full_burst_after: Duration` |
+| `tryAcquire(maxBurst, tokensPerPeriod, period)`, `tryAcquire(maxBurst, tokensPerPeriod, period, tokens)` (deprecated) | not ported; use `init_rate` and `try_acquire` |
+| the `RGcraAsync` methods (`trySetRateAsync`, `setRateAsync`, `getConfigAsync`, `tryAcquireAsync`) | the same methods; every redissun method is async |
+| `delete()`, `expire(..)`, `clearExpire()` | `del()`, `expire(d)`, `persist()`, over both keys as in Redisson |
+| `isExists()`, `remainTimeToLive()`, `rename(..)` | `exists()`, `ttl()`, `rename(..)`; they cover `{name}:config` too, and `ttl` is its time |
 
 ## Config
 

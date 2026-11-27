@@ -24,7 +24,7 @@ impl Drop for Topology {
 
 impl Topology {
     pub async fn sentinel() -> Topology {
-        Self::wait_for_sentinels(start(6, SENTINEL_SCRIPT, &[]).await).await
+        Self::wait_for_sentinels(start(IMAGE, 6, SENTINEL_SCRIPT, &[]).await).await
     }
 
     #[cfg(any(feature = "tls-rustls", feature = "tls-rustls-aws-lc"))]
@@ -32,7 +32,7 @@ impl Topology {
         authority: &super::tls::Authority,
         server: &super::tls::Leaf,
     ) -> Topology {
-        let topology = start(6, SENTINEL_TLS_SCRIPT, &tls_env(authority, server)).await;
+        let topology = start(IMAGE, 6, SENTINEL_TLS_SCRIPT, &tls_env(authority, server)).await;
         Self::wait_for_sentinels(topology).await
     }
 
@@ -41,7 +41,7 @@ impl Topology {
         authority: &super::tls::Authority,
         server: &super::tls::Leaf,
     ) -> Topology {
-        let topology = start(6, CLUSTER_TLS_SCRIPT, &tls_env(authority, server)).await;
+        let topology = start(IMAGE, 6, CLUSTER_TLS_SCRIPT, &tls_env(authority, server)).await;
         Self::wait_for_cluster(topology).await
     }
 
@@ -73,7 +73,12 @@ impl Topology {
     }
 
     pub async fn cluster() -> Topology {
-        Self::wait_for_cluster(start(6, CLUSTER_SCRIPT, &[]).await).await
+        Self::cluster_on(IMAGE).await
+    }
+
+    /// A cluster of the Redis image `image`, such as `redis:8.8-m03-alpine`.
+    pub async fn cluster_on(image: &str) -> Topology {
+        Self::wait_for_cluster(start(image, 6, CLUSTER_SCRIPT, &[]).await).await
     }
 
     /// A cluster whose replicas `CLUSTER SLOTS` does not list yet: they are synced, but nothing was written and they ping once a minute, so none has reported a replication offset.
@@ -82,7 +87,7 @@ impl Topology {
             "--repl-ping-replica-period 1",
             "--repl-ping-replica-period 60",
         );
-        Self::wait_for_cluster_nodes(start(6, &script, &[]).await, false).await
+        Self::wait_for_cluster_nodes(start(IMAGE, 6, &script, &[]).await, false).await
     }
 
     pub async fn cluster_slots_list_replicas(&self) -> bool {
@@ -330,7 +335,7 @@ fn tls_env(authority: &super::tls::Authority, server: &super::tls::Leaf) -> Vec<
     ]
 }
 
-async fn start(count: u16, script: &str, env: &[String]) -> Topology {
+async fn start(image: &str, count: u16, script: &str, env: &[String]) -> Topology {
     for _ in 0..5 {
         let base = free_base(count);
         let mut args = vec![
@@ -348,7 +353,7 @@ async fn start(count: u16, script: &str, env: &[String]) -> Topology {
             args.push("-p".into());
             args.push(format!("127.0.0.1:{port}:{port}"));
         }
-        args.extend([IMAGE.into(), "sh".into(), "-c".into(), script.into()]);
+        args.extend([image.into(), "sh".into(), "-c".into(), script.into()]);
         let output = tokio::process::Command::new("docker")
             .args(&args)
             .output()

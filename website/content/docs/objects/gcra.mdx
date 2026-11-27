@@ -1,0 +1,77 @@
+---
+title: Gcra
+description: A rate limiter on the Generic Cell Rate Algorithm, Redisson's RGcra. Experimental.
+---
+
+**Experimental.** A `Gcra` is a rate limiter on the Generic Cell Rate Algorithm (GCRA). It is Redisson's `RGcra`. It hands out `tokens_per_period` tokens per `period` at a steady rate, and up to `max_burst` tokens more at once. There is no background task, and the whole state is one timestamp: the time at which the next token is due.
+
+```rust
+use std::time::Duration;
+
+let gcra = client.gcra("api");
+gcra.init_rate(5, 10, Duration::from_secs(1)).await?;
+```
+
+## Setting the rate
+
+| Method | What it does |
+|---|---|
+| `init_rate(max_burst, tokens_per_period, period)` | sets the rate, only if none is set yet. Returns `true` if it set it. |
+| `set_rate(max_burst, tokens_per_period, period)` | replaces the rate and forgets the tokens already used |
+| `config()` | the settings as `Option<GcraConfig>` with `max_burst`, `tokens_per_period` and `period`; `None` when no rate is set |
+
+A `max_burst` of 0 is valid: the bucket then holds one token. A `tokens_per_period` or a `period` of zero is `Error::Config`, and nothing is sent.
+
+## Taking tokens
+
+```rust
+let result = gcra.try_acquire().await?;           // one token
+let result = gcra.try_acquire().tokens(3).await?; // three at once
+if result.limited {
+    // refused: nothing was taken
+}
+```
+
+`try_acquire()` takes one token if the limit allows it right now, and `.tokens(n)` takes `n` at once. It never waits. It resolves to a `GcraResult`:
+
+| Field | Meaning |
+|---|---|
+| `limited` | `true` when the request was refused. A refused request takes no tokens. |
+| `max_tokens` | the bucket size, `max_burst + 1` |
+| `available_tokens` | the tokens you can take right now, after this request |
+| `retry_after` | when to try again. `None` when the request was allowed, and also when it asks for more than `max_tokens`, which never passes. |
+| `full_burst_after` | how long until the bucket is full again |
+
+The times are whole seconds, rounded up by the server. They come from the server's clock, so the clocks of your clients do not matter, unlike `RateLimiter`. `.tokens(0)` is `Error::Config`. A limiter without a rate is an `Error::Redis` containing "GCRA rate is not set".
+
+`try_acquire` and `init_rate` are sent once and never retried, whatever the client's retry settings: a request whose reply was lost may already have taken its tokens or set the rate, and sending it again would take them twice. Redisson sends `trySetRate` once too, but retries `tryAcquire`; redissun does not, on purpose. `set_rate` and `config` retry as usual.
+
+## Which server
+
+Redis has a `GCRA` command, but it held the command out of 8.8.0 and every later release. Today only the `redis:8.8-m03` preview image has it.
+
+- **A Redis build with `GCRA`** gets the command, exactly as Redisson sends it: Redisson's script reads the settings and calls `GCRA`. Redisson and redissun clients share the limiter there.
+- **Every other server**, Redis 6.2 or newer and Valkey, gets a Lua port of the same algorithm (`gcraCommand` from Redis's `gcra.c`), with the same replies and the same error messages. Redisson does not run there: its script fails with "unknown command".
+
+A client asks the server once, at its first `try_acquire`, with `GCRA <name> 0 1 1 TOKENS`. The server refuses that for its missing `TOKENS` value before it looks at the key, so the probe writes nothing. The client keeps the answer for its whole life, so restart clients after moving to a server with `GCRA`. An error that says nothing about the command, such as a lost connection or `LOADING`, is returned from that `try_acquire` and kept by no one: the next acquire asks again.
+
+The two paths store the state differently: the command keeps it in a `gcra` object, the Lua port as a string with the time in microseconds. Do not let both kinds of server, or a server upgrade, share live keys: `try_acquire` then fails with `WRONGTYPE` until the state key expires (at the latest after the time to a full bucket), or `set_rate` or `del` resets it. `persist()`, or an `expire()` longer than that time, keeps the state key alive, and the error then stays until `set_rate` or `del`.
+
+## How it is stored
+
+The settings live in the hash `{name}:config` with the fields `maxBurst`, `rate` and `period`. The period is written in decimal seconds, as Redisson writes it: `1` for one second, `0.25` for 250 ms. The state lives at the key `name` and expires when the bucket is full again. These are Redisson's keys and fields, so a Redisson client and a redissun client can share one limiter on a server with `GCRA`.
+
+## Object methods
+
+The `Object` methods act on both keys, the state `name` and the settings `{name}:config`. `del`, `expire`, `persist` and `rename` change both at once; `exists` is `true` when either exists, so it is `true` right after `init_rate`. `ttl` is the time to live of `{name}:config`, the key whose time only you set: the next allowed acquire sets the state key's own time again, as the server does. In a cluster, the new name of `rename` must hash to the same slot as the old one, for example `{team}:api` to `{team}:api2`.
+
+## Compared with `RateLimiter`
+
+| | `Gcra` | `RateLimiter` |
+|---|---|---|
+| algorithm | GCRA: a steady rate plus a burst | sliding window |
+| keys | a hash and one timestamp | a hash, a string and a sorted set |
+| clock | the server's | the client's |
+| waiting `acquire` | no, `try_acquire` only | yes, with a timeout |
+| per client limits | no | `RateType::PerClient` |
+| result | `GcraResult` with the tokens left and when to retry | `bool` |

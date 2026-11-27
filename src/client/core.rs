@@ -65,6 +65,8 @@ pub(crate) struct Core {
         tokio::sync::OnceCell<crate::collections::hash_map_cache::LengthPrefix>,
     /// Which hash field commands the server has, probed with `HPTTL` and `HSETEX` when a `MapCacheNative` needs field TTLs; only a yes is kept.
     pub(crate) hash_field_support: crate::collections::map_cache_native::HashFieldSupport,
+    /// Whether the server has the `GCRA` command, probed by the first `Gcra::try_acquire`. Both answers are kept, so one client never switches between the two state formats.
+    pub(crate) gcra_command: tokio::sync::OnceCell<bool>,
 }
 
 impl Core {
@@ -103,6 +105,7 @@ impl Core {
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
             map_cache_length_prefix: tokio::sync::OnceCell::new(),
             hash_field_support: Default::default(),
+            gcra_command: tokio::sync::OnceCell::new(),
         });
         if !startup.ping_interval.is_zero() {
             let ping = tokio::spawn(ping_loop(Arc::downgrade(&core), startup.ping_interval));
