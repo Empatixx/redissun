@@ -183,7 +183,7 @@ impl Key {
         args: Vec<Bytes>,
     ) -> Result<bool> {
         let removed: i64 = self.core.eval(script, keys, args).await?;
-        Ok(removed == 1)
+        Ok(removed > 0)
     }
 
     pub(crate) async fn expire_all(&self, ttl: Duration, companions: Vec<String>) -> Result<bool> {
@@ -226,11 +226,13 @@ impl Key {
         Ok(applied == 1)
     }
 
-    pub(crate) async fn persist_with(&self, script: &Lua, companions: Vec<String>) -> Result<bool> {
-        let cleared: i64 = self
-            .core
-            .eval(script, self.with(companions), Vec::new())
-            .await?;
+    pub(crate) async fn persist_with(
+        &self,
+        script: &Lua,
+        companions: Vec<String>,
+        args: Vec<Bytes>,
+    ) -> Result<bool> {
+        let cleared: i64 = self.core.eval(script, self.with(companions), args).await?;
         Ok(cleared == 1)
     }
 
@@ -366,6 +368,19 @@ mod sealed {
         fn persist_script(&self) -> Option<&'static Lua> {
             None
         }
+
+        /// The arguments that [`persist_script`](HasKey::persist_script) takes.
+        fn persist_args(&self) -> Vec<Bytes> {
+            Vec::new()
+        }
+
+        /// A script that renames the object with its keys and arguments, used instead of renaming the key and its companions.
+        fn rename_script(
+            &self,
+            _new_name: &str,
+        ) -> Option<(&'static Lua, Vec<String>, Vec<Bytes>)> {
+            None
+        }
     }
 }
 
@@ -392,10 +407,18 @@ impl<T: HasKey + Sync> Object for T {
     }
 
     fn rename(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send {
+        let script = self.rename_script(new_name);
         let companions = self.companions();
         let new_name = self.renamed_key(new_name);
         let renamed = self.renamed_companions(&new_name);
         async move {
+            if let Some((script, keys, args)) = script {
+                self.key()
+                    .core
+                    .eval::<redis::Value>(script, keys, args)
+                    .await?;
+                return Ok(());
+            }
             match renamed {
                 Some(renamed) if renamed.len() == companions.len() => {
                     self.key().rename_all(&new_name, companions, renamed).await
@@ -424,9 +447,10 @@ impl<T: HasKey + Sync> Object for T {
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
         let companions = self.companions();
         let script = self.persist_script();
+        let args = self.persist_args();
         async move {
             match script {
-                Some(script) => self.key().persist_with(script, companions).await,
+                Some(script) => self.key().persist_with(script, companions, args).await,
                 None => self.key().persist_all(companions).await,
             }
         }

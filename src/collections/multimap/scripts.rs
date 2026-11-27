@@ -289,3 +289,56 @@ pub(super) static DELETE: LazyLock<Lua> = LazyLock::new(|| {
         "return n;",
     ))
 });
+
+/// `RedissonMultimap.renameAsync`. KEYS: map. ARGV: prefix, new prefix, new name.
+pub(super) static RENAME: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local entries = redis.call('hgetall', KEYS[1]); ",
+        "local keys = {}; ",
+        "for i, v in ipairs(entries) do ",
+        "if i % 2 == 0 then ",
+        "table.insert(keys, v); ",
+        "end;",
+        "end; ",
+        "",
+        "redis.call('rename', KEYS[1], ARGV[3]); ",
+        "for i=1, #keys, 1 do ",
+        "redis.call('rename', ARGV[1] .. keys[i], ARGV[2] .. keys[i]); ",
+        "end; ",
+    ))
+});
+
+/// `RedissonMultimap.expireAsync`. KEYS: map. ARGV: milliseconds, prefix, `PEXPIRE` option (`''` for none).
+pub(super) static EXPIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local entries = redis.call('hgetall', KEYS[1]); ",
+        "for i, v in ipairs(entries) do ",
+        "if i % 2 == 0 then ",
+        "local name = ARGV[2] .. v; ",
+        "if ARGV[3] ~= '' then ",
+        "redis.call('pexpire', name, ARGV[1], ARGV[3]); ",
+        "else ",
+        "redis.call('pexpire', name, ARGV[1]); ",
+        "end; ",
+        "end;",
+        "end; ",
+        "if ARGV[3] ~= '' then ",
+        "return redis.call('pexpire', KEYS[1], ARGV[1], ARGV[3]); ",
+        "end; ",
+        "return redis.call('pexpire', KEYS[1], ARGV[1]); ",
+    ))
+});
+
+/// `RedissonMultimap.clearExpireAsync`. KEYS: map. ARGV: prefix.
+pub(super) static CLEAR_EXPIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local entries = redis.call('hgetall', KEYS[1]); ",
+        "for i, v in ipairs(entries) do ",
+        "if i % 2 == 0 then ",
+        "local name = ARGV[1] .. v; ",
+        "redis.call('persist', name); ",
+        "end;",
+        "end; ",
+        "return redis.call('persist', KEYS[1]); ",
+    ))
+});

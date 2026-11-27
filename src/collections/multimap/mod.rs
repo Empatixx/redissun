@@ -7,6 +7,7 @@ pub(crate) mod scripts;
 use crate::codec::Codec;
 use crate::collections::map::key_hash::hash128_base64;
 use crate::error::Result;
+use crate::lua::Lua;
 use crate::object::{suffix_name, Key};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -72,6 +73,40 @@ pub(crate) fn slot(key: &Key, encoded_key: Bytes, mode: &Mode) -> Slot {
         key_hash,
         mode: mode.clone(),
     }
+}
+
+type ScriptCall = (&'static Lua, Vec<String>, Vec<Bytes>);
+
+/// `Object::del`: Redisson's `deleteAsync` over the hash and every values key.
+pub(crate) fn del_script(key: &Key) -> ScriptCall {
+    (
+        &scripts::DELETE,
+        vec![key.redis_key()],
+        vec![Bytes::from(prefix(key.name()))],
+    )
+}
+
+/// The arguments of `EXPIRE` after the milliseconds: the prefix and no `PEXPIRE` option.
+pub(crate) fn expire_args(key: &Key) -> Vec<Bytes> {
+    vec![Bytes::from(prefix(key.name())), Bytes::new()]
+}
+
+/// The arguments of `CLEAR_EXPIRE`: the prefix.
+pub(crate) fn persist_args(key: &Key) -> Vec<Bytes> {
+    vec![Bytes::from(prefix(key.name()))]
+}
+
+/// `Object::rename`: Redisson's `renameAsync`, which renames the hash and every values key.
+pub(crate) fn rename_script(key: &Key, new_name: &str) -> ScriptCall {
+    (
+        &scripts::RENAME,
+        vec![key.redis_key()],
+        vec![
+            Bytes::from(prefix(key.name())),
+            Bytes::from(prefix(new_name)),
+            Bytes::from(new_name.to_string()),
+        ],
+    )
 }
 
 /// The operations of a multimap, on encoded keys and values. The public types decode what they return.
@@ -354,15 +389,8 @@ impl<C: Codec> Ops<'_, C> {
 
     /// `delete`: the hash and every values key; whether any key was deleted.
     pub(crate) async fn delete(&self) -> Result<bool> {
-        let deleted: i64 = self
-            .key
-            .core
-            .eval(
-                &scripts::DELETE,
-                vec![self.key.redis_key()],
-                vec![self.prefix_arg()],
-            )
-            .await?;
+        let (script, keys, args) = del_script(self.key);
+        let deleted: i64 = self.key.core.eval(script, keys, args).await?;
         Ok(deleted > 0)
     }
 }
@@ -392,6 +420,51 @@ macro_rules! multimap_type {
         impl<K, V, C: $crate::codec::Codec> ::std::fmt::Debug for $name<K, V, C> {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 self.key.describe(f, stringify!($name))
+            }
+        }
+
+        impl<K, V, C: $crate::codec::Codec> $crate::object::HasKey for $name<K, V, C> {
+            fn key(&self) -> &$crate::object::Key {
+                &self.key
+            }
+
+            fn del_script(
+                &self,
+            ) -> Option<(
+                &'static $crate::lua::Lua,
+                ::std::vec::Vec<String>,
+                ::std::vec::Vec<::bytes::Bytes>,
+            )> {
+                Some($crate::collections::multimap::del_script(&self.key))
+            }
+
+            fn expire_script(&self) -> Option<&'static $crate::lua::Lua> {
+                Some(&$crate::collections::multimap::scripts::EXPIRE)
+            }
+
+            fn expire_args(&self) -> ::std::vec::Vec<::bytes::Bytes> {
+                $crate::collections::multimap::expire_args(&self.key)
+            }
+
+            fn persist_script(&self) -> Option<&'static $crate::lua::Lua> {
+                Some(&$crate::collections::multimap::scripts::CLEAR_EXPIRE)
+            }
+
+            fn persist_args(&self) -> ::std::vec::Vec<::bytes::Bytes> {
+                $crate::collections::multimap::persist_args(&self.key)
+            }
+
+            fn rename_script(
+                &self,
+                new_name: &str,
+            ) -> Option<(
+                &'static $crate::lua::Lua,
+                ::std::vec::Vec<String>,
+                ::std::vec::Vec<::bytes::Bytes>,
+            )> {
+                Some($crate::collections::multimap::rename_script(
+                    &self.key, new_name,
+                ))
             }
         }
 

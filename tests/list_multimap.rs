@@ -1,7 +1,9 @@
 mod common;
 
 use common::{client, raw_command, unique};
-use redissun::{JsonCodec, ListMultimap};
+use redissun::{JsonCodec, ListMultimap, Object};
+use std::time::Duration;
+use tokio::time::sleep;
 
 async fn list(name: &str) -> ListMultimap<String, String, JsonCodec> {
     client().await.list_multimap(name.to_string())
@@ -220,4 +222,100 @@ async fn per_key_lock_lives_under_the_redisson_name() {
     assert_eq!(raw_command(&["EXISTS", &lock_key]).await, ":1\r\n");
     guard.unlock().await.unwrap();
     assert_eq!(raw_command(&["EXISTS", &lock_key]).await, ":0\r\n");
+}
+
+async fn exists(key: &str) -> bool {
+    raw_command(&["EXISTS", key]).await == ":1\r\n"
+}
+
+/// The values keys of `ks` in the multimap `name`, read from its hash.
+async fn values_keys(name: &str, ks: &[&str]) -> Vec<String> {
+    let mut keys = Vec::new();
+    for k in ks {
+        let hash = redis_hash(name, &format!("\"{k}\"")).await.unwrap();
+        keys.push(values_key(name, &hash));
+    }
+    keys
+}
+
+// Redisson: testDelete
+#[tokio::test]
+async fn del_removes_hash_and_values() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.insert("a", "1").await.unwrap();
+    map.insert("b", "2").await.unwrap();
+    let values = values_keys(&name, &["a", "b"]).await;
+    assert!(map.del().await.unwrap());
+    assert!(!exists(&name).await);
+    for key in &values {
+        assert!(!exists(key).await, "{key}");
+    }
+    assert!(!map.del().await.unwrap());
+}
+
+// Redisson: testExpire
+#[tokio::test]
+async fn expire_covers_the_values() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.insert("a", "1").await.unwrap();
+    map.insert("b", "2").await.unwrap();
+    let values = values_keys(&name, &["a", "b"]).await;
+    assert!(map.expire(Duration::from_millis(100)).await.unwrap());
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(map.len().await.unwrap(), 0);
+    for key in &values {
+        assert!(!exists(key).await, "{key}");
+    }
+}
+
+// Redisson: testClearExpire
+#[tokio::test]
+async fn persist_clears_every_ttl() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.insert("a", "1").await.unwrap();
+    map.insert("b", "2").await.unwrap();
+    assert!(map.expire(Duration::from_millis(100)).await.unwrap());
+    assert!(map.persist().await.unwrap());
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(map.len().await.unwrap(), 2);
+    assert!(!map.persist().await.unwrap());
+}
+
+// Redisson: testRename
+#[tokio::test]
+async fn rename_moves_every_key() {
+    let name = unique("lmm");
+    let renamed = unique("lmm");
+    let map = list(&name).await;
+    map.insert("a", "1").await.unwrap();
+    map.insert("b", "2").await.unwrap();
+    let old_values = values_keys(&name, &["a", "b"]).await;
+    map.rename(&renamed).await.unwrap();
+    let moved = list(&renamed).await;
+    assert_eq!(moved.get_all("a").await.unwrap(), ["1"]);
+    assert_eq!(moved.get_all("b").await.unwrap(), ["2"]);
+    assert_eq!(moved.len().await.unwrap(), 2);
+    assert!(!exists(&name).await);
+    for key in &old_values {
+        assert!(!exists(key).await, "{key}");
+    }
+    for key in values_keys(&renamed, &["a", "b"]).await {
+        assert!(exists(&key).await, "{key}");
+    }
+}
+
+#[tokio::test]
+async fn ttl_and_exists_read_the_hash() {
+    let map = list(&unique("lmm")).await;
+    assert!(!map.exists().await.unwrap());
+    assert_eq!(map.ttl().await.unwrap(), None);
+    map.insert("a", "1").await.unwrap();
+    assert!(map.exists().await.unwrap());
+    assert_eq!(map.ttl().await.unwrap(), None);
+    map.expire(Duration::from_secs(10)).await.unwrap();
+    let ttl = map.ttl().await.unwrap().unwrap();
+    assert!(ttl <= Duration::from_secs(10) && ttl > Duration::from_secs(8));
 }

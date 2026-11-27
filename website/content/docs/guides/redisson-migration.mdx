@@ -485,6 +485,7 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `keySet().contains(k)`, `keySet().remove(k)`, `keySet().size()`, `keySet().clear()` | `contains_key(&k)`, `remove_many(&[&k])`, `key_len()`, `clear()` |
 | `entries().contains(e)`, `entries().remove(e)` | `contains_entry(&k, &v)`, `remove(&k, &v)` |
 | `values().contains(v)`, `values().size()` | `contains_value(&v)`, `len()` |
+| `delete()`, `expire(..)`, `clearExpire()`, `rename(n)`, `isExists()`, `remainTimeToLive()` | `Object::del`, `expire`, `persist`, `rename`, `exists`, `ttl`, over the hash and every values key |
 
 ## LocalCachedMap
 
