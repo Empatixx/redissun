@@ -80,10 +80,10 @@ pub(crate) fn split_event(payload: &[u8], prefix: LengthPrefix) -> Option<Parts<
     rest.is_empty().then_some((key, value, Some(old)))
 }
 
-/// A change of a [`HashMapCache`](super::HashMapCache), received through [`Events`].
+/// A change of a [`HashMapCache`](super::HashMapCache), received through [`EntryEvents`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Event<K, V> {
+pub enum EntryEvent<K, V> {
     /// A new entry was added, or an expired one was written again.
     Created {
         /// The key of the entry.
@@ -116,39 +116,39 @@ pub enum Event<K, V> {
     },
 }
 
-/// The kinds of [`Event`], each published on its own channel.
+/// The kinds of [`EntryEvent`], each published on its own channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum EventKind {
-    /// [`Event::Created`].
+pub enum EntryEventKind {
+    /// [`EntryEvent::Created`].
     Created,
-    /// [`Event::Updated`].
+    /// [`EntryEvent::Updated`].
     Updated,
-    /// [`Event::Removed`].
+    /// [`EntryEvent::Removed`].
     Removed,
-    /// [`Event::Expired`].
+    /// [`EntryEvent::Expired`].
     Expired,
 }
 
-impl EventKind {
-    pub(crate) const ALL: [EventKind; 4] = [
-        EventKind::Removed,
-        EventKind::Created,
-        EventKind::Updated,
-        EventKind::Expired,
+impl EntryEventKind {
+    pub(crate) const ALL: [EntryEventKind; 4] = [
+        EntryEventKind::Removed,
+        EntryEventKind::Created,
+        EntryEventKind::Updated,
+        EntryEventKind::Expired,
     ];
 }
 
-/// Receives the [`Event`]s of a [`HashMapCache`](super::HashMapCache). Dropping the last listener of a channel in a client unsubscribes from Redis.
-pub struct Events<K, V, C: Codec> {
-    sources: Vec<(EventKind, Subscription, broadcast::Receiver<Bytes>)>,
+/// Receives the [`EntryEvent`]s of a [`HashMapCache`](super::HashMapCache). Dropping the last listener of a channel in a client unsubscribes from Redis.
+pub struct EntryEvents<K, V, C: Codec> {
+    sources: Vec<(EntryEventKind, Subscription, broadcast::Receiver<Bytes>)>,
     prefix: LengthPrefix,
     codec: C,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
-impl<K, V, C: Codec> fmt::Debug for Events<K, V, C> {
+impl<K, V, C: Codec> fmt::Debug for EntryEvents<K, V, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Events").finish_non_exhaustive()
+        f.debug_struct("EntryEvents").finish_non_exhaustive()
     }
 }
 
@@ -160,9 +160,9 @@ fn received(outcome: std::result::Result<Bytes, RecvError>) -> Result<Bytes> {
     }
 }
 
-impl<K, V, C: Codec> Events<K, V, C> {
+impl<K, V, C: Codec> EntryEvents<K, V, C> {
     pub(crate) fn new(
-        sources: Vec<(EventKind, Subscription, broadcast::Receiver<Bytes>)>,
+        sources: Vec<(EntryEventKind, Subscription, broadcast::Receiver<Bytes>)>,
         prefix: LengthPrefix,
         codec: C,
     ) -> Self {
@@ -175,30 +175,30 @@ impl<K, V, C: Codec> Events<K, V, C> {
     }
 }
 
-impl<K, V, C> Events<K, V, C>
+impl<K, V, C> EntryEvents<K, V, C>
 where
     K: DeserializeOwned + Send,
     V: DeserializeOwned + Send,
     C: Codec,
 {
-    fn parse(&self, kind: EventKind, payload: &[u8]) -> Result<Event<K, V>> {
+    fn parse(&self, kind: EntryEventKind, payload: &[u8]) -> Result<EntryEvent<K, V>> {
         let malformed = || Error::Codec("malformed cache event".into());
         let (key, value, previous) = split_event(payload, self.prefix).ok_or_else(malformed)?;
         let key = self.codec.decode(key)?;
         let value = self.codec.decode(value)?;
         match kind {
-            EventKind::Created => Ok(Event::Created { key, value }),
-            EventKind::Updated => Ok(Event::Updated {
+            EntryEventKind::Created => Ok(EntryEvent::Created { key, value }),
+            EntryEventKind::Updated => Ok(EntryEvent::Updated {
                 key,
                 value,
                 previous: self.codec.decode(previous.ok_or_else(malformed)?)?,
             }),
-            EventKind::Removed => Ok(Event::Removed { key, value }),
-            EventKind::Expired => Ok(Event::Expired { key, value }),
+            EntryEventKind::Removed => Ok(EntryEvent::Removed { key, value }),
+            EntryEventKind::Expired => Ok(EntryEvent::Expired { key, value }),
         }
     }
 
-    fn buffered(&mut self) -> Option<(EventKind, Result<Bytes>)> {
+    fn buffered(&mut self) -> Option<(EntryEventKind, Result<Bytes>)> {
         for (kind, _, receiver) in self.sources.iter_mut() {
             match receiver.try_recv() {
                 Ok(payload) => return Some((*kind, Ok(payload))),
@@ -218,11 +218,12 @@ where
     }
 
     /// Waits for the next event. Events of one kind arrive in order; events of different kinds come from different channels, and when several are waiting, removals are returned first, then creations, updates and expirations. A listener that falls more than 256 events behind on a channel gets [`Error::Lagged`] once and then continues with the newest events.
-    pub async fn recv(&mut self) -> Result<Event<K, V>> {
+    pub async fn recv(&mut self) -> Result<EntryEvent<K, V>> {
         let (kind, payload) = match self.buffered() {
             Some((kind, payload)) => (kind, payload?),
             None => {
-                let kinds: Vec<EventKind> = self.sources.iter().map(|(kind, _, _)| *kind).collect();
+                let kinds: Vec<EntryEventKind> =
+                    self.sources.iter().map(|(kind, _, _)| *kind).collect();
                 let waiting = self
                     .sources
                     .iter_mut()
@@ -239,7 +240,7 @@ where
     }
 
     /// Turns the listener into a stream of events. The stream never ends.
-    pub fn into_stream(self) -> impl Stream<Item = Result<Event<K, V>>> {
+    pub fn into_stream(self) -> impl Stream<Item = Result<EntryEvent<K, V>>> {
         stream::unfold(self, |mut events| async move {
             Some((events.recv().await, events))
         })

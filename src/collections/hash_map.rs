@@ -166,6 +166,8 @@ where
     }
 
     /// Starts listening to every kind of change of the map, Redisson's `addListener` with the map and object listeners. See [`MapEvents`] for the server setting it needs.
+    ///
+    /// On a [`HashMapCache`](crate::HashMapCache), these keyspace notifications come from [`keyspace_events`](crate::HashMapCache::keyspace_events), and its `events()` returns the cache's entry events.
     #[doc(alias = "addListener")]
     pub async fn events(&self) -> Result<MapEvents<K, C>> {
         self.events_of(&MapEventKind::ALL).await
@@ -173,7 +175,7 @@ where
 
     /// Starts listening to the given kinds of change.
     pub async fn events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
-        events::subscribe(&self.key, self.codec.clone(), kinds).await
+        events::subscribe(&self.key, self.codec.clone(), kinds, None).await
     }
 
     /// The key of the object Redisson keeps for map key `k` under `suffix`.

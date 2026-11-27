@@ -29,7 +29,8 @@ let found = sessions.get("abc").await?;
 | `iter()`, `keys()`, `values()` | streams of live entries, 100 per page. Expired entries are skipped page by page, and returned entries start their idle time again. |
 | `set_max_size(n, mode)` | limits the cache to `n` entries. `0` removes the limit. |
 | `init_max_size(n, mode)` | the same, but only when no limit was set before |
-| `events()`, `events_of(kinds)` | start listening to changes. See below. |
+| `events()`, `events_of(kinds)` | start listening to entry events (`EntryEvent`). Unlike on `HashMap`, these are not keyspace notifications. See below. |
+| `keyspace_events()`, `keyspace_events_of(kinds)` | keyspace notifications of the hash (`MapEvent`), what `HashMap::events()` returns. See below. |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
 
@@ -54,27 +55,40 @@ When the cache is full, inserts drop entries: with `Lru` the one that was used l
 ## Listening to changes
 
 ```rust
-use redissun::Event;
+use redissun::EntryEvent;
 
 let mut events = cache.events().await?;
 while let Ok(event) = events.recv().await {
     match event {
-        Event::Created { key, value } => {}
-        Event::Updated { key, value, previous } => {}
-        Event::Removed { key, value } => {}
-        Event::Expired { key, value } => {}
+        EntryEvent::Created { key, value } => {}
+        EntryEvent::Updated { key, value, previous } => {}
+        EntryEvent::Removed { key, value } => {}
+        EntryEvent::Expired { key, value } => {}
         _ => {}
     }
 }
 ```
 
-- You get the changes made by every client, not only yours. `events_of(&[EventKind::Removed])` listens to some kinds only.
+- You get the changes made by every client, not only yours. `events_of(&[EntryEventKind::Removed])` listens to some kinds only.
 - `Removed` covers `remove` and entries dropped because the cache was full. `Expired` covers entries the clean-up deleted.
 - The payload is Redisson's, so a listener also sees the changes Redisson clients make, and Redisson listeners see redissun's. As Redisson does, the first listener asks the server for its OS with `INFO server` to know how the lengths in the payload are written.
 - As in Redisson, each kind has its own channel, and the first listener sets `has-listeners` in the options hash. From then on every write publishes its changes, until the cache is deleted with `del`. Expired entries are always published by the clean-up.
 - Events of one kind arrive in order. When events of several kinds are waiting, `recv` returns removals first, then creations, updates and expirations.
 - A listener has a buffer of 256 events per kind. If it falls further behind, `recv` returns `Error::Lagged(n)` once and goes on.
 - `into_stream()` turns the listener into a `Stream`.
+- `events()` here returns entry events, Redisson's `MapEntryListener`. On a `HashMap`, `events()` returns keyspace notifications; on a cache those come from `keyspace_events()`.
+
+## Keyspace events
+
+```rust
+use redissun::MapEvent;
+
+let mut events = cache.keyspace_events().await?;
+if let MapEvent::Put { key } = events.recv().await? {}
+```
+
+- `keyspace_events()` and `keyspace_events_of(&[MapEventKind])` are Redisson's `MapPutListener`, `MapIncrListener`, `MapRemoveListener`, `DeletedObjectListener` and `ExpiredObjectListener` on the cache's hash. They return the same `MapEvents` as `HashMap::events()`, with the same server setting: `notify-keyspace-events` with `Eh` for field events, `g` for deletes, `x` for expiry, and `T` (Redis 8.8 or newer) for the changed key's name.
+- The temporary field `redissun__temp_val` that an increment writes and deletes is left out of subkey events. Without `T`, such writes still show up as events with `key: None`.
 
 ## How it is stored
 

@@ -4,7 +4,8 @@ use common::topology::Topology;
 use common::{client, connect_with, raw_command, unique};
 use futures::TryStreamExt;
 use redissun::{
-    Error, Event, EventKind, Events, EvictionMode, HashMapCache, JsonCodec, Object, StringCodec,
+    EntryEvent, EntryEventKind, EntryEvents, Error, EvictionMode, HashMapCache, JsonCodec, Object,
+    StringCodec,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -16,7 +17,7 @@ async fn pause() {
     sleep(Duration::from_millis(15)).await;
 }
 
-async fn next<K, V>(events: &mut Events<K, V, JsonCodec>) -> Event<K, V>
+async fn next<K, V>(events: &mut EntryEvents<K, V, JsonCodec>) -> EntryEvent<K, V>
 where
     K: serde::de::DeserializeOwned + Send,
     V: serde::de::DeserializeOwned + Send,
@@ -27,7 +28,7 @@ where
         .unwrap()
 }
 
-async fn nothing_arrives<K, V>(events: &mut Events<K, V, JsonCodec>)
+async fn nothing_arrives<K, V>(events: &mut EntryEvents<K, V, JsonCodec>)
 where
     K: serde::de::DeserializeOwned + Send + std::fmt::Debug,
     V: serde::de::DeserializeOwned + Send + std::fmt::Debug,
@@ -631,7 +632,7 @@ async fn events_report_created_updated_and_removed_entries() {
     cache.insert("a:1", "x:y").await.unwrap();
     assert_eq!(
         next(&mut events).await,
-        Event::Created {
+        EntryEvent::Created {
             key: "a:1".into(),
             value: "x:y".into()
         }
@@ -639,7 +640,7 @@ async fn events_report_created_updated_and_removed_entries() {
     cache.insert("a:1", "z").await.unwrap();
     assert_eq!(
         next(&mut events).await,
-        Event::Updated {
+        EntryEvent::Updated {
             key: "a:1".into(),
             value: "z".into(),
             previous: "x:y".into()
@@ -648,7 +649,7 @@ async fn events_report_created_updated_and_removed_entries() {
     cache.remove("a:1").await.unwrap();
     assert_eq!(
         next(&mut events).await,
-        Event::Removed {
+        EntryEvent::Removed {
             key: "a:1".into(),
             value: "z".into()
         }
@@ -666,12 +667,15 @@ async fn events_report_expired_entries_and_size_evictions() {
         .ttl(Duration::from_millis(150))
         .await
         .unwrap();
-    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    assert!(matches!(
+        next(&mut events).await,
+        EntryEvent::Created { .. }
+    ));
     sleep(Duration::from_millis(300)).await;
     let cleaner = cleaner(cache.name()).await;
     assert_eq!(
         next(&mut events).await,
-        Event::Expired {
+        EntryEvent::Expired {
             key: "short".into(),
             value: "1".into()
         }
@@ -680,20 +684,23 @@ async fn events_report_expired_entries_and_size_evictions() {
 
     cache.set_max_size(1, EvictionMode::Lru).await.unwrap();
     cache.insert("a", "1").await.unwrap();
-    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    assert!(matches!(
+        next(&mut events).await,
+        EntryEvent::Created { .. }
+    ));
     pause().await;
     cache.insert("b", "2").await.unwrap();
     sleep(Duration::from_millis(100)).await;
     assert_eq!(
         next(&mut events).await,
-        Event::Removed {
+        EntryEvent::Removed {
             key: "a".into(),
             value: "1".into()
         }
     );
     assert_eq!(
         next(&mut events).await,
-        Event::Created {
+        EntryEvent::Created {
             key: "b".into(),
             value: "2".into()
         }
@@ -705,13 +712,13 @@ async fn events_of_listens_to_the_chosen_kinds_only() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("cache"));
-    let mut removals = cache.events_of(&[EventKind::Removed]).await.unwrap();
+    let mut removals = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
     cache.insert("a", "1").await.unwrap();
     cache.insert("a", "2").await.unwrap();
     cache.remove("a").await.unwrap();
     assert_eq!(
         next(&mut removals).await,
-        Event::Removed {
+        EntryEvent::Removed {
             key: "a".into(),
             value: "2".into()
         }
@@ -732,11 +739,17 @@ async fn every_listener_gets_every_event_and_stopping_one_does_not_affect_the_ot
         .await
         .unwrap();
     writer.insert("a", "1").await.unwrap();
-    assert!(matches!(next(&mut first).await, Event::Created { .. }));
-    assert!(matches!(next(&mut second).await, Event::Created { .. }));
+    assert!(matches!(next(&mut first).await, EntryEvent::Created { .. }));
+    assert!(matches!(
+        next(&mut second).await,
+        EntryEvent::Created { .. }
+    ));
     drop(first);
     writer.insert("b", "2").await.unwrap();
-    assert!(matches!(next(&mut second).await, Event::Created { .. }));
+    assert!(matches!(
+        next(&mut second).await,
+        EntryEvent::Created { .. }
+    ));
 }
 
 #[tokio::test]
@@ -746,7 +759,10 @@ async fn deleting_the_cache_stops_the_events_until_somebody_listens_again() {
         .hash_map_cache::<String, String>(unique("cache"));
     let mut events = cache.events().await.unwrap();
     cache.insert("a", "1").await.unwrap();
-    assert!(matches!(next(&mut events).await, Event::Created { .. }));
+    assert!(matches!(
+        next(&mut events).await,
+        EntryEvent::Created { .. }
+    ));
     cache.del().await.unwrap();
     cache.insert("b", "2").await.unwrap();
     nothing_arrives(&mut events).await;
@@ -754,7 +770,7 @@ async fn deleting_the_cache_stops_the_events_until_somebody_listens_again() {
     cache.insert("c", "3").await.unwrap();
     assert_eq!(
         next(&mut events).await,
-        Event::Created {
+        EntryEvent::Created {
             key: "c".into(),
             value: "3".into()
         }
@@ -866,12 +882,15 @@ async fn an_insert_after_expiry_stores_the_new_value() {
 async fn a_size_eviction_sends_a_removed_event() {
     let cache = client().await.hash_map_cache::<i64, String>(unique("test"));
     cache.init_max_size(5, EvictionMode::Lru).await.unwrap();
-    let mut removed = cache.events_of(&[EventKind::Removed]).await.unwrap();
+    let mut removed = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
     for i in 1..=5i64 {
         cache.insert(&i, &i.to_string()).await.unwrap();
     }
     cache.insert(&6i64, "6").await.unwrap();
-    assert!(matches!(next(&mut removed).await, Event::Removed { .. }));
+    assert!(matches!(
+        next(&mut removed).await,
+        EntryEvent::Removed { .. }
+    ));
 }
 
 // Redisson: testRemainTimeToLive
@@ -1386,27 +1405,27 @@ async fn try_insert_succeeds_once_the_existing_entry_expired() {
 #[tokio::test]
 async fn created_events_arrive_for_every_kind_of_new_insert() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
-    let mut created = cache.events_of(&[EventKind::Created]).await.unwrap();
+    let mut created = cache.events_of(&[EntryEventKind::Created]).await.unwrap();
     let ttl = Duration::from_secs(2);
     cache.insert(&1, &2).await.unwrap();
     assert_eq!(
         next(&mut created).await,
-        Event::Created { key: 1, value: 2 }
+        EntryEvent::Created { key: 1, value: 2 }
     );
     cache.insert(&10, &2).ttl(ttl).await.unwrap();
     assert_eq!(
         next(&mut created).await,
-        Event::Created { key: 10, value: 2 }
+        EntryEvent::Created { key: 10, value: 2 }
     );
     cache.try_insert(&4, &1).await.unwrap();
     assert_eq!(
         next(&mut created).await,
-        Event::Created { key: 4, value: 1 }
+        EntryEvent::Created { key: 4, value: 1 }
     );
     cache.try_insert(&15, &2).ttl(ttl).await.unwrap();
     assert_eq!(
         next(&mut created).await,
-        Event::Created { key: 15, value: 2 }
+        EntryEvent::Created { key: 15, value: 2 }
     );
     nothing_arrives(&mut created).await;
 }
@@ -1415,12 +1434,12 @@ async fn created_events_arrive_for_every_kind_of_new_insert() {
 #[tokio::test]
 async fn updated_events_carry_the_new_and_previous_value() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
-    let mut updated = cache.events_of(&[EventKind::Updated]).await.unwrap();
+    let mut updated = cache.events_of(&[EntryEventKind::Updated]).await.unwrap();
     cache.insert(&1, &1).await.unwrap();
     cache.insert(&1, &3).await.unwrap();
     assert_eq!(
         next(&mut updated).await,
-        Event::Updated {
+        EntryEvent::Updated {
             key: 1,
             value: 3,
             previous: 1
@@ -1434,7 +1453,7 @@ async fn updated_events_carry_the_new_and_previous_value() {
         .unwrap();
     assert_eq!(
         next(&mut updated).await,
-        Event::Updated {
+        EntryEvent::Updated {
             key: 10,
             value: 2,
             previous: 1
@@ -1449,17 +1468,17 @@ async fn expired_events_arrive_for_entries_whose_ttl_passed() {
     let client =
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(200))).await;
     let cache = client.hash_map_cache::<i32, i32>(unique("simple"));
-    let mut expired = cache.events_of(&[EventKind::Expired]).await.unwrap();
+    let mut expired = cache.events_of(&[EntryEventKind::Expired]).await.unwrap();
     let ttl = Duration::from_millis(300);
     cache.insert(&10, &2).ttl(ttl).await.unwrap();
     assert_eq!(
         next(&mut expired).await,
-        Event::Expired { key: 10, value: 2 }
+        EntryEvent::Expired { key: 10, value: 2 }
     );
     cache.try_insert(&15, &2).ttl(ttl).await.unwrap();
     assert_eq!(
         next(&mut expired).await,
-        Event::Expired { key: 15, value: 2 }
+        EntryEvent::Expired { key: 15, value: 2 }
     );
 }
 
@@ -1485,12 +1504,12 @@ async fn reinserting_an_expired_entry_returns_none_and_stores_it_again() {
 #[tokio::test]
 async fn remove_sends_a_removed_event_with_the_old_value() {
     let cache = client().await.hash_map_cache::<i32, i32>(unique("simple"));
-    let mut removed = cache.events_of(&[EventKind::Removed]).await.unwrap();
+    let mut removed = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
     cache.insert(&10, &1).await.unwrap();
     cache.remove(&10).await.unwrap();
     assert_eq!(
         next(&mut removed).await,
-        Event::Removed { key: 10, value: 1 }
+        EntryEvent::Removed { key: 10, value: 1 }
     );
     nothing_arrives(&mut removed).await;
 }
@@ -1946,7 +1965,7 @@ async fn an_entry_expires_and_is_reported_on_a_cluster() {
         .await
         .expect("could not connect to the cluster");
     let cache = client.hash_map_cache::<String, String>(unique("simple"));
-    let mut expired = cache.events_of(&[EventKind::Expired]).await.unwrap();
+    let mut expired = cache.events_of(&[EntryEventKind::Expired]).await.unwrap();
     cache
         .insert("1", "2")
         .ttl(Duration::from_secs(1))
@@ -1958,7 +1977,7 @@ async fn an_entry_expires_and_is_reported_on_a_cluster() {
         .unwrap();
     assert_eq!(
         event,
-        Event::Expired {
+        EntryEvent::Expired {
             key: "1".into(),
             value: "2".into()
         }
@@ -2232,4 +2251,81 @@ async fn insert_clears_the_limits_of_a_live_entry() {
         let score = raw_command(&["ZSCORE", &format!("{set}:{{{name}}}"), "\"a\""]).await;
         assert_eq!(score.trim(), "$-1", "{set} still has the entry");
     }
+}
+
+/// A client on its own server with `notify-keyspace-events` set to `flags`.
+async fn keyspace_client(url: &str, flags: &str) -> redissun::Client {
+    common::raw_command_at(url, &["CONFIG", "SET", "notify-keyspace-events", flags]).await;
+    redissun::Client::builder()
+        .url(url.to_string())
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn next_keyspace_event(
+    events: &mut redissun::MapEvents<String, JsonCodec>,
+) -> redissun::MapEvent<String> {
+    tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("no event within 2 s")
+        .unwrap()
+}
+
+// Redisson: MapPutListener, MapRemoveListener on an RMapCache
+#[tokio::test]
+async fn keyspace_events_report_put_and_remove() {
+    let (_container, url) = common::own_redis8().await;
+    let client = keyspace_client(&url, "ETh").await;
+    let cache = client.hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache.keyspace_events().await.unwrap();
+    cache.insert("a", "1").await.unwrap();
+    assert_eq!(
+        next_keyspace_event(&mut events).await,
+        redissun::MapEvent::Put {
+            key: Some("a".to_string())
+        }
+    );
+    cache.remove("a").await.unwrap();
+    assert_eq!(
+        next_keyspace_event(&mut events).await,
+        redissun::MapEvent::Removed {
+            key: Some("a".to_string())
+        }
+    );
+}
+
+// Redisson: MapIncrListener; addAndGet writes and deletes `temp_val__redisson`
+#[tokio::test]
+async fn keyspace_events_skip_the_temporary_incr_field() {
+    let (_container, url) = common::own_redis8().await;
+    let client = keyspace_client(&url, "ETh").await;
+    let name = unique("cache");
+    let cache = client.hash_map_cache::<String, i64>(name.clone());
+    let mut events = cache.keyspace_events().await.unwrap();
+    // What ADD_AND_GET does to the temporary field (Task 3 brings incr_by).
+    common::raw_command_at(
+        &url,
+        &[
+            "EVAL",
+            "redis.call('hset', KEYS[1], 'redissun__temp_val', '1'); \
+             redis.call('hincrbyfloat', KEYS[1], 'redissun__temp_val', '1'); \
+             redis.call('hdel', KEYS[1], 'redissun__temp_val'); return 1",
+            "1",
+            &name,
+        ],
+    )
+    .await;
+    cache.insert("n", &1).await.unwrap();
+    assert_eq!(
+        next_keyspace_event(&mut events).await,
+        redissun::MapEvent::Put {
+            key: Some("n".to_string())
+        }
+    );
+    let outcome = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
+    assert!(
+        !matches!(outcome, Ok(Err(_))),
+        "unexpected error {outcome:?}"
+    );
 }

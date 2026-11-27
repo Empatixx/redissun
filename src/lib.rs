@@ -98,7 +98,7 @@ pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
 pub use collections::hash_map::HashMap;
 pub use collections::hash_map_cache::{
-    Event, EventKind, Events, EvictionMode, HashMapCache, Insert, TryInsert,
+    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, Insert, TryInsert,
 };
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};

@@ -4,6 +4,7 @@ mod scripts;
 
 use crate::client::request::Request;
 use crate::codec::Codec;
+use crate::collections::map::events::{self as map_events, MapEventKind, MapEvents};
 use crate::error::{Error, Result};
 use crate::eviction::{self, KEYS_LIMIT};
 use crate::lua::Lua;
@@ -24,7 +25,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub(crate) use entry_events::LengthPrefix;
-pub use entry_events::{Event, EventKind, Events};
+
+/// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
+const TEMP_VAL_FIELD: &[u8] = b"redissun__temp_val";
+pub use entry_events::{EntryEvent, EntryEventKind, EntryEvents};
 
 const SCAN_PAGE: u32 = 100;
 
@@ -382,10 +386,10 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
                 Name::Main => name.to_string(),
                 Name::Timeout => names::timeout(name),
                 Name::Idle => names::idle(name),
-                Name::Created => names::channel(EventKind::Created, name),
-                Name::Updated => names::channel(EventKind::Updated, name),
-                Name::Removed => names::channel(EventKind::Removed, name),
-                Name::Expired => names::channel(EventKind::Expired, name),
+                Name::Created => names::channel(EntryEventKind::Created, name),
+                Name::Updated => names::channel(EntryEventKind::Updated, name),
+                Name::Removed => names::channel(EntryEventKind::Removed, name),
+                Name::Expired => names::channel(EntryEventKind::Expired, name),
                 Name::LastAccess => names::last_access(name),
                 Name::Options => names::options(name),
                 Name::Lease => names::lease(name),
@@ -501,16 +505,25 @@ where
     }
 
     /// Starts listening to every kind of change of the cache, made by any client. See [`HashMapCache::events_of`].
-    #[doc(alias = "addListener")]
-    pub async fn events(&self) -> Result<Events<K, V, C>> {
-        self.events_of(&EventKind::ALL).await
+    ///
+    /// Unlike [`HashMap::events`](crate::HashMap::events), which returns keyspace notifications, this returns the entry events of Redisson's `MapEntryListener`; the keyspace notifications of a cache come from [`HashMapCache::keyspace_events`].
+    #[doc(
+        alias = "addListener",
+        alias = "MapEntryListener",
+        alias = "EntryCreatedListener",
+        alias = "EntryUpdatedListener",
+        alias = "EntryRemovedListener",
+        alias = "EntryExpiredListener"
+    )]
+    pub async fn events(&self) -> Result<EntryEvents<K, V, C>> {
+        self.events_of(&EntryEventKind::ALL).await
     }
 
     /// Starts listening to the given kinds of change, made by any client.
     ///
     /// As in Redisson, the first listener marks the cache in Redis, and from then on every write publishes its changes until the cache is deleted with [`Object::del`](crate::Object::del). Expired entries are always published by the clean-up. The payload is Redisson's, so listeners see the changes Redisson clients make too.
-    pub async fn events_of(&self, kinds: &[EventKind]) -> Result<Events<K, V, C>> {
-        if !EventKind::ALL.iter().any(|kind| kinds.contains(kind)) {
+    pub async fn events_of(&self, kinds: &[EntryEventKind]) -> Result<EntryEvents<K, V, C>> {
+        if !EntryEventKind::ALL.iter().any(|kind| kinds.contains(kind)) {
             return Err(Error::Config("listen to at least one kind of event".into()));
         }
         let prefix = self.length_prefix().await?;
@@ -519,7 +532,7 @@ where
             .arg(("has-listeners", 1));
         let _: i64 = self.on_options(cmd).await?;
         let mut sources = std::vec::Vec::new();
-        for kind in EventKind::ALL {
+        for kind in EntryEventKind::ALL {
             if kinds.contains(&kind) {
                 let (subscription, receiver) = self
                     .key
@@ -531,7 +544,27 @@ where
                 sources.push((kind, subscription, receiver));
             }
         }
-        Ok(Events::new(sources, prefix, self.codec.clone()))
+        Ok(EntryEvents::new(sources, prefix, self.codec.clone()))
+    }
+
+    /// Starts listening to the keyspace notifications of the cache's hash, Redisson's `addListener` with the map and object listeners. See [`MapEvents`] for the server setting it needs.
+    ///
+    /// This is what [`HashMap::events`](crate::HashMap::events) returns; on a cache, [`HashMapCache::events`] returns the entry events instead. The temporary field an increment writes and deletes is left out.
+    #[doc(
+        alias = "addListener",
+        alias = "MapPutListener",
+        alias = "MapIncrListener",
+        alias = "MapRemoveListener",
+        alias = "MapDeletedListener",
+        alias = "MapExpiredListener"
+    )]
+    pub async fn keyspace_events(&self) -> Result<MapEvents<K, C>> {
+        self.keyspace_events_of(&MapEventKind::ALL).await
+    }
+
+    /// Starts listening to the given kinds of keyspace notification. See [`HashMapCache::keyspace_events`].
+    pub async fn keyspace_events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
+        map_events::subscribe(&self.key, self.codec.clone(), kinds, Some(TEMP_VAL_FIELD)).await
     }
 
     /// Returns the value for the key, or `None` when it is missing or expired. A read starts the idle time of the entry again and counts as a use for the size limit.

@@ -1,6 +1,6 @@
 //! The key and channel names of a [`HashMapCache`](super::HashMapCache), built with Redisson's `prefixName`/`suffixName` from the raw name, plus the names redissun 0.23 and earlier used, for the migration.
 
-use super::EventKind;
+use super::EntryEventKind;
 use crate::object::{prefix_name, suffix_name, tagged};
 
 /// The sorted set of the time-to-live deadlines, Redisson's `getTimeoutSetName`.
@@ -29,12 +29,12 @@ pub(crate) fn lease(name: &str) -> String {
 }
 
 /// The channel of one kind of entry event, Redisson's `get*ChannelName`.
-pub(crate) fn channel(kind: EventKind, name: &str) -> String {
+pub(crate) fn channel(kind: EntryEventKind, name: &str) -> String {
     let prefix = match kind {
-        EventKind::Created => "redissun_map_cache_created",
-        EventKind::Updated => "redissun_map_cache_updated",
-        EventKind::Removed => "redissun_map_cache_removed",
-        EventKind::Expired => "redissun_map_cache_expired",
+        EntryEventKind::Created => "redissun_map_cache_created",
+        EntryEventKind::Updated => "redissun_map_cache_updated",
+        EntryEventKind::Removed => "redissun_map_cache_removed",
+        EntryEventKind::Expired => "redissun_map_cache_expired",
     };
     prefix_name(prefix, name)
 }
@@ -65,7 +65,7 @@ pub(crate) fn old_options(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collections::hash_map_cache::EventKind;
+    use crate::collections::hash_map_cache::EntryEventKind;
 
     #[test]
     fn names_match_redisson() {
@@ -79,19 +79,19 @@ mod tests {
         assert_eq!(lease("m"), "redissun__map__lease:{m}:");
         assert_eq!(latch("m"), "redissun__execute_task_once_latch:{m}");
         assert_eq!(
-            channel(EventKind::Created, "m"),
+            channel(EntryEventKind::Created, "m"),
             "redissun_map_cache_created:{m}"
         );
         assert_eq!(
-            channel(EventKind::Updated, "m"),
+            channel(EntryEventKind::Updated, "m"),
             "redissun_map_cache_updated:{m}"
         );
         assert_eq!(
-            channel(EventKind::Removed, "m"),
+            channel(EntryEventKind::Removed, "m"),
             "redissun_map_cache_removed:{m}"
         );
         assert_eq!(
-            channel(EventKind::Expired, "m"),
+            channel(EntryEventKind::Expired, "m"),
             "redissun_map_cache_expired:{m}"
         );
         assert_eq!(old_main("m"), "{m}");
@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(options("{t}:m"), "{t}:m:redissun_options");
         assert_eq!(lease("{t}:m"), "redissun__map__lease:{t}:m:");
         assert_eq!(
-            channel(EventKind::Created, "{t}:m"),
+            channel(EntryEventKind::Created, "{t}:m"),
             "redissun_map_cache_created:{t}:m"
         );
         assert_eq!(old_main("{t}:m"), "{t}:m");

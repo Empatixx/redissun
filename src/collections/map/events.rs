@@ -107,6 +107,8 @@ pub struct MapEvents<K, C: Codec> {
     subkey_seen: HashSet<String>,
     // Events in the order the server sent them, each with the time it may be returned. A key event of a field waits there for the subkey event of the same write and carries its event name so that one can drop it; everything else is due at once.
     queue: VecDeque<Queued<K>>,
+    // A field whose subkey events are dropped: `HashMapCache`'s increment writes and deletes a temporary field.
+    skip_field: Option<&'static [u8]>,
     _marker: PhantomData<fn() -> K>,
 }
 
@@ -124,11 +126,12 @@ struct Queued<K> {
     event: Result<MapEvent<K>>,
 }
 
-/// Subscribes to the patterns of `kinds` for the map at `key`.
+/// Subscribes to the patterns of `kinds` for the map at `key`. Subkey events of `skip_field` are dropped before decoding.
 pub(crate) async fn subscribe<K, C: Codec>(
     key: &Key,
     codec: C,
     kinds: &[MapEventKind],
+    skip_field: Option<&'static [u8]>,
 ) -> Result<MapEvents<K, C>> {
     let pubsub = key.core.pubsub().await?.clone();
     let mut sources = std::vec::Vec::new();
@@ -148,6 +151,7 @@ pub(crate) async fn subscribe<K, C: Codec>(
         sources,
         subkey_seen: HashSet::new(),
         queue: VecDeque::new(),
+        skip_field,
         _marker: PhantomData,
     })
 }
@@ -204,6 +208,9 @@ where
                 .retain(|queued| queued.key_event.as_deref() != Some(event_name.as_str()));
             self.subkey_seen.insert(event_name.clone());
             for field in fields {
+                if self.skip_field == Some(field) {
+                    continue;
+                }
                 let event = self
                     .codec
                     .decode::<K>(field)
