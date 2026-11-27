@@ -7,7 +7,7 @@ use super::scripts::{
 use super::{limits, HashMapCache, Name, PUBLISH};
 use crate::codec::Codec;
 use crate::collections::map::entry::{Entry, Target};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -170,7 +170,7 @@ where
     }
 }
 
-/// A pending [`HashMapCache::set`]. Await it, optionally after setting [`Set::ttl`] or [`Set::max_idle`].
+/// A pending [`HashMapCache::set`]. Await it, optionally after setting [`Set::ttl`], [`Set::max_idle`] or [`Set::lease`].
 #[must_use = "a set does nothing until it is awaited"]
 pub struct Set<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
     cache: &'a HashMapCache<K, V, C>,
@@ -178,6 +178,7 @@ pub struct Set<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
     v: &'a W,
     ttl: Option<Duration>,
     max_idle: Option<Duration>,
+    token: Option<&'a str>,
 }
 
 impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> Set<'a, K, V, C, Q, W> {
@@ -188,7 +189,15 @@ impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> Set<'a, K, V, C, Q, W> {
             v,
             ttl: None,
             max_idle: None,
+            token: None,
         }
+    }
+
+    /// Stores the value only while the lease `token` holds, and frees the lease, Redisson's `putWithLease`: the way to finish a lease that [`HashMapCache::lease`] took in another process, which handed over [`LeaseGuard::token`](super::LeaseGuard::token). The result means what [`LeaseGuard::insert`](super::LeaseGuard::insert) returns: `false` when the lease is gone or belongs to someone else (nothing stored), and also when it matched but a live entry was there (stored over it). An empty token is [`Error::Config`](crate::Error::Config).
+    #[doc(alias = "putWithLease")]
+    pub fn lease(mut self, token: &'a str) -> Self {
+        self.token = Some(token);
+        self
     }
 
     /// Makes the entry expire after `ttl`, whether it is read or not. Zero means no time to live.
@@ -221,6 +230,20 @@ where
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
+            if let Some(token) = self.token {
+                // An empty token would make the script store without any lease check.
+                if token.is_empty() {
+                    return Err(Error::Config("lease token is empty".into()));
+                }
+                return cache
+                    .fast_put_with_limits(
+                        &limits,
+                        key,
+                        value,
+                        Bytes::copy_from_slice(token.as_bytes()),
+                    )
+                    .await;
+            }
             if limits.any() {
                 // An empty lease token: the script then behaves exactly as `PUT_WITH_LIMITS`.
                 cache

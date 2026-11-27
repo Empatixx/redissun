@@ -1,5 +1,6 @@
 mod builders;
 mod entry_events;
+mod lease;
 mod names;
 mod scripts;
 
@@ -30,6 +31,7 @@ use std::time::Duration;
 
 pub use builders::{EntryRequest, ExpireEntries, ExpireEntry, Extend, Insert, Set, TryInsert};
 pub(crate) use entry_events::LengthPrefix;
+pub use lease::{Lease, LeaseGuard, LeaseInsert};
 
 /// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
 const TEMP_VAL_FIELD: &[u8] = b"redissun__temp_val";

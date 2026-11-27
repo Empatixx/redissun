@@ -4,8 +4,8 @@ use common::topology::Topology;
 use common::{client, connect_with, raw_command, unique};
 use futures::TryStreamExt;
 use redissun::{
-    EntryEvent, EntryEventKind, EntryEvents, Error, EvictionMode, HashMapCache, JsonCodec, Object,
-    StringCodec,
+    EntryEvent, EntryEventKind, EntryEvents, Error, EvictionMode, HashMapCache, JsonCodec, Lease,
+    Object, StringCodec,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -3214,4 +3214,315 @@ async fn peek_many_keeps_order() {
     );
     let none: [&str; 0] = [];
     assert!(cache.peek_many(&none).await.unwrap().is_empty());
+}
+
+/// The lease string of the JSON key `k` in the cache `name`.
+fn lease_key(name: &str, k: &str) -> String {
+    format!("redissun__map__lease:{{{name}}}:\"{k}\"")
+}
+
+async fn lease_exists(name: &str, k: &str) -> bool {
+    raw_command(&["EXISTS", &lease_key(name, k)]).await.trim() == ":1"
+}
+
+#[tokio::test]
+async fn the_first_miss_takes_the_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let first = cache.lease("a", Duration::from_secs(1)).await.unwrap();
+    assert!(matches!(first, Lease::Acquired(_)), "{first:?}");
+    let second = cache.lease("a", Duration::from_secs(1)).await.unwrap();
+    assert!(matches!(second, Lease::Held), "{second:?}");
+    assert!(lease_exists(&name, "a").await);
+}
+
+#[tokio::test]
+async fn a_hit_needs_no_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    cache.insert("a", "x").await.unwrap();
+    let outcome = cache.lease("a", Duration::from_secs(1)).await.unwrap();
+    assert!(
+        matches!(outcome, Lease::Hit(ref v) if v == "x"),
+        "{outcome:?}"
+    );
+    assert!(!lease_exists(&name, "a").await);
+}
+
+#[tokio::test]
+async fn inserting_through_the_guard_stores_and_frees_the_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    assert!(guard.insert("x").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("x"));
+    assert_eq!(
+        raw_command(&["EXISTS", &lease_key(&name, "a")])
+            .await
+            .trim(),
+        ":0"
+    );
+}
+
+#[tokio::test]
+async fn the_guard_insert_takes_limits() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    assert!(guard
+        .insert("x")
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap());
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("x"));
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_guard_insert_takes_max_idle() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    assert!(guard
+        .insert("x")
+        .max_idle(Duration::from_millis(300))
+        .await
+        .unwrap());
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_expired_guard_stores_nothing() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let Lease::Acquired(late) = cache.lease("a", Duration::from_millis(200)).await.unwrap() else {
+        panic!("no lease");
+    };
+    sleep(Duration::from_millis(400)).await;
+    let Lease::Acquired(fresh) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("the expired lease was not given out again");
+    };
+    assert!(!late.insert("v1").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    assert!(fresh.insert("v2").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("v2"));
+}
+
+#[tokio::test]
+async fn an_expired_guard_with_nobody_else_stores_nothing() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let Lease::Acquired(late) = cache.lease("a", Duration::from_millis(200)).await.unwrap() else {
+        panic!("no lease");
+    };
+    sleep(Duration::from_millis(400)).await;
+    assert!(!late.insert("v1").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_dropped_guard_leaves_the_lease_until_it_expires() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let guard = cache.lease("a", Duration::from_millis(300)).await.unwrap();
+    assert!(matches!(guard, Lease::Acquired(_)));
+    drop(guard);
+    let held = cache.lease("a", Duration::from_millis(300)).await.unwrap();
+    assert!(matches!(held, Lease::Held), "{held:?}");
+    sleep(Duration::from_millis(450)).await;
+    let again = cache.lease("a", Duration::from_millis(300)).await.unwrap();
+    assert!(matches!(again, Lease::Acquired(_)), "{again:?}");
+}
+
+#[tokio::test]
+async fn another_process_finishes_the_lease_with_the_token() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let other = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    assert!(!guard.token().is_empty());
+    assert!(!other.set("a", "x").lease("wrong").await.unwrap());
+    let empty = other.set("a", "x").lease("").await;
+    assert!(matches!(empty, Err(Error::Config(_))), "{empty:?}");
+    assert_eq!(other.get("a").await.unwrap(), None);
+    assert!(other.set("a", "x").lease(guard.token()).await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("x"));
+    assert!(!lease_exists(&name, "a").await);
+}
+
+#[tokio::test]
+async fn a_set_with_a_lease_takes_limits() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    let token = guard.token().to_string();
+    assert!(cache
+        .set("a", "x")
+        .lease(&token)
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap());
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn guard_remove_deletes_entry_and_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    // A write with limits leaves the lease in place, as in Redisson.
+    cache
+        .insert("a", "x")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(lease_exists(&name, "a").await);
+    assert!(guard.remove().await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    assert!(!cache.contains_key("a").await.unwrap());
+    assert!(!lease_exists(&name, "a").await);
+}
+
+#[tokio::test]
+async fn guard_remove_without_an_entry_frees_the_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    assert!(!guard.remove().await.unwrap());
+    assert!(!lease_exists(&name, "a").await);
+}
+
+#[tokio::test]
+async fn invalidate_deletes_entry_and_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    cache
+        .insert("a", "x")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(cache.invalidate("a").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    assert!(!lease_exists(&name, "a").await);
+    assert!(!guard.insert("late").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    assert!(!cache.invalidate("a").await.unwrap());
+}
+
+#[tokio::test]
+async fn invalidate_publishes_a_removed_event() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache.events().await.unwrap();
+    pause().await;
+    cache.insert("a", "x").await.unwrap();
+    assert!(matches!(
+        next(&mut events).await,
+        EntryEvent::Created { .. }
+    ));
+    assert!(cache.invalidate("a").await.unwrap());
+    match next(&mut events).await {
+        EntryEvent::Removed { key, value } => {
+            assert_eq!(key, "a");
+            assert_eq!(value, "x");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_plain_insert_frees_the_lease() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    cache.insert("a", "x").await.unwrap();
+    assert!(!lease_exists(&name, "a").await);
+    assert!(!guard.insert("late").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("x"));
+
+    let Lease::Acquired(guard) = cache.lease("b", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    assert!(cache.set("b", "y").await.unwrap());
+    assert!(!lease_exists(&name, "b").await);
+    assert!(!guard.insert("late").await.unwrap());
+    assert_eq!(cache.get("b").await.unwrap().as_deref(), Some("y"));
+}
+
+#[tokio::test]
+async fn a_zero_lease_is_a_config_error() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let outcome = cache.lease("a", Duration::ZERO).await;
+    assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
+    let outcome = cache.lease("a", Duration::MAX).await;
+    assert!(matches!(outcome, Err(Error::Config(_))), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn a_guard_insert_over_a_live_entry_stores_but_reports_false() {
+    let name = unique("cache");
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let Lease::Acquired(guard) = cache.lease("a", Duration::from_secs(5)).await.unwrap() else {
+        panic!("no lease");
+    };
+    // A write with limits keeps the lease; the guard then writes over it and reports `false`, as Redisson does.
+    cache
+        .insert("a", "x")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(!guard.insert("y").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("y"));
+    assert!(!lease_exists(&name, "a").await);
 }

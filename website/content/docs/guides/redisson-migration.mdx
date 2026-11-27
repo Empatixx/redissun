@@ -399,6 +399,9 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 | `getAllWithTTLOnly(keys)` | `peek_many(&[&k, ..])` → `Vec<Option<V>>` in key order |
 | `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `hash_map::Entry`; a write clears the entry's TTL and max idle, unlike Redisson's `compute`, which keeps them |
 | `compute(k, ttl, f)`, `computeIfAbsent(k, ttl, f)` | `entry(&k).ttl(ttl)` |
+| `getWithLease(k, leaseTime)` | `lease(&k, time)` → `Lease::Hit(v)`, `Lease::Acquired(guard)` or `Lease::Held`; the other holder's token is not returned |
+| `putWithLease(k, v[, ttl[, maxIdle]], token)` | `guard.insert(&v)[.ttl(ttl)][.max_idle(idle)]` → `bool`; in another process `set(&k, &v).lease(token)` with `guard.token()` |
+| `removeWithLease(k)` | `guard.remove()`, or `invalidate(&k)` without a lease |
 | `getLock(k)`, `getFairLock(k)`, `getReadWriteLock(k)`, `getSemaphore(k)`, `getCountDownLatch(k)`, `getPermitExpirableSemaphore(k)` | `lock(&k)`, `fair_lock(&k)`, `rw_lock(&k)`, `semaphore(&k)`, `count_down_latch(&k)`, `permit_expirable_semaphore(&k)` |
 | `getAll(keys)` | `get_many(&[&k, ..])` → `Vec<Option<V>>` in key order |
 | `containsValue(v)` | `contains_value(&v)` |
