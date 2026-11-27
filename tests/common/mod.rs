@@ -159,6 +159,19 @@ pub async fn own_redis_tag(tag: &str) -> (ContainerAsync<Redis>, String) {
     (container, format!("redis://127.0.0.1:{port}"))
 }
 
+/// A server of its own from the Redis-compatible image `name:tag`, such as `valkey/valkey`.
+pub async fn own_redis_image(name: &str, tag: &str) -> (ContainerAsync<Redis>, String) {
+    let container = Redis::default()
+        .with_name(name)
+        .with_tag(tag)
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    wait_until_ready(port).await;
+    (container, format!("redis://127.0.0.1:{port}"))
+}
+
 /// A Redis 8 server of its own, for tests that change its configuration.
 pub async fn own_redis8() -> (ContainerAsync<Redis>, String) {
     let container = Redis::default()

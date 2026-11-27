@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    client, own_redis_tag, raw_command, raw_command_at, redis_gcra_client, redis_gcra_url, unique,
-    GCRA_TAG,
+    client, own_redis_image, own_redis_tag, raw_command, raw_command_at, redis_gcra_client,
+    redis_gcra_url, redis_url, unique, GCRA_TAG,
 };
 use redissun::{Client, Error, Gcra, GcraResult, Object};
 use std::time::Duration;
@@ -368,4 +368,268 @@ async fn the_probe_writes_nothing() {
     assert_eq!(gcra_calls(&url).await, 2, "the probe and one acquire");
     acquire(&gcra).await;
     assert_eq!(gcra_calls(&url).await, 3, "the probe ran again");
+}
+
+// Task 3: the Lua port on servers without GCRA (Redis 7.4 here).
+
+#[tokio::test]
+async fn redisson_try_acquire_lua() {
+    try_acquire_case(client().await).await;
+}
+
+#[tokio::test]
+async fn redisson_try_acquire_with_tokens_lua() {
+    try_acquire_with_tokens_case(client().await).await;
+}
+
+#[tokio::test]
+async fn redisson_set_rate_lua() {
+    set_rate_case(client().await).await;
+}
+
+#[tokio::test]
+async fn redisson_try_acquire_rate_not_set_lua() {
+    try_acquire_rate_not_set_case(client().await).await;
+}
+
+#[tokio::test]
+async fn redisson_delete_lua() {
+    delete_case(client().await).await;
+}
+
+#[tokio::test]
+async fn available_tokens_count_down_lua() {
+    available_tokens_count_down_case(client().await).await;
+}
+
+#[tokio::test]
+async fn retry_after_is_none_for_a_request_that_never_fits_lua() {
+    retry_after_is_none_for_a_request_that_never_fits_case(client().await).await;
+}
+
+#[tokio::test]
+async fn the_server_has_no_gcra() {
+    let reply = raw_command(&["COMMAND", "INFO", "GCRA"]).await;
+    // A nil entry, as RESP2 writes it.
+    assert_eq!(reply, "*1\r\n$-1\r\n", "Redis 7.4 has GCRA now: {reply:?}");
+}
+
+/// The server's `TIME` in microseconds.
+async fn server_micros(url: &str) -> i64 {
+    let reply = raw_command_at(url, &["TIME"]).await;
+    let parts: Vec<i64> = reply
+        .split("\r\n")
+        .filter(|line| !line.is_empty() && !line.starts_with(['*', '$']))
+        .map(|line| line.parse().unwrap())
+        .collect();
+    parts[0] * 1_000_000 + parts[1]
+}
+
+#[tokio::test]
+async fn the_lua_state_is_a_string_with_a_deadline() {
+    let url = redis_url().await;
+    let gcra = gcra(&client().await);
+    gcra.init_rate(2, 4, secs(1)).await.unwrap();
+    acquire(&gcra).await;
+    let now = server_micros(&url).await;
+    assert_eq!(raw_command(&["TYPE", gcra.name()]).await, "+string\r\n");
+    let tat: i64 = bulk(&raw_command(&["GET", gcra.name()]).await)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let expected = now + 250_000;
+    assert!((tat - expected).abs() <= 5_000_000, "{tat} vs {expected}");
+    let ttl = integer(&raw_command(&["PTTL", gcra.name()]).await);
+    assert!(ttl > 0 && ttl <= 250, "{ttl}");
+}
+
+/// A seeded xorshift64: the generated cases repeat for one seed.
+struct XorShift(u64);
+
+impl XorShift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    /// A number in `low..=high`.
+    fn range(&mut self, low: u64, high: u64) -> u64 {
+        low + self.next() % (high - low + 1)
+    }
+}
+
+async fn run_sequence(gcra: &Gcra, config: (u64, u64, Duration), calls: &[u64]) -> Vec<GcraResult> {
+    gcra.init_rate(config.0, config.1, config.2).await.unwrap();
+    let mut results = Vec::new();
+    for &tokens in calls {
+        results.push(gcra.try_acquire().tokens(tokens).await.unwrap());
+    }
+    results
+}
+
+// Review Focus 1: the Lua port answers what the server's own gcra.c answers.
+#[tokio::test]
+async fn lua_matches_native_on_generated_sequences() {
+    let lua = client().await;
+    let native = redis_gcra_client().await;
+    let seed = 0x9e37_79b9_7f4a_7c15;
+    let mut random = XorShift(seed);
+    for case in 0..200 {
+        let max_burst = random.range(0, 5);
+        let tokens_per_period = random.range(1, 5);
+        let k = [1, 2, 60][random.range(0, 2) as usize];
+        let period = secs(tokens_per_period * k);
+        let calls: Vec<u64> = (0..random.range(1, 10))
+            .map(|_| random.range(1, 7))
+            .collect();
+        let config = (max_burst, tokens_per_period, period);
+        let from_lua = run_sequence(&gcra(&lua), config, &calls).await;
+        let from_native = run_sequence(&gcra(&native), config, &calls).await;
+        assert_eq!(
+            from_lua, from_native,
+            "seed {seed:#x}, case {case}: config {config:?}, calls {calls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lua_matches_native_on_fractional_periods() {
+    let lua = client().await;
+    let native = redis_gcra_client().await;
+    for config in [
+        (2, 4, Duration::from_millis(250)),
+        (0, 3, Duration::from_millis(1500)),
+    ] {
+        let from_lua = run_sequence(&gcra(&lua), config, &[1, 1, 1]).await;
+        let from_native = run_sequence(&gcra(&native), config, &[1, 1, 1]).await;
+        for (l, n) in from_lua.iter().zip(&from_native) {
+            assert_eq!(
+                (l.limited, l.max_tokens, l.available_tokens),
+                (n.limited, n.max_tokens, n.available_tokens),
+                "{config:?}: {l:?} vs {n:?}"
+            );
+            let close = |a: Duration, b: Duration| a.abs_diff(b) <= secs(1);
+            match (l.retry_after, n.retry_after) {
+                (None, None) => {}
+                (Some(a), Some(b)) => assert!(close(a, b), "{config:?}: {l:?} vs {n:?}"),
+                _ => panic!("{config:?}: {l:?} vs {n:?}"),
+            }
+            assert!(
+                close(l.full_burst_after, n.full_burst_after),
+                "{config:?}: {l:?} vs {n:?}"
+            );
+        }
+    }
+}
+
+/// The error text of a `try_acquire` on a limiter whose settings are written raw at the server `url`.
+async fn raw_config_error(client: &Client, url: &str, fields: &[&str]) -> String {
+    let gcra = gcra(client);
+    let config = config_key(gcra.name());
+    let mut command = vec!["HSET", config.as_str()];
+    command.extend_from_slice(fields);
+    raw_command_at(url, &command).await;
+    match gcra.try_acquire().await {
+        Err(Error::Redis(message)) => message,
+        other => panic!("expected a server error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn lua_matches_native_on_errors() {
+    let lua = client().await;
+    let native = redis_gcra_client().await;
+    let lua_url = redis_url().await;
+    let native_url = redis_gcra_url().await;
+    let period = ["maxBurst", "2", "rate", "4", "period", "1e12"];
+    for message in [
+        raw_config_error(&lua, &lua_url, &period).await,
+        raw_config_error(&native, &native_url, &period).await,
+    ] {
+        assert!(
+            message.contains("period must be > 0 and < 1e12"),
+            "{message}"
+        );
+    }
+    let overflow = [
+        "maxBurst",
+        "9007199254740992",
+        "rate",
+        "1",
+        "period",
+        "1000000",
+    ];
+    let from_lua = raw_config_error(&lua, &lua_url, &overflow).await;
+    let from_native = raw_config_error(&native, &native_url, &overflow).await;
+    let text = |message: &str| -> String {
+        let start = message
+            .find("GCRA limiting")
+            .unwrap_or_else(|| panic!("{message}"));
+        let end = message
+            .find("would cause an overflow")
+            .unwrap_or_else(|| panic!("{message}"));
+        message[start..end].to_string()
+    };
+    assert_eq!(text(&from_lua), text(&from_native));
+}
+
+// Review Focus 3.
+#[tokio::test]
+async fn a_lua_state_on_a_gcra_server_is_wrongtype_until_reset() {
+    let url = redis_gcra_url().await;
+    let gcra = gcra(&redis_gcra_client().await);
+    gcra.init_rate(2, 4, secs(1)).await.unwrap();
+    raw_command_at(&url, &["SET", gcra.name(), "1", "PX", "60000"]).await;
+    match gcra.try_acquire().await {
+        Err(Error::Redis(message)) => assert!(message.contains("WRONGTYPE"), "{message}"),
+        other => panic!("expected WRONGTYPE, got {other:?}"),
+    }
+    gcra.set_rate(2, 4, secs(1)).await.unwrap();
+    assert!(!acquire(&gcra).await.limited);
+}
+
+async fn allowed_then_limited(url: &str) {
+    let gcra = gcra(&client_at(url).await);
+    gcra.init_rate(1, 1, secs(60)).await.unwrap();
+    assert!(!acquire(&gcra).await.limited);
+    assert!(!acquire(&gcra).await.limited);
+    assert!(acquire(&gcra).await.limited);
+}
+
+#[tokio::test]
+async fn works_on_redis_6_2() {
+    let (_container, url) = own_redis_tag("6.2-alpine").await;
+    allowed_then_limited(&url).await;
+}
+
+#[tokio::test]
+async fn works_on_valkey() {
+    let (_container, url) = own_redis_image("valkey/valkey", "9.2").await;
+    allowed_then_limited(&url).await;
+}
+
+async fn concurrent_acquires(client: Client) {
+    let gcra = gcra(&client);
+    gcra.init_rate(9, 1, secs(3600)).await.unwrap();
+    let tasks: Vec<_> = (0..50)
+        .map(|_| {
+            let gcra = gcra.clone();
+            tokio::spawn(async move { gcra.try_acquire().await.unwrap().limited })
+        })
+        .collect();
+    let mut allowed = 0;
+    for task in tasks {
+        if !task.await.unwrap() {
+            allowed += 1;
+        }
+    }
+    assert_eq!(allowed, 10);
+}
+
+#[tokio::test]
+async fn concurrent_acquires_never_exceed_the_burst() {
+    concurrent_acquires(client().await).await;
+    concurrent_acquires(redis_gcra_client().await).await;
 }

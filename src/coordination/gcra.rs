@@ -42,9 +42,57 @@ static TRY_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// Port of gcraCommand (redis/src/gcra.c) for servers without `GCRA`, after Redisson's config prefix.
-static TRY_ACQUIRE_LUA: LazyLock<Lua> =
-    LazyLock::new(|| Lua::from_lua("return redis.error_reply('GCRA is not available')"));
+/// Port of gcraCommand (redis/src/gcra.c) for servers without `GCRA`, after Redisson's config prefix from [`TRY_ACQUIRE`].
+///
+/// It gives the native reply. The state is the theoretical arrival time in microseconds of the server clock, a string at `KEYS[2]` that expires at that time (`PXAT`); the native command keeps the same number in a `gcra` object, so a key used by both gives `WRONGTYPE`.
+static TRY_ACQUIRE_LUA: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        r#"local maxBurst = redis.call('hget', KEYS[1], 'maxBurst');
+local rate = redis.call('hget', KEYS[1], 'rate');
+local period = redis.call('hget', KEYS[1], 'period');
+assert(maxBurst ~= false and rate ~= false and period ~= false, 'GCRA rate is not set');
+-- Port of gcraCommand, redis/src/gcra.c (unstable, 2026-11-02). Lua numbers are doubles: 2^53 replaces LLONG_MAX.
+local LIMIT = 9007199254740992
+local overflowTokens = 'GCRA limiting uses microsecond accuracy. Combination of period, tokens_per_period and TOKENS would cause an overflow'
+local burst = tonumber(maxBurst) + 1
+local perPeriod = tonumber(rate)
+local periodS = tonumber(period)
+local tokens = tonumber(ARGV[1])
+if periodS <= 0 or periodS >= 1e12 then
+    return redis.error_reply('period must be > 0 and < 1e12')
+end
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000000 + tonumber(time[2])
+local stored = redis.call('GET', KEYS[2])
+local tat = now
+if stored ~= false then tat = tonumber(stored) end
+local emission = math.floor(periodS * 1000000 / perPeriod + 0.5)
+if emission == 0 then emission = 1 end
+if emission > LIMIT / tokens then return redis.error_reply(overflowTokens) end
+if emission > LIMIT / burst then
+    return redis.error_reply('GCRA limiting uses microsecond accuracy. Combination of period, tokens_per_period and max_burst would cause an overflow')
+end
+local variance = emission * burst
+local increment = emission * tokens
+local base = math.max(now, tat)
+if LIMIT - base < increment then return redis.error_reply(overflowTokens) end
+local newTat = base + increment
+local diff = now - (newTat - variance)
+local limited, retry, ttl = 0, -1, 0
+if diff < 0 then
+    limited = 1
+    if increment <= variance then retry = math.ceil(-diff / 1000000) end
+    ttl = tat - now
+else
+    ttl = newTat - now
+    redis.call('SET', KEYS[2], string.format('%.0f', newTat), 'PXAT', string.format('%.0f', math.floor(newTat / 1000)))
+end
+local nextUs = variance - ttl
+local remaining = 0
+if nextUs >= 0 then remaining = math.floor(nextUs / emission) end -- C truncates toward zero; (-emission, 0) gives 0
+return {limited, burst, remaining, retry, math.ceil(ttl / 1000000)}"#,
+    )
+});
 
 /// Reads the reply to the probe `GCRA <name> 0 1 1 TOKENS`, which a server with the command refuses for its missing `TOKENS` value before it looks at the key.
 ///
@@ -195,6 +243,8 @@ pub struct GcraResult {
 /// **Experimental.** A shared rate limiter on the Generic Cell Rate Algorithm (GCRA), Redisson's `RGcra`, with the same scripts and keys.
 ///
 /// It hands out `tokens_per_period` tokens per `period` at a steady rate, plus up to `max_burst` at once. There is no background task: the state is one timestamp, the theoretical arrival time, at the key `name`, and the settings live in the hash `{name}:config` (fields `maxBurst`, `rate`, `period`), shared with Redisson.
+///
+/// On a Redis build with the `GCRA` command (today only the `redis:8.8-m03` preview) [`Gcra::try_acquire`] runs Redisson's script, which calls the command. On every other Redis 6.2+ or Valkey server it runs a Lua port of the command with the same replies. A client asks once, at its first acquire, and keeps the answer. The two paths store the state differently, so one key must not be used by both: that gives `WRONGTYPE` until the state expires or [`Gcra::set_rate`] resets it.
 ///
 /// ```no_run
 /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
