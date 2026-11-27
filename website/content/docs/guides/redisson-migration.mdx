@@ -421,6 +421,15 @@ Both delete expired entries with a background task that is paced the same way. `
 
 Since this version, `HashMapCache` uses Redisson's scripts, key names, value layout and event payload, so Redisson and redissun clients can share a cache. Data written by redissun 0.23 and earlier is in another layout and must be moved with `migrate_from_0_23()` before the new version reads it; listeners of the two versions do not understand each other's events. [Upgrading redissun](/docs/guides/upgrading) has the steps.
 
+## LocalCachedMap
+
+| Redisson | redissun |
+|---|---|
+| `getLocalCachedMap(LocalCachedMapOptions)` | `client.local_cached_map(name)….build().await` |
+| `LocalCachedMapOptions.loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)`, `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
+| `loadAll(replace, parallelism)`, `loadAll(keys, replace, parallelism)` | `load_all()`, `load_many(&ks)`, with `.replace_existing()` and `.parallelism(n)` |
+| `destroy()` (write-behind) | `flush().await`, and dropping the map drains once more |
+
 ## VecDeque blocking
 
 | Redisson | redissun |

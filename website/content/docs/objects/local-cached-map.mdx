@@ -33,6 +33,11 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `sync_strategy(..)` | `Invalidate` (default): other instances drop the entry. `Update`: they receive the new value. `None`: nothing is sent. |
 | `reconnection_strategy(..)` | what happens after the pub/sub connection comes back: `None` (default) keeps the cache, `Clear` empties it, `Load` drops the keys changed meanwhile, read from a 10 minute log in Redis, or everything when the instance was away longer |
 | `store_cache_miss(bool)` | also cache that a key is missing. Off by default. |
+| `loader(l)` | a `MapLoader` asked on a miss; see [Loaders and writers](/docs/guides/loaders-and-writers). None by default. |
+| `writer(w)` | a `MapWriter` that `insert` and `remove` call. None by default. |
+| `write_mode(m)` | `WriteMode::WriteThrough` (default), or `WriteMode::write_behind()`: 50 entries every second |
+| `writer_retry_attempts(n)` | at most `n` writer calls for one change, 1 by default |
+| `writer_retry_interval(d)` | the time between two writer calls, 100 ms by default |
 
 ## Methods
 
@@ -47,6 +52,16 @@ The defaults are Redisson's `LocalCachedMapOptions` defaults.
 | `local_len()`, `local_entries()`, `clear_local()` | the local cache of this instance only |
 | `clear_local_everywhere()` | empties the local cache of every instance without changing Redis, like Redisson's `clearLocalCache` (it does not wait for the others) |
 | `iter()`, `keys()`, `values()` | stream from Redis and do not use the cache |
+| `load_all()`, `load_many(&[&k])` | load every key of the loader, or those keys; `.parallelism(n)`, `.replace_existing()` |
+| `flush()` | hands the queued write-behind changes to the writer now |
+
+## Loader and writer
+
+As in Redisson's `RedissonLocalCachedMap`:
+
+- With a loader, `get` and `contains_key` ask it when neither the local cache nor Redis has the key. A loaded value is stored like an `insert` (Redis, the local cache, and the message to the others) without calling the writer. A key the loader does not have is cached as missing only with `store_cache_miss(true)`; otherwise the loader is asked again next time.
+- With a writer, `insert` always calls `write`, and `remove` always calls `delete`, also for a missing key. `clear` and `del` call neither.
+- The writer is called after Redis changed. A write-through writer that still fails after its attempts gives `Error::Writer`, and Redis keeps the change.
 
 ## What it guarantees
 

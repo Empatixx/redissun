@@ -2,6 +2,9 @@ use crate::client::core::Core;
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
+use crate::collections::map::entry::Target;
+use crate::collections::map::load::{load_value, LoadAll};
+use crate::collections::map::store::{store_options, Store as MapStore, StoreOptions};
 use crate::error::Result;
 use crate::lua::Lua;
 use crate::object::{tagged, HasKey, Key};
@@ -380,7 +383,7 @@ fn updates_log(key: &Key) -> String {
     format!("redissun__cache_updates_log:{}", tagged(key.name()))
 }
 
-/// Sets up a [`LocalCachedMap`]. Get one from [`Client::local_cached_map`](crate::Client::local_cached_map). The defaults are Redisson's: no size limit, no local expiry, [`SyncStrategy::Invalidate`], [`ReconnectionStrategy::None`], [`EvictionPolicy::None`] and no cached misses.
+/// Sets up a [`LocalCachedMap`]. Get one from [`Client::local_cached_map`](crate::Client::local_cached_map). The defaults are Redisson's: no size limit, no local expiry, [`SyncStrategy::Invalidate`], [`ReconnectionStrategy::None`], [`EvictionPolicy::None`], no cached misses, and no loader or writer.
 #[must_use = "a builder does nothing until build() is awaited"]
 pub struct LocalCachedMapBuilder<K, V, C: Codec> {
     key: Key,
@@ -392,6 +395,7 @@ pub struct LocalCachedMapBuilder<K, V, C: Codec> {
     reconnection: ReconnectionStrategy,
     eviction: EvictionPolicy,
     store_cache_miss: bool,
+    options: StoreOptions<K, V>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -407,6 +411,7 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             reconnection: ReconnectionStrategy::default(),
             eviction: EvictionPolicy::default(),
             store_cache_miss: false,
+            options: StoreOptions::default(),
             _marker: PhantomData,
         }
     }
@@ -447,14 +452,31 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
         self
     }
 
-    /// Also caches that a key is missing, so the next read of it costs no round trip. Off by default.
+    /// Also caches that a key is missing, so the next read of it costs no round trip. Off by default. With a loader, a key the loader does not have is cached as missing too.
     pub fn store_cache_miss(mut self, store: bool) -> Self {
         self.store_cache_miss = store;
         self
     }
+}
 
-    /// Subscribes to the changes of the other instances and returns the map.
+impl<K, V, C> LocalCachedMapBuilder<K, V, C>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    C: Codec,
+{
+    store_options!();
+}
+
+impl<K, V, C> LocalCachedMapBuilder<K, V, C>
+where
+    K: DeserializeOwned + Send + Sync + 'static,
+    V: DeserializeOwned + Send + Sync + 'static,
+    C: Codec,
+{
+    /// Checks the options, subscribes to the changes of the other instances and returns the map. Invalid store options are an [`Error::Config`](crate::Error::Config).
     pub async fn build(self) -> Result<LocalCachedMap<K, V, C>> {
+        let store = self.options.into_store(&self.key, self.codec.clone())?;
         let local = Arc::new(Local {
             store: Mutex::new(Store::new(
                 self.eviction,
@@ -497,6 +519,7 @@ impl<K, V, C: Codec> LocalCachedMapBuilder<K, V, C> {
             sync: self.sync,
             reconnection: self.reconnection,
             store_cache_miss: self.store_cache_miss,
+            store,
             _marker: PhantomData,
         })
     }
@@ -599,7 +622,10 @@ async fn listen(
 /// As in Redisson, every instance also listens for `__keyevent@*:expired` and clears its local cache when the map's key expires. Redis sends these events only when `notify-keyspace-events` contains `Ex`; neither Redisson nor this crate sets it.
 ///
 /// The data in Redis is a normal hash, so a [`HashMap`] with the same name and codec reads the same entries.
+///
+/// A map built with [`loader`](LocalCachedMapBuilder::loader) or [`writer`](LocalCachedMapBuilder::writer) reads through and writes through (or behind), as Redisson's `LocalCachedMapOptions`; see the "Loaders and writers" guide.
 pub struct LocalCachedMap<K, V, C: Codec> {
+    /// Redis-side reads; it has no store, so the writer is called once, by this map.
     map: HashMap<K, V, C>,
     key: Key,
     codec: C,
@@ -607,6 +633,8 @@ pub struct LocalCachedMap<K, V, C: Codec> {
     sync: SyncStrategy,
     reconnection: ReconnectionStrategy,
     store_cache_miss: bool,
+    /// The loader and writer; `None` keeps every call as it is without them.
+    store: Option<Arc<MapStore<K, V, C>>>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -657,54 +685,57 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    fn log_arguments(&self, field: &Bytes) -> [Bytes; 3] {
-        let mut entry = Uuid::new_v4().as_bytes()[..LOG_ID_LEN].to_vec();
-        entry.extend_from_slice(field);
-        [
-            Bytes::from(now_millis().to_string()),
-            Bytes::from(entry),
-            Bytes::from(UPDATES_LOG_KEEP.as_millis().to_string()),
-        ]
+    /// Whether a miss asks the loader.
+    fn loads(&self) -> bool {
+        self.store.as_ref().is_some_and(|store| store.has_loader())
     }
 
-    /// Returns the value for a key, from the local cache when it is there. A value read from Redis is cached. The key is borrowed: `map.get("k")`.
-    pub async fn get<Q>(&self, k: &Q) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let field = self.codec.encode(k)?;
-        match self.local.lookup(&field) {
-            Some(Some(value)) => return Ok(Some(self.codec.decode(&value)?)),
-            Some(None) if self.store_cache_miss => return Ok(None),
-            _ => {}
-        }
-        self.local.begin_read(&field);
-        let mut cmd = self.key.key_cmd("HGET");
-        cmd.arg(&field[..]);
-        let read: Result<Option<Bytes>> = self.key.query(cmd).await;
-        let raw = match read {
-            Ok(raw) => raw,
-            Err(error) => {
-                self.local.finish_read(field, None);
-                return Err(error);
-            }
+    /// The store when it has a writer; `None` skips every writer call.
+    fn writer(&self) -> Option<&MapStore<K, V, C>> {
+        self.store.as_deref().filter(|store| store.has_writer())
+    }
+
+    pub(crate) fn store(&self) -> Option<&MapStore<K, V, C>> {
+        self.store.as_deref()
+    }
+
+    /// Asks the loader for a key that missed, for a read that [`Local::begin_read`] opened. A loaded value is cached by [`put_encoded`](Self::put_encoded); a value another caller stored meanwhile is cached here, and a key the loader lacks only with `store_cache_miss`, as Redisson's `getAsync`.
+    async fn load_missing(&self, field: Bytes) -> Result<Option<V>> {
+        let loaded = load_value(&Target::Local(self), &field, false).await;
+        let cached = match &loaded {
+            Ok(Some(value)) => self.codec.encode(value).ok().map(Some),
+            Ok(None) if self.store_cache_miss => Some(None),
+            _ => None,
         };
-        let cached = (raw.is_some() || self.store_cache_miss).then(|| raw.clone());
         self.local.finish_read(field, cached);
+        loaded
+    }
+
+    /// Reads an encoded key: the local cache, then the master.
+    pub(crate) async fn read_encoded(&self, k: &Bytes) -> Result<Option<V>> {
+        if let Some(Some(value)) = self.local.lookup(k) {
+            return Ok(Some(self.codec.decode(&value)?));
+        }
+        let mut cmd = self.key.key_cmd("HGET");
+        cmd.arg(&k[..]);
+        let raw: Option<Bytes> = self.key.query(cmd).await?;
         raw.map(|raw| self.codec.decode(&raw)).transpose()
     }
 
-    /// Writes a value and returns the previous one. The local cache of this instance holds the new value, and the other instances are told. Both arguments are borrowed.
-    pub async fn insert<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        V: Borrow<W>,
-        Q: Serialize + ?Sized + Sync,
-        W: Serialize + ?Sized + Sync,
-    {
-        let field = self.codec.encode(k)?;
-        let value = self.codec.encode(v)?;
+    /// Stores a value the way [`insert`](Self::insert) does, local cache and announcement included, without the writer.
+    pub(crate) async fn put_encoded(&self, k: &Bytes, v: &V) -> Result<()> {
+        self.put_raw(k.clone(), self.codec.encode(v)?)
+            .await
+            .map(drop)
+    }
+
+    /// Removes a key the way [`remove`](Self::remove) does, without the writer.
+    pub(crate) async fn delete_encoded(&self, k: &Bytes) -> Result<()> {
+        self.remove_raw(k.clone()).await.map(drop)
+    }
+
+    /// The local write and the `PUT` script; returns the previous encoded value.
+    async fn put_raw(&self, field: Bytes, value: Bytes) -> Result<Option<Bytes>> {
         let notice = match self.sync {
             SyncStrategy::Update => message(
                 &self.local.id,
@@ -733,22 +764,15 @@ where
                 ],
             )
             .await;
-        let previous = written.inspect_err(|_| self.local.forget(&field))?;
-        previous.map(|bytes| self.codec.decode(&bytes)).transpose()
+        written.inspect_err(|_| self.local.forget(&field))
     }
 
-    /// Removes a key and returns its value. The other instances are told when the key existed.
-    pub async fn remove<Q>(&self, k: &Q) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let field = self.codec.encode(k)?;
+    /// The local forget and the `REMOVE` script; returns the previous encoded value.
+    async fn remove_raw(&self, field: Bytes) -> Result<Option<Bytes>> {
         let notice = message(&self.local.id, INVALIDATE, &[&field]);
         self.local.forget(&field);
         let [now, entry, keep] = self.log_arguments(&field);
-        let previous: Option<Bytes> = self
-            .key
+        self.key
             .core
             .eval(
                 &REMOVE,
@@ -764,11 +788,82 @@ where
                     keep,
                 ],
             )
-            .await?;
+            .await
+    }
+
+    fn log_arguments(&self, field: &Bytes) -> [Bytes; 3] {
+        let mut entry = Uuid::new_v4().as_bytes()[..LOG_ID_LEN].to_vec();
+        entry.extend_from_slice(field);
+        [
+            Bytes::from(now_millis().to_string()),
+            Bytes::from(entry),
+            Bytes::from(UPDATES_LOG_KEEP.as_millis().to_string()),
+        ]
+    }
+
+    /// Returns the value for a key, from the local cache when it is there. A value read from Redis is cached. The key is borrowed: `map.get("k")`. With a loader, a miss asks the loader, and the value it returns is stored in Redis and cached.
+    pub async fn get<Q>(&self, k: &Q) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let field = self.codec.encode(k)?;
+        match self.local.lookup(&field) {
+            Some(Some(value)) => return Ok(Some(self.codec.decode(&value)?)),
+            Some(None) if self.store_cache_miss => return Ok(None),
+            _ => {}
+        }
+        self.local.begin_read(&field);
+        let mut cmd = self.key.key_cmd("HGET");
+        cmd.arg(&field[..]);
+        let read: Result<Option<Bytes>> = self.key.query(cmd).await;
+        let raw = match read {
+            Ok(raw) => raw,
+            Err(error) => {
+                self.local.finish_read(field, None);
+                return Err(error);
+            }
+        };
+        if raw.is_none() && self.loads() {
+            return self.load_missing(field).await;
+        }
+        let cached = (raw.is_some() || self.store_cache_miss).then(|| raw.clone());
+        self.local.finish_read(field, cached);
+        raw.map(|raw| self.codec.decode(&raw)).transpose()
+    }
+
+    /// Writes a value and returns the previous one. The local cache of this instance holds the new value, and the other instances are told. Both arguments are borrowed. With a writer, the entry is written after Redis stored it.
+    pub async fn insert<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        let field = self.codec.encode(k)?;
+        let value = self.codec.encode(v)?;
+        let previous = self.put_raw(field.clone(), value.clone()).await?;
+        if let Some(store) = self.writer() {
+            store.written(&[(field, value)]).await?;
+        }
         previous.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
-    /// Returns whether the key exists. A cached key answers without a round trip.
+    /// Removes a key and returns its value. The other instances are told when the key existed. With a writer, the key is deleted from the store also when the map did not have it, as in Redisson.
+    pub async fn remove<Q>(&self, k: &Q) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let field = self.codec.encode(k)?;
+        let previous = self.remove_raw(field.clone()).await?;
+        if let Some(store) = self.writer() {
+            store.deleted(&[field]).await?;
+        }
+        previous.map(|bytes| self.codec.decode(&bytes)).transpose()
+    }
+
+    /// Returns whether the key exists. A cached key answers without a round trip. With a loader, a miss asks the loader, and a loaded value counts as present.
     pub async fn contains_key<Q>(&self, k: &Q) -> Result<bool>
     where
         K: Borrow<Q>,
@@ -783,6 +878,9 @@ where
         let mut cmd = self.key.key_cmd("HEXISTS");
         cmd.arg(&field[..]);
         let found: Result<bool> = self.key.query(cmd).await;
+        if matches!(found, Ok(false)) && self.loads() {
+            return Ok(self.load_missing(field).await?.is_some());
+        }
         let miss = matches!(found, Ok(false)) && self.store_cache_miss;
         self.local.finish_read(field, miss.then_some(None));
         found
@@ -840,6 +938,31 @@ where
             .query(Request::new(cmd).key(channel.as_bytes()))
             .await?;
         Ok(())
+    }
+
+    /// Loads every key of the loader into the map, Redisson's `loadAll(replaceExistingValues, parallelism)`. A loaded value is cached here and announced like an [`insert`](LocalCachedMap::insert), without the writer. Without a loader it is an [`Error::Config`](crate::Error::Config).
+    #[doc(alias = "loadAll")]
+    pub fn load_all(&self) -> LoadAll<'_, K, V, C> {
+        LoadAll::new(Target::Local(self), None)
+    }
+
+    /// Loads the given keys into the map, Redisson's `loadAll(keys, replaceExistingValues, parallelism)`.
+    #[doc(alias = "loadAll")]
+    pub fn load_many<Q>(&self, ks: &[&Q]) -> LoadAll<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let keys = ks.iter().map(|k| self.codec.encode(*k)).collect();
+        LoadAll::new(Target::Local(self), Some(keys))
+    }
+
+    /// Hands every write-behind change still queued to the writer now and returns the first writer error, as [`HashMap::flush`]. Without write-behind it does nothing.
+    pub async fn flush(&self) -> Result<()> {
+        match &self.store {
+            Some(store) => store.drain().await,
+            None => Ok(()),
+        }
     }
 
     /// Streams every entry from Redis. It does not use or fill the local cache.

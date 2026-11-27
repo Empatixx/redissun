@@ -7,7 +7,7 @@ use common::{client, raw_command, unique};
 use redissun::hash_map::Entry;
 use redissun::{
     EntryEvent, EntryEventKind, EntryEvents, Error, HashMap, HashMapCache, JsonCodec, Lease,
-    Object, WriteMode,
+    LocalCachedMap, Object, WriteMode,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -1065,5 +1065,118 @@ async fn cache_write_behind_flush() {
         .unwrap();
     assert!(store.snapshot().is_empty());
     cache.flush().await.unwrap();
+    assert_eq!(store.snapshot(), expected(&[("a", "1")]));
+}
+
+type Local = LocalCachedMap<String, String, JsonCodec>;
+
+async fn local_on(client: &redissun::Client, name: &str, store: &MemoryStore) -> Local {
+    client
+        .local_cached_map::<String, String>(name)
+        .loader(store.clone())
+        .writer(store.clone())
+        .build()
+        .await
+        .unwrap()
+}
+
+// Redisson testMapLoaderGet on RedissonLocalCachedMap: a loaded value is cached and stored in Redis.
+#[tokio::test]
+async fn local_get_loads_caches_and_shares() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let name = unique("ms");
+    let a = local_on(&client().await, &name, &store).await;
+    let b = local_on(&client().await, &name, &store).await;
+    assert_eq!(a.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(a.local_len(), 1);
+    assert_eq!(
+        raw_command(&["HGET", &name, "\"1\""]).await,
+        "$4\r\n\"11\"\r\n"
+    );
+    assert_eq!(b.get("1").await.unwrap(), Some("11".to_string()));
+    assert_eq!(store.loads(), 1);
+    assert!(store.write_calls().is_empty());
+}
+
+#[tokio::test]
+async fn local_a_miss_is_cached_only_with_store_cache_miss() {
+    let store = MemoryStore::default();
+    let plain = local_on(&client().await, &unique("ms"), &store).await;
+    assert_eq!(plain.get("x").await.unwrap(), None);
+    assert_eq!(plain.get("x").await.unwrap(), None);
+    assert_eq!(store.loads(), 2);
+    assert_eq!(plain.local_len(), 0);
+
+    let store = MemoryStore::default();
+    let caching: Local = client()
+        .await
+        .local_cached_map(unique("ms"))
+        .loader(store.clone())
+        .store_cache_miss(true)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(caching.get("x").await.unwrap(), None);
+    assert_eq!(caching.get("x").await.unwrap(), None);
+    assert_eq!(store.loads(), 1);
+    assert_eq!(caching.local_len(), 1);
+}
+
+#[tokio::test]
+async fn local_contains_key_loads() {
+    let store = MemoryStore::with(&[("1", "11")]);
+    let map = local_on(&client().await, &unique("ms"), &store).await;
+    assert!(map.contains_key("1").await.unwrap());
+    assert_eq!(map.local_len(), 1);
+    assert!(!map.contains_key("2").await.unwrap());
+    assert_eq!(store.loads(), 2);
+    assert_eq!(map.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn local_insert_and_remove_call_the_writer() {
+    let store = MemoryStore::default();
+    let map = local_on(&client().await, &unique("ms"), &store).await;
+    map.insert("a", "1").await.unwrap();
+    assert_eq!(store.write_calls(), vec![vec!["a"]]);
+    assert_eq!(store.snapshot(), expected(&[("a", "1")]));
+    map.remove("a").await.unwrap();
+    assert_eq!(store.delete_calls(), vec![vec!["a"]]);
+    assert!(store.snapshot().is_empty());
+    map.remove("missing").await.unwrap();
+    assert_eq!(store.delete_calls(), vec![vec!["a"], vec!["missing"]]);
+}
+
+#[tokio::test]
+async fn local_load_all_loads_every_key() {
+    let store = numbered(20);
+    let map = local_on(&client().await, &unique("ms"), &store).await;
+    map.load_all().parallelism(4).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 20);
+    assert_eq!(map.local_len(), 20);
+    assert!(store.write_calls().is_empty());
+    map.load_many(&["3"]).replace_existing().await.unwrap();
+    assert_eq!(store.loads(), 21);
+}
+
+#[tokio::test]
+async fn local_write_behind_flush() {
+    let store = MemoryStore::default();
+    let map: Local = client()
+        .await
+        .local_cached_map(unique("ms"))
+        .writer(store.clone())
+        .write_mode(WriteMode::WriteBehind {
+            batch_size: 50,
+            delay: LATER,
+        })
+        .build()
+        .await
+        .unwrap();
+    map.insert("a", "1").await.unwrap();
+    map.insert("b", "2").await.unwrap();
+    map.remove("b").await.unwrap();
+    assert!(store.snapshot().is_empty());
+    map.flush().await.unwrap();
     assert_eq!(store.snapshot(), expected(&[("a", "1")]));
 }

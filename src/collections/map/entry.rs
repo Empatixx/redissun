@@ -3,6 +3,7 @@
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
 use crate::collections::hash_map_cache::HashMapCache;
+use crate::collections::local_cached_map::LocalCachedMap;
 use crate::collections::map::load::load_value_locked;
 use crate::collections::map::ops::KeyLock;
 use crate::collections::map::store::Store;
@@ -44,6 +45,8 @@ pub(crate) enum Target<'m, K, V, C: Codec> {
     Map(&'m HashMap<K, V, C>),
     /// A cache and the time to live its writes get; `None` writes like `insert`, which clears the entry's limits.
     Cache(&'m HashMapCache<K, V, C>, Option<Duration>),
+    /// A local cached map, for loading only: reads look at the local cache first, and writes go through its plain put.
+    Local(&'m LocalCachedMap<K, V, C>),
 }
 
 impl<K, V, C> Target<'_, K, V, C>
@@ -56,6 +59,7 @@ where
         match self {
             Target::Map(map) => map.redis_key(),
             Target::Cache(cache, _) => HasKey::key(*cache),
+            Target::Local(map) => HasKey::key(*map),
         }
     }
 
@@ -64,6 +68,7 @@ where
         match self {
             Target::Map(map) => map.read_encoded(k).await,
             Target::Cache(cache, _) => cache.read_encoded(k).await,
+            Target::Local(map) => map.read_encoded(k).await,
         }
     }
 
@@ -72,6 +77,7 @@ where
         match self {
             Target::Map(map) => map.write_encoded(k, v).await,
             Target::Cache(cache, ttl) => cache.write_encoded(k, v, *ttl).await,
+            Target::Local(map) => map.put_encoded(k, v).await,
         }
     }
 
@@ -80,6 +86,7 @@ where
         match self {
             Target::Map(map) => map.delete_encoded(k).await,
             Target::Cache(cache, _) => cache.delete_encoded(k).await,
+            Target::Local(map) => map.delete_encoded(k).await,
         }
     }
 
@@ -88,6 +95,7 @@ where
         match self {
             Target::Map(map) => map.store(),
             Target::Cache(cache, _) => cache.store(),
+            Target::Local(map) => map.store(),
         }
     }
 
@@ -96,6 +104,7 @@ where
         match self {
             Target::Map(map) => map.write_encoded(k, v).await,
             Target::Cache(cache, _) => cache.write_encoded(k, v, None).await,
+            Target::Local(map) => map.put_encoded(k, v).await,
         }
     }
 }
