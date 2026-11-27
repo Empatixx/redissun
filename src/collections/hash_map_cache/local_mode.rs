@@ -2,6 +2,7 @@
 
 use super::{HashMapCache, Limits};
 use crate::codec::Codec;
+use crate::collections::local_cache::local::local_lifetime;
 use crate::collections::local_cache::messages::{expiring_update, message, CLEAR, INVALIDATE};
 use crate::collections::local_cache::store::Lifetime;
 use crate::collections::local_cache::{LocalCache, SyncStrategy};
@@ -19,15 +20,7 @@ pub(crate) fn needs_redis(method: &str) -> Error {
 
 /// The local [`Lifetime`] of an entry written now with `limits`: the time-to-live deadline and the max idle, which local reads restart.
 fn lifetime(limits: &Limits) -> Lifetime {
-    let deadline = (limits.ttl_timeout > 0)
-        .then(|| {
-            let left = limits.ttl_timeout.saturating_sub(limits.now).max(0);
-            Instant::now().checked_add(Duration::from_millis(left.unsigned_abs()))
-        })
-        .flatten();
-    let idle =
-        (limits.idle_delta > 0).then(|| Duration::from_millis(limits.idle_delta.unsigned_abs()));
-    Lifetime { deadline, idle }
+    local_lifetime(limits.ttl_timeout, limits.idle_delta, limits.now).unwrap_or_default()
 }
 
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
@@ -72,6 +65,33 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
             local.publish(&self.key, notice).await?;
         }
         Ok(())
+    }
+
+    /// The [`Limits`] that keep what is left of a live copy's lifetime, for a write that keeps the entry's limits (`replace`, `compare_and_set`), as Redisson's scripts do.
+    pub(super) fn kept_limits(local: &LocalCache, field: &Bytes) -> Limits {
+        let now = crate::collections::local_cache::messages::now_millis();
+        let lifetime = local
+            .local
+            .lookup_with_lifetime(field)
+            .map(|(_, lifetime)| lifetime)
+            .unwrap_or_default();
+        let ttl_timeout = lifetime.deadline.map_or(0, |deadline| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            now.saturating_add(i64::try_from(left.as_millis()).unwrap_or(i64::MAX).max(1))
+        });
+        let idle_delta = lifetime.idle.map_or(0, |idle| {
+            i64::try_from(idle.as_millis()).unwrap_or(i64::MAX)
+        });
+        Limits {
+            now,
+            ttl_timeout,
+            idle_timeout: if idle_delta > 0 {
+                now.saturating_add(idle_delta)
+            } else {
+                0
+            },
+            idle_delta,
+        }
     }
 
     /// Forgets `fields` locally and announces an invalidation for each.

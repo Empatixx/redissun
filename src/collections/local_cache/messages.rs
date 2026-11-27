@@ -88,6 +88,7 @@ mod tests {
         Local::new(
             LocalStore::new(CacheProvider::Builtin, EvictionPolicy::None, 0, None, None),
             ReconnectionStrategy::None,
+            false,
         )
     }
 

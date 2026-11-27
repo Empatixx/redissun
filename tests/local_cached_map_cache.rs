@@ -974,36 +974,25 @@ async fn the_clear_strategy_clears_the_cache_after_a_reconnect() {
 }
 
 #[tokio::test]
-async fn the_load_strategy_drops_only_the_keys_changed_while_away() {
-    use redissun::ReconnectionStrategy::Load;
+async fn a_reconnect_clears_the_cache_whatever_the_strategy() {
+    use redissun::ReconnectionStrategy::{Load, None as Keep};
     let _gate = exclusive().await;
-    let name = unique("lcmc");
-    let (first, second) = (client().await, client().await);
-    let reader = with_reconnection(&first, &name, Load).await;
-    let writer = with_reconnection(&second, &name, Load).await;
-    writer.insert("a", "1").await.unwrap();
-    writer.insert("b", "1").await.unwrap();
-    eventually("no message arrived", || async {
-        reader.get("a").await.unwrap().as_deref() == Some("1")
-    })
-    .await;
-    reader.get("b").await.unwrap();
-    assert_eq!(reader.local_len(), 2);
-    let log = format!("redissun__cache_updates_log:{{{name}}}");
-    plain(&second, &name).insert("b", "2").await.unwrap();
-    raw_command(&[
-        "ZADD",
-        &log,
-        "99999999999999",
-        &format!("12345678{}", "\"b\""),
-    ])
-    .await;
-    kill_pubsub_connections().await;
-    eventually("b was not dropped", || async {
-        reader.get("b").await.unwrap().as_deref() == Some("2")
-    })
-    .await;
-    assert_eq!(reader.get("a").await.unwrap().as_deref(), Some("1"));
+    for strategy in [Keep, Load] {
+        let name = unique("lcmc");
+        let client = client().await;
+        let cache = with_reconnection(&client, &name, strategy).await;
+        cache.insert("a", "1").await.unwrap();
+        assert_eq!(cache.local_len(), 1);
+        // A removal the client cannot hear about while it is away: HDEL publishes no entry event.
+        kill_pubsub_connections().await;
+        raw_command(&["HDEL", &name, "\"a\""]).await;
+        eventually(
+            &format!("{strategy:?}: the cache was not cleared"),
+            || async { cache.local_len() == 0 },
+        )
+        .await;
+        assert_eq!(cache.get("a").await.unwrap(), None);
+    }
 }
 
 #[tokio::test]
@@ -1385,4 +1374,58 @@ async fn object_methods_cover_every_key() {
     })
     .await;
     drop(b);
+}
+
+// ---- Final review fixes ----
+
+#[tokio::test]
+async fn concurrent_writes_never_leave_a_stale_copy() {
+    let _gate = shared().await;
+    let (first, second) = (client().await, client().await);
+    let name = unique("lcmc");
+    let a = lcmc(&first, &name).await;
+    let b = lcmc(&second, &name).await;
+    let plain = plain(&first, &name);
+    for round in 0..30 {
+        let (mine, theirs) = (format!("a{round}"), format!("b{round}"));
+        let (x, y) = tokio::join!(a.insert("k", &mine), b.insert("k", &theirs));
+        x.unwrap();
+        y.unwrap();
+        let stored = plain.get("k").await.unwrap();
+        eventually(&format!("round {round}: a kept a stale copy"), || async {
+            a.get("k").await.unwrap() == stored && b.get("k").await.unwrap() == stored
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn local_mode_update_keeps_a_read_copy_alive_on_other_instances() {
+    let _gate = shared().await;
+    let (first, second) = (client().await, client().await);
+    let name = unique("lcmc");
+    let a = local_mode(&first, &name, SyncStrategy::Update).await;
+    let b = local_mode(&second, &name, SyncStrategy::Update).await;
+    a.insert("k", "v").max_idle(600 * MS).await.unwrap();
+    eventually("b never got the update", || async { b.local_len() == 1 }).await;
+    for _ in 0..6 {
+        sleep(200 * MS).await;
+        assert_eq!(b.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+}
+
+#[tokio::test]
+async fn local_mode_replace_and_compare_and_set_keep_the_limits() {
+    let _gate = shared().await;
+    let client = client().await;
+    let a = local_mode(&client, &unique("lcmc"), SyncStrategy::Invalidate).await;
+    a.insert("r", "1").ttl(300 * MS).await.unwrap();
+    a.insert("c", "1").ttl(300 * MS).await.unwrap();
+    assert_eq!(a.replace("r", "2").await.unwrap().as_deref(), Some("1"));
+    assert!(a.compare_and_set("c", "1", "2").await.unwrap());
+    assert!(a.entry_ttl("r").await.unwrap().unwrap() <= 300 * MS);
+    assert!(a.entry_ttl("c").await.unwrap().unwrap() <= 300 * MS);
+    sleep(350 * MS).await;
+    assert_eq!(a.get("r").await.unwrap(), None);
+    assert_eq!(a.get("c").await.unwrap(), None);
 }

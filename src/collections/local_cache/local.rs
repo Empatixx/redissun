@@ -77,12 +77,18 @@ pub(crate) struct Local {
     cache: Mutex<Cache>,
     pub(crate) id: [u8; ID_LEN],
     pub(crate) reconnection: ReconnectionStrategy,
+    /// The entries live only in the local caches ([`StoreMode::Local`](crate::StoreMode::Local)): an `E` keeps the max idle as an idle limit that local reads restart, as the copy is the only copy.
+    pub(crate) local_only: bool,
     pub(crate) last_invalidate: AtomicI64,
     pub(crate) listener: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Local {
-    pub(crate) fn new(store: LocalStore, reconnection: ReconnectionStrategy) -> Self {
+    pub(crate) fn new(
+        store: LocalStore,
+        reconnection: ReconnectionStrategy,
+        local_only: bool,
+    ) -> Self {
         Self {
             cache: Mutex::new(Cache {
                 store,
@@ -90,6 +96,7 @@ impl Local {
             }),
             id: *Uuid::new_v4().as_bytes(),
             reconnection,
+            local_only,
             last_invalidate: AtomicI64::new(0),
             listener: Mutex::new(None),
         }
@@ -173,10 +180,37 @@ impl Local {
             return;
         };
         self.forget(&key);
+        if self.local_only {
+            if let Some(lifetime) = local_lifetime(ttl_timeout, idle_delta, now_millis()) {
+                self.write(key, Some(value), lifetime);
+            }
+            return;
+        }
         if let Some(lifetime) = copy_lifetime(ttl_timeout, idle_delta, now_millis()).lifetime() {
             self.write(key, Some(value), lifetime);
         }
     }
+}
+
+/// The [`Lifetime`] of an entry kept only locally, from the deadline `ttl_timeout_ms` (Unix ms) and the max idle `idle_delta_ms`, `0` meaning no limit; `None` when the deadline has passed.
+pub(crate) fn local_lifetime(
+    ttl_timeout_ms: i64,
+    idle_delta_ms: i64,
+    now_ms: i64,
+) -> Option<Lifetime> {
+    let deadline = if ttl_timeout_ms != 0 {
+        let left = ttl_timeout_ms.saturating_sub(now_ms);
+        if left <= 0 {
+            return None;
+        }
+        tokio::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(left.unsigned_abs()))
+    } else {
+        None
+    };
+    let idle =
+        (idle_delta_ms > 0).then(|| std::time::Duration::from_millis(idle_delta_ms.unsigned_abs()));
+    Some(Lifetime { deadline, idle })
 }
 
 /// `[key_len: u32 BE][key][value]`.

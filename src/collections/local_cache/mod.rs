@@ -84,6 +84,7 @@ pub(crate) async fn start(
             options.max_idle,
         ),
         options.reconnection,
+        options.store_mode == StoreMode::Local,
     ));
     let channel = channel(key);
     let updates_log = updates_log(key);

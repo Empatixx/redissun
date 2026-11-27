@@ -199,6 +199,11 @@ pub(crate) async fn listen(
                 if matches!(reconnected, Err(RecvError::Closed)) {
                     return;
                 }
+                // Entries the server dropped meanwhile are not in the updates log, so a cache that follows server-side drops starts over.
+                if evictions.is_some() {
+                    local.forget_all();
+                    continue;
+                }
                 match local.reconnection {
                     ReconnectionStrategy::None => {}
                     ReconnectionStrategy::Clear => local.forget_all(),

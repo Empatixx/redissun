@@ -594,9 +594,9 @@ where
             let Some(previous) = Self::local_value(local, &k) else {
                 return Ok(None);
             };
+            let kept = Self::kept_limits(local, &k);
             let entry = [(k, self.codec.encode(v)?)];
-            self.local_store(local, &entry, &limits(None, None)?)
-                .await?;
+            self.local_store(local, &entry, &kept).await?;
             self.written(&entry).await?;
             return self.decode_value(Some(previous));
         }
@@ -637,9 +637,9 @@ where
             if Self::local_value(local, &k) != Some(self.codec.encode(old)?) {
                 return Ok(false);
             }
+            let kept = Self::kept_limits(local, &k);
             let entry = [(k, self.codec.encode(new)?)];
-            self.local_store(local, &entry, &limits(None, None)?)
-                .await?;
+            self.local_store(local, &entry, &kept).await?;
             self.written(&entry).await?;
             return Ok(true);
         }

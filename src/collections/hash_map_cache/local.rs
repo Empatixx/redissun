@@ -121,6 +121,12 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
         op.keys()
             .into_iter()
             .for_each(|field| local.local.forget(field));
+        // A guard per key, opened before the script runs: a change by anyone else that arrives before the reply is handled marks it, so the written value is not cached over it. An error or a cancelled call drops the guards, which cache nothing.
+        let guards: std::vec::Vec<ReadGuard<'_>> = op
+            .keys()
+            .into_iter()
+            .map(|field| local.local.begin_read(field))
+            .collect();
         let [now, _, keep] = log_arguments(&Bytes::new());
         let notices = op.notices(local);
         keys.push(local.updates_log.clone());
@@ -149,29 +155,23 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
                 ttl_timeout,
                 idle_delta,
             } => {
-                if let Some(lifetime) =
-                    copy_lifetime(ttl_timeout, idle_delta, now_millis()).lifetime()
-                {
-                    for (k, v) in entries {
-                        local.local.write(k.clone(), Some(v.clone()), lifetime);
-                    }
+                let lifetime = copy_lifetime(ttl_timeout, idle_delta, now_millis()).lifetime();
+                for ((_, v), guard) in entries.iter().zip(guards) {
+                    guard.finish(lifetime.map(|lifetime| (Some(v.clone()), lifetime)));
                 }
             }
             Op::TryPut {
-                field,
                 value,
                 ttl_timeout,
                 idle_delta,
+                ..
             } if reply == redis::Value::Nil => {
-                if let Some(lifetime) =
-                    copy_lifetime(ttl_timeout, idle_delta, now_millis()).lifetime()
-                {
-                    local
-                        .local
-                        .write(field.clone(), Some(value.clone()), lifetime);
+                let lifetime = copy_lifetime(ttl_timeout, idle_delta, now_millis()).lifetime();
+                for guard in guards {
+                    guard.finish(lifetime.map(|lifetime| (Some(value.clone()), lifetime)));
                 }
             }
-            _ => {}
+            _ => drop(guards),
         }
         Ok(redis::from_redis_value(reply)?)
     }
