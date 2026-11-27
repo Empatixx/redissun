@@ -561,3 +561,215 @@ async fn hash_map_clear_and_del_skip_the_writer() {
     assert!(store.delete_calls().is_empty());
     assert_eq!(store.snapshot(), expected(&[("a", "1"), ("b", "2")]));
 }
+
+fn queue_of(name: &str) -> String {
+    if name.contains('{') {
+        format!("{name}:redissun_write-behind-queue")
+    } else {
+        format!("{{{name}}}:redissun_write-behind-queue")
+    }
+}
+
+async fn queue_len(name: &str) -> String {
+    raw_command(&["LLEN", &queue_of(name)]).await
+}
+
+async fn behind_on(
+    client: &redissun::Client,
+    name: &str,
+    store: &MemoryStore,
+    batch_size: usize,
+    delay: Duration,
+) -> Map {
+    client
+        .hash_map_builder::<String, String>(name)
+        .writer(store.clone())
+        .write_mode(WriteMode::WriteBehind { batch_size, delay })
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Waits up to five seconds for `check` to hold.
+async fn eventually<F, Fut>(what: &str, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{what} did not happen within 5 s");
+}
+
+const LATER: Duration = Duration::from_secs(60);
+
+// Redisson testWriteBehindFastRemove and testWriteBehindAsyncFastRemove.
+#[tokio::test]
+async fn hash_map_write_behind_remove_many() {
+    let store = MemoryStore::default();
+    let map: Map = client()
+        .await
+        .hash_map_builder(unique("ms"))
+        .writer(store.clone())
+        .write_mode(WriteMode::write_behind())
+        .build()
+        .await
+        .unwrap();
+    map.insert("1", "11").await.unwrap();
+    map.insert("2", "22").await.unwrap();
+    map.insert("3", "33").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    assert_eq!(map.remove_many(&["1", "2", "4"]).await.unwrap(), 2);
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    assert_eq!(store.snapshot(), expected(&[("3", "33")]));
+}
+
+// Redisson testRetryableWriterAsyncSuccessAtLastRetry.
+#[tokio::test]
+async fn hash_map_write_behind_retries() {
+    let store = MemoryStore::default();
+    let map: Map = client()
+        .await
+        .hash_map_builder(unique("ms"))
+        .writer(store.clone())
+        .write_mode(WriteMode::write_behind())
+        .writer_retry_attempts(3)
+        .writer_retry_interval(Duration::from_millis(100))
+        .build()
+        .await
+        .unwrap();
+    store.fail_next(2);
+    map.insert("1", "11").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2400)).await;
+    assert_eq!(store.snapshot(), expected(&[("1", "11")]));
+    assert_eq!(store.write_calls().len(), 3);
+    store.fail_next(2);
+    map.remove("1").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2400)).await;
+    assert!(store.snapshot().is_empty());
+    assert_eq!(store.delete_calls().len(), 3);
+}
+
+#[tokio::test]
+async fn write_behind_returns_before_the_writer_runs() {
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let client = client().await;
+    let map = behind_on(&client, &name, &store, 50, LATER).await;
+    map.insert("a", "1").await.unwrap();
+    assert!(store.snapshot().is_empty());
+    assert_eq!(queue_len(&name).await, ":1\r\n");
+    map.flush().await.unwrap();
+    assert_eq!(store.snapshot(), expected(&[("a", "1")]));
+    assert_eq!(queue_len(&name).await, ":0\r\n");
+}
+
+#[tokio::test]
+async fn write_behind_batches_by_batch_size() {
+    let store = MemoryStore::default();
+    let client = client().await;
+    let map = behind_on(&client, &unique("ms"), &store, 2, LATER).await;
+    for i in 1..=5 {
+        map.insert(&i.to_string(), "v").await.unwrap();
+    }
+    map.flush().await.unwrap();
+    let sizes: Vec<usize> = store.write_calls().iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![2, 2, 1]);
+    assert_eq!(store.snapshot().len(), 5);
+}
+
+#[tokio::test]
+async fn write_behind_coalesces_a_write_and_a_delete() {
+    let store = MemoryStore::default();
+    let client = client().await;
+    let map = behind_on(&client, &unique("ms"), &store, 50, LATER).await;
+    map.insert("a", "1").await.unwrap();
+    map.remove("a").await.unwrap();
+    map.flush().await.unwrap();
+    assert!(!store.snapshot().contains_key("a"));
+    assert!(store.write_calls().is_empty());
+    assert_eq!(store.delete_calls(), vec![vec!["a"]]);
+}
+
+#[tokio::test]
+async fn dropping_the_last_handle_flushes() {
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let map = behind_on(&client().await, &name, &store, 50, LATER).await;
+    map.insert("a", "1").await.unwrap();
+    let clone = map.clone();
+    drop(map);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(store.snapshot().is_empty(), "a clone is still alive");
+    drop(clone);
+    eventually("the final drain", || async {
+        store.snapshot() == expected(&[("a", "1")])
+    })
+    .await;
+    assert_eq!(queue_len(&name).await, ":0\r\n");
+}
+
+#[tokio::test]
+async fn another_client_processes_queued_writes() {
+    let name = unique("ms");
+    let first = MemoryStore::default();
+    let a = common::connect_with(|builder| builder).await;
+    let map_a = behind_on(&a, &name, &first, 50, LATER).await;
+    map_a.insert("x", "1").await.unwrap();
+    let second = MemoryStore::default();
+    let b = common::connect_with(|builder| builder).await;
+    let _map_b = behind_on(&b, &name, &second, 50, Duration::from_millis(100)).await;
+    eventually("the second client's drain", || async {
+        second.snapshot() == expected(&[("x", "1")])
+    })
+    .await;
+    assert_eq!(queue_len(&name).await, ":0\r\n");
+    assert!(first.snapshot().is_empty());
+    drop(map_a);
+}
+
+#[tokio::test]
+async fn write_behind_skips_a_foreign_queue_entry() {
+    let store = MemoryStore::default();
+    let name = unique("ms");
+    let client = client().await;
+    let map = behind_on(&client, &name, &store, 50, LATER).await;
+    // A Java-serialized task starts with 0xac 0xed; raw_command sends text, so these are its UTF-8 bytes, just as foreign.
+    raw_command(&["RPUSH", &queue_of(&name), "\u{ac}\u{ed}\u{0}\u{5}"]).await;
+    map.insert("a", "1").await.unwrap();
+    map.flush().await.unwrap();
+    assert_eq!(store.snapshot(), expected(&[("a", "1")]));
+    assert_eq!(queue_len(&name).await, ":0\r\n");
+}
+
+#[tokio::test]
+async fn a_failing_write_behind_batch_is_dropped_and_reported() {
+    let store = MemoryStore::default();
+    store.fail_always();
+    let name = unique("ms");
+    let client = client().await;
+    let map = behind_on(&client, &name, &store, 50, LATER).await;
+    map.insert("a", "1").await.unwrap();
+    assert!(matches!(map.flush().await, Err(Error::Writer(_))));
+    assert_eq!(queue_len(&name).await, ":0\r\n");
+    map.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn flush_without_write_behind_is_a_no_op() {
+    let store = MemoryStore::default();
+    let map = writing(&store).await;
+    map.flush().await.unwrap();
+    client()
+        .await
+        .hash_map::<String, String>(unique("ms"))
+        .flush()
+        .await
+        .unwrap();
+    assert!(store.write_calls().is_empty());
+}

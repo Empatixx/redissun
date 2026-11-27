@@ -139,3 +139,41 @@ Redis changes first, then the writer is called, as in Redisson. If the writer st
 | `.writer_retry_interval(d)` | 100 ms between two calls | `writerRetryInterval` |
 
 `writer_retry_attempts(0)` is an `Error::Config` at `build()`. Each failed attempt but the last is logged at `warn` with the map name.
+
+## Write-behind
+
+With `.write_mode(WriteMode::write_behind())` a write returns as soon as Redis has the change and the change is queued. A background task hands the queue to the writer later, Redisson's `WriteMode.WRITE_BEHIND`.
+
+```rust
+use redissun::WriteMode;
+use std::time::Duration;
+
+let users = client
+    .hash_map_builder::<String, User>("users")
+    .writer(Users(pool))
+    .write_mode(WriteMode::WriteBehind { batch_size: 100, delay: Duration::from_millis(500) })
+    .build()
+    .await?;
+```
+
+| Option | Default (`WriteMode::write_behind()`) | Redisson |
+|---|---|---|
+| `batch_size` | 50: the most entries one writer call gets | `writeBehindBatchSize` |
+| `delay` | 1 s between two polls of the queue | `writeBehindDelay` |
+
+Every `delay` the task takes everything from the queue and calls the writer each time `batch_size` writes or `batch_size` deletes have piled up, then once more for the rest: the deletes first, then the writes. Each call gets the retries of `writer_retry_attempts` and `writer_retry_interval`. A call that still fails is logged and its batch is dropped, as in Redisson.
+
+The writer sees only the latest operation of each key within one poll. `insert(k)` followed by `remove(k)` gives `delete([k])` and no write. Redisson sends the deletes of a poll before its writes, so there `k` ends written; redissun's order is the map's.
+
+`build()` needs a running tokio runtime for the task. `WriteBehind` without a writer, with `batch_size: 0` or with a zero `delay` is an `Error::Config` at `build()`.
+
+### Flush and lifecycle
+
+- `map.flush().await` drains the queue now and returns the first writer error. It plays the part Redisson's `destroy()` plays for pending writes. Without write-behind it does nothing.
+- When the last handle of the built map is dropped (clones share one task), the task drains the queue once more and stops. The map's connection stays open until that drain is done. No `Drop` blocks.
+- While handles live, the task polls every `delay`. If the runtime shuts down first, the queue stays in Redis.
+- The queue lives in Redis, so any write-behind map of the same name, in any process, picks up what another one left: the next one to poll writes it.
+
+### The queue
+
+The queue is the Redis list `{name}:redissun_write-behind-queue` (`name:redissun_write-behind-queue` when the name has a hash tag), in the map's hash slot. Redisson's queue `{name}:write-behind-queue` holds Java-serialized tasks that a Rust client cannot read, so redissun keeps its own. An entry redissun cannot read, such as one a Redisson client pushed to this key, is logged and skipped.

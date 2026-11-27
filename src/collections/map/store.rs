@@ -3,6 +3,7 @@
 //! The public traits return `impl Future`/`impl Stream`, so they are not dyn-compatible. Each has a private, object-safe twin ([`ErasedLoader`], [`ErasedWriter`]) with a blanket impl, and the maps keep `Arc<dyn …>` of the twin.
 
 use crate::codec::Codec;
+use crate::collections::map::write_behind::{self, Task, WriteBehind};
 use crate::error::{Error, Result};
 use crate::object::Key;
 use bytes::Bytes;
@@ -214,8 +215,14 @@ impl<K, V> StoreOptions<K, V> {
         }
         Ok(())
     }
+}
 
-    /// Checks the settings and builds the store of the map `key`; `None` when there is neither a loader nor a writer, so the map does what it did without one.
+impl<K, V> StoreOptions<K, V>
+where
+    K: DeserializeOwned + Send + Sync + 'static,
+    V: DeserializeOwned + Send + Sync + 'static,
+{
+    /// Checks the settings and builds the store of the map `key`; `None` when there is neither a loader nor a writer, so the map does what it did without one. Write-behind starts its background task here, on the running tokio runtime.
     pub(crate) fn into_store<C: Codec>(
         self,
         key: &Key,
@@ -225,14 +232,30 @@ impl<K, V> StoreOptions<K, V> {
         if self.loader.is_none() && self.writer.is_none() {
             return Ok(None);
         }
+        let write_behind = match (self.mode, &self.writer) {
+            (WriteMode::WriteBehind { batch_size, delay }, Some(writer)) => {
+                Some(WriteBehind::start(
+                    key,
+                    codec.clone(),
+                    write_behind::Settings {
+                        batch_size,
+                        delay,
+                        writer: writer.clone(),
+                        attempts: self.attempts,
+                        interval: self.interval,
+                    },
+                )?)
+            }
+            _ => None,
+        };
         Ok(Some(Arc::new(Store {
             key: key.clone(),
             codec,
             loader: self.loader,
             writer: self.writer,
-            mode: self.mode,
             attempts: self.attempts,
             interval: self.interval,
+            write_behind,
         })))
     }
 }
@@ -243,9 +266,10 @@ pub(crate) struct Store<K, V, C: Codec> {
     codec: C,
     loader: Option<Arc<dyn ErasedLoader<K, V>>>,
     writer: Option<Arc<dyn ErasedWriter<K, V>>>,
-    mode: WriteMode,
     attempts: usize,
     interval: Duration,
+    /// The queue and background task in write-behind mode; `None` writes through.
+    write_behind: Option<WriteBehind<K, V, C>>,
 }
 
 #[allow(dead_code)] // The maps call these from the next commits on.
@@ -309,20 +333,18 @@ where
         if entries.is_empty() {
             return Ok(());
         }
+        if let Some(behind) = &self.write_behind {
+            return behind.push(&Task::Write(entries.to_vec())).await;
+        }
         let decoded = entries
             .iter()
             .map(|(k, v)| Ok((self.codec.decode::<K>(k)?, self.codec.decode::<V>(v)?)))
             .collect::<Result<Vec<(K, V)>>>()?;
-        match self.mode {
-            // Write-behind queues the entries from the write-behind commit on; until then they go through.
-            WriteMode::WriteThrough | WriteMode::WriteBehind { .. } => {
-                retry(self.attempts, self.interval, self.name(), || {
-                    writer.write(&decoded)
-                })
-                .await
-                .map_err(Error::Writer)
-            }
-        }
+        retry(self.attempts, self.interval, self.name(), || {
+            writer.write(&decoded)
+        })
+        .await
+        .map_err(Error::Writer)
     }
 
     /// The map removed these encoded keys.
@@ -333,18 +355,25 @@ where
         if keys.is_empty() {
             return Ok(());
         }
+        if let Some(behind) = &self.write_behind {
+            return behind.push(&Task::Delete(keys.to_vec())).await;
+        }
         let decoded = keys
             .iter()
             .map(|k| self.codec.decode::<K>(k))
             .collect::<Result<Vec<K>>>()?;
-        match self.mode {
-            WriteMode::WriteThrough | WriteMode::WriteBehind { .. } => {
-                retry(self.attempts, self.interval, self.name(), || {
-                    writer.delete(&decoded)
-                })
-                .await
-                .map_err(Error::Writer)
-            }
+        retry(self.attempts, self.interval, self.name(), || {
+            writer.delete(&decoded)
+        })
+        .await
+        .map_err(Error::Writer)
+    }
+
+    /// Hands every queued write-behind change to the writer now; `Ok(())` without write-behind.
+    pub(crate) async fn drain(&self) -> Result<()> {
+        match &self.write_behind {
+            Some(behind) => behind.drain().await,
+            None => Ok(()),
         }
     }
 }

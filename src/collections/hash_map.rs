@@ -198,7 +198,14 @@ where
     C: Codec,
 {
     store_options!();
+}
 
+impl<K, V, C> HashMapBuilder<K, V, C>
+where
+    K: DeserializeOwned + Send + Sync + 'static,
+    V: DeserializeOwned + Send + Sync + 'static,
+    C: Codec,
+{
     /// Checks the options and returns the map. Invalid options are an [`Error::Config`](crate::Error::Config).
     pub async fn build(self) -> Result<HashMap<K, V, C>> {
         let store = self.options.into_store(&self.key, self.codec.clone())?;
@@ -683,6 +690,16 @@ where
             })
             .await?;
         Ok(removed)
+    }
+
+    /// Hands every write-behind change still queued to the writer now and returns the first writer error. A batch the writer rejected after its retries is dropped, as Redisson drops it. Without write-behind it does nothing.
+    ///
+    /// It plays the part Redisson's `destroy()` plays for pending writes; dropping the map's last handle drains the queue once more in the background.
+    pub async fn flush(&self) -> Result<()> {
+        match &self.store {
+            Some(store) => store.drain().await,
+            None => Ok(()),
+        }
     }
 
     /// Returns whether any entry has a value equal to `v`. It reads every value on the server.
