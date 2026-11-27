@@ -50,7 +50,7 @@ mod wait;
 
 /// The types [`HashMap`] methods return, like `std::collections::hash_map`.
 pub mod hash_map {
-    pub use crate::collections::hash_map::{Entry, Extend, OccupiedEntry, VacantEntry};
+    pub use crate::collections::hash_map::{Entry, Extend, LoadAll, OccupiedEntry, VacantEntry};
 }
 
 /// The builders [`HashMapCache`] methods return.
@@ -104,7 +104,7 @@ pub use client::retry::DelayStrategy;
 pub use client::tls::TlsVerification;
 pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
-pub use collections::hash_map::HashMap;
+pub use collections::hash_map::{HashMap, HashMapBuilder};
 pub use collections::hash_map_cache::{
     EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, Lease, LeaseGuard,
 };

@@ -3,7 +3,9 @@
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
 use crate::collections::hash_map_cache::HashMapCache;
+use crate::collections::map::load::load_value_locked;
 use crate::collections::map::ops::KeyLock;
+use crate::collections::map::store::Store;
 use crate::error::Result;
 use crate::object::{HasKey, Key};
 use bytes::Bytes;
@@ -50,31 +52,42 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
-    fn key(&self) -> &Key {
+    pub(crate) fn key(&self) -> &Key {
         match self {
             Target::Map(map) => map.redis_key(),
             Target::Cache(cache, _) => HasKey::key(*cache),
         }
     }
 
-    async fn read(&self, k: &Bytes) -> Result<Option<V>> {
+    /// Reads an encoded key from the master.
+    pub(crate) async fn read(&self, k: &Bytes) -> Result<Option<V>> {
         match self {
             Target::Map(map) => map.read_encoded(k).await,
             Target::Cache(cache, _) => cache.read_encoded(k).await,
         }
     }
 
-    async fn write(&self, k: &Bytes, v: &V) -> Result<()> {
+    /// Stores the value with the map's plain put, without the writer.
+    pub(crate) async fn write(&self, k: &Bytes, v: &V) -> Result<()> {
         match self {
             Target::Map(map) => map.write_encoded(k, v).await,
             Target::Cache(cache, ttl) => cache.write_encoded(k, v, *ttl).await,
         }
     }
 
-    async fn delete(&self, k: &Bytes) -> Result<()> {
+    /// Removes the key, without the writer.
+    pub(crate) async fn delete(&self, k: &Bytes) -> Result<()> {
         match self {
             Target::Map(map) => map.delete_encoded(k).await,
             Target::Cache(cache, _) => cache.delete_encoded(k).await,
+        }
+    }
+
+    /// The map's loader and writer; `None` when it has neither.
+    pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
+        match self {
+            Target::Map(map) => map.store(),
+            Target::Cache(..) => None,
         }
     }
 }
@@ -106,6 +119,13 @@ where
     pub(crate) async fn acquire(target: Target<'m, K, V, C>, key: Bytes) -> Result<Self> {
         let lock = KeyLock::acquire(target.key(), &key).await?;
         let value = match target.read(&key).await {
+            // A miss asks the loader under the lock this entry already holds; taking it again would wait forever.
+            Ok(None) if target.store().is_some_and(Store::has_loader) => {
+                load_value_locked(&target, &key, true).await
+            }
+            other => other,
+        };
+        let value = match value {
             Ok(value) => value,
             Err(e) => return lock.release(Err(e)).await,
         };

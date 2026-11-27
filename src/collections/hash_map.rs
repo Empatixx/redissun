@@ -3,7 +3,10 @@ use crate::collections::map::entry::Target;
 pub use crate::collections::map::entry::{Entry, OccupiedEntry, VacantEntry};
 use crate::collections::map::events::{self, MapEventKind, MapEvents};
 use crate::collections::map::key_hash::per_key_objects;
+use crate::collections::map::load::load_value;
+pub use crate::collections::map::load::LoadAll;
 use crate::collections::map::scan::{decode_pairs, hscan, MapScan};
+use crate::collections::map::store::{store_options, Store, StoreOptions};
 use crate::error::Result;
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
@@ -17,7 +20,7 @@ use std::future::{Future, IntoFuture};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 pub(crate) static INSERT: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
@@ -87,9 +90,13 @@ static CONTAINS_VALUE: LazyLock<Lua> = LazyLock::new(|| {
 });
 
 /// A distributed map stored in a Redis hash.
+///
+/// A map from [`Client::hash_map_builder`](crate::Client::hash_map_builder) can have a [`MapLoader`](crate::MapLoader) and a [`MapWriter`](crate::MapWriter); see the "Loaders and writers" guide.
 pub struct HashMap<K, V, C: Codec> {
     key: Key,
     codec: C,
+    /// The loader and writer; `None` keeps every call as it is without them.
+    store: Option<Arc<Store<K, V, C>>>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -98,6 +105,7 @@ impl<K, V, C: Codec> Clone for HashMap<K, V, C> {
         Self {
             key: self.key.clone(),
             codec: self.codec.clone(),
+            store: self.store.clone(),
             _marker: PhantomData,
         }
     }
@@ -117,11 +125,67 @@ impl<K, V, C: Codec> HasKey for HashMap<K, V, C> {
 
 impl<K, V, C: Codec> HashMap<K, V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
+        Self::with_store(key, codec, None)
+    }
+
+    pub(crate) fn with_store(key: Key, codec: C, store: Option<Arc<Store<K, V, C>>>) -> Self {
         Self {
             key,
             codec,
+            store,
             _marker: PhantomData,
         }
+    }
+
+    pub(crate) fn store(&self) -> Option<&Store<K, V, C>> {
+        self.store.as_deref()
+    }
+
+    /// Whether a miss asks the loader.
+    fn loads(&self) -> bool {
+        self.store.as_ref().is_some_and(|store| store.has_loader())
+    }
+}
+
+/// Sets up a [`HashMap`] with a [`MapLoader`](crate::MapLoader) or a [`MapWriter`](crate::MapWriter), Redisson's `getMap(name, MapOptions)`. Get one from [`Client::hash_map_builder`](crate::Client::hash_map_builder), set its options, then `.build().await`.
+#[must_use = "a builder does nothing until build() is awaited"]
+pub struct HashMapBuilder<K, V, C: Codec> {
+    key: Key,
+    codec: C,
+    options: StoreOptions<K, V>,
+}
+
+impl<K, V, C: Codec> fmt::Debug for HashMapBuilder<K, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HashMapBuilder")
+            .field("name", &self.key.name())
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl<K, V, C: Codec> HashMapBuilder<K, V, C> {
+    pub(crate) fn new(key: Key, codec: C) -> Self {
+        Self {
+            key,
+            codec,
+            options: StoreOptions::default(),
+        }
+    }
+}
+
+impl<K, V, C> HashMapBuilder<K, V, C>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    C: Codec,
+{
+    store_options!();
+
+    /// Checks the options and returns the map. Invalid options are an [`Error::Config`](crate::Error::Config).
+    pub async fn build(self) -> Result<HashMap<K, V, C>> {
+        let store = self.options.into_store(&self.key, self.codec.clone())?;
+        Ok(HashMap::with_store(self.key, self.codec, store))
     }
 }
 
@@ -195,22 +259,26 @@ where
         self.decode_value(previous)
     }
 
-    /// Returns the value for the key, or `None` when it is missing.
+    /// Returns the value for the key, or `None` when it is missing. With a loader, a miss asks the loader and stores what it returns.
     pub async fn get<Q>(&self, k: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let encoded = self.codec.encode(k)?;
         let raw: Option<Bytes> = self
             .key
             .read({
                 let mut cmd = redis::cmd("HGET");
                 cmd.arg(self.key.redis_key());
-                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(&encoded[..]);
                 cmd
             })
             .await?;
-        self.decode_value(raw)
+        match self.decode_value(raw)? {
+            None if self.loads() => load_value(&Target::Map(self), &encoded, false).await,
+            value => Ok(value),
+        }
     }
 
     /// Removes the entry and returns its value.
@@ -231,21 +299,27 @@ where
         self.decode_value(previous)
     }
 
-    /// Returns whether the key is present.
+    /// Returns whether the key is present. With a loader, a miss asks the loader, and a loaded value counts as present.
     pub async fn contains_key<Q>(&self, k: &Q) -> Result<bool>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let encoded = self.codec.encode(k)?;
         let found: bool = self
             .key
             .read({
                 let mut cmd = redis::cmd("HEXISTS");
                 cmd.arg(self.key.redis_key());
-                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(&encoded[..]);
                 cmd
             })
             .await?;
+        if !found && self.loads() {
+            return Ok(load_value(&Target::Map(self), &encoded, false)
+                .await?
+                .is_some());
+        }
         Ok(found)
     }
 
@@ -302,7 +376,7 @@ where
         }
     }
 
-    /// Returns the values for several keys, in the order of the keys.
+    /// Returns the values for several keys, in the order of the keys. With a loader, the missing keys are loaded one at a time, in the order of the keys.
     pub async fn get_many<Q>(&self, ks: &[&Q]) -> Result<Vec<Option<V>>>
     where
         K: Borrow<Q>,
@@ -324,7 +398,35 @@ where
                 cmd
             })
             .await?;
-        raw.into_iter().map(|r| self.decode_value(r)).collect()
+        let mut values = raw
+            .into_iter()
+            .map(|r| self.decode_value(r))
+            .collect::<Result<Vec<Option<V>>>>()?;
+        if self.loads() {
+            for (value, field) in values.iter_mut().zip(&fields) {
+                if value.is_none() {
+                    *value = load_value(&Target::Map(self), field, false).await?;
+                }
+            }
+        }
+        Ok(values)
+    }
+
+    /// Loads every key of the loader into the map, Redisson's `loadAll(replaceExistingValues, parallelism)`. Keys the map holds keep their value unless [`replace_existing`](LoadAll::replace_existing). Without a loader it is an [`Error::Config`](crate::Error::Config).
+    #[doc(alias = "loadAll")]
+    pub fn load_all(&self) -> LoadAll<'_, K, V, C> {
+        LoadAll::new(Target::Map(self), None)
+    }
+
+    /// Loads the given keys into the map, Redisson's `loadAll(keys, replaceExistingValues, parallelism)`.
+    #[doc(alias = "loadAll")]
+    pub fn load_many<Q>(&self, ks: &[&Q]) -> LoadAll<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let keys = ks.iter().map(|k| self.codec.encode(*k)).collect();
+        LoadAll::new(Target::Map(self), Some(keys))
     }
 
     /// Adds `delta` to the integer stored under the key, creating it at zero, and returns the result.

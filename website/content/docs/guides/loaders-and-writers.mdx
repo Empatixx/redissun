@@ -1,0 +1,81 @@
+---
+title: Loaders and writers
+description: Read-through from another store with a MapLoader, and load_all.
+---
+
+A map can sit in front of another store, such as a SQL database. A `MapLoader` fills the map on a miss: read-through. This is Redisson's `MapOptions` with a `MapLoader` or a `MapLoaderAsync`; redissun has one trait for both.
+
+## A loader
+
+Implement `MapLoader` with plain `async fn`s. A blocking store calls `tokio::task::spawn_blocking` inside them.
+
+```rust
+use futures::Stream;
+use redissun::{BoxError, MapLoader};
+
+struct Users(sqlx::PgPool);
+
+impl MapLoader<String, User> for Users {
+    async fn load(&self, key: &String) -> Result<Option<User>, BoxError> {
+        Ok(sqlx::query_as("SELECT * FROM users WHERE id = $1")
+            .bind(key)
+            .fetch_optional(&self.0)
+            .await?)
+    }
+
+    fn load_all_keys(&self) -> impl Stream<Item = Result<String, BoxError>> + Send {
+        futures::stream::iter(Vec::<Result<String, BoxError>>::new())
+    }
+}
+```
+
+Give it to the map's builder:
+
+```rust
+let users = client
+    .hash_map_builder::<String, User>("users")
+    .loader(Users(pool))
+    .build()
+    .await?;
+
+let user = users.get("jirka").await?; // a miss asks the loader
+```
+
+`client.hash_map(name)` is the same map without options.
+
+## When the loader is asked
+
+| Method | The loader is asked |
+|---|---|
+| `get` | on a miss |
+| `get_many` | for each missing key, one at a time, in the order of the keys |
+| `contains_key` | on a miss; `true` when it loaded a value |
+| `entry(&k)` | on a miss, under the lock the entry holds |
+| `load_all()`, `load_many(&ks)` | always |
+| iteration, `len`, `to_hash_map`, `random_*`, `contains_value`, `incr_by`, every write | never |
+
+## The lock
+
+A miss takes the key's lock, the lock `entry(&k)` and Redisson's `getLock(key)` take. It reads the key again and returns a value that arrived meanwhile. Otherwise it asks the loader and stores a `Some` value with the map's plain put. So ten gets of one missing key at once ask the loader once, and all of them see the value. A Redisson client loading the same key of the same map takes the same lock.
+
+A loaded value is not handed to the map's writer: it came from the store. `None` stores nothing, and the next miss asks again.
+
+## Errors
+
+A failing loader gives `Err(Error::Loader(_))` with its error as the source. The map stores nothing and the lock is released, so the next call asks again. Redisson returns `null` instead.
+
+## Load all keys
+
+`load_all()` loads every key `load_all_keys` streams, Redisson's `loadAll(replaceExistingValues, parallelism)`. `load_many(&keys)` loads only those keys.
+
+```rust
+users.load_all().parallelism(4).await?;
+users.load_many(&["jirka", "petr"]).replace_existing().await?;
+```
+
+| Option | Default | Redisson |
+|---|---|---|
+| `.parallelism(n)` | 1 | `parallelism` |
+| `.replace_existing()` | keys the map holds keep their value | `replaceExistingValues = true` |
+
+Each key is loaded as a miss is, under its lock. The load stops at the first error. Without a loader, or with `parallelism(0)`, it is an `Error::Config`.

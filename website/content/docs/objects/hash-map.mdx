@@ -89,6 +89,21 @@ Entries for the same key taken in one program, even by futures joined in one tas
 
 `events()` returns `MapEvents`. Call `recv()` for the next `MapEvent`, or `into_stream()` for a `Stream` of them. The kinds are `Put`, `Incremented`, `Removed`, `Deleted` and `Expired`. `events_of(&[MapEventKind::Removed])` listens to some kinds only. Redis sends these events only when `notify-keyspace-events` enables them: `Eh` for field events, `g` for deletes, `x` for expiry. With `T` (Redis 8.8 or newer) the events name the changed key; otherwise `key` is `None`, as in Redisson.
 
+## Loader and writer
+
+`client.hash_map_builder::<K, V>(name)` sets options, then `.build().await` returns the map. See [Loaders and writers](/docs/guides/loaders-and-writers).
+
+| Option | Default | Redisson |
+|---|---|---|
+| `.loader(l)` | none | `MapOptions.loader`, `loaderAsync` |
+
+| Method | Notes |
+|---|---|
+| `load_all()` | loads every key of the loader; `.parallelism(n)`, `.replace_existing()` |
+| `load_many(&[&k])` | loads those keys |
+
+With a loader, `get`, `get_many`, `contains_key` and `entry` ask it on a miss.
+
 ## Missing keys and null values
 
 `get` returns `None` for a missing key. If your value type is an `Option`, a stored `None` comes back as `Some(None)`. So you can tell the two cases apart.

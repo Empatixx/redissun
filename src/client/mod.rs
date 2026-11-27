@@ -13,7 +13,7 @@ use crate::batch::Batch;
 use crate::client::config::ClientBuilder;
 use crate::client::core::Core;
 use crate::codec::{Codec, JsonCodec};
-use crate::collections::hash_map::HashMap;
+use crate::collections::hash_map::{HashMap, HashMapBuilder};
 use crate::collections::hash_map_cache::HashMapCache;
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
@@ -152,9 +152,27 @@ impl<C: Codec> Client<C> {
         crate::Buckets::new(self.core.clone(), self.codec.clone())
     }
 
-    /// Returns the [`HashMap`] stored under `name`.
+    /// Returns the [`HashMap`] stored under `name`, the map [`hash_map_builder`](Client::hash_map_builder) builds without options.
     pub fn hash_map<K, V>(&self, name: impl Into<Arc<str>>) -> HashMap<K, V, C> {
         HashMap::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Starts a [`HashMap`] stored under `name` with a loader or a writer, Redisson's `getMap(name, MapOptions)`. Set its options, then `.build().await`.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client, users: impl redissun::MapLoader<String, String>) -> redissun::Result<()> {
+    /// let map = client
+    ///     .hash_map_builder::<String, String>("users")
+    ///     .loader(users)
+    ///     .build()
+    ///     .await?;
+    /// map.load_all().parallelism(4).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(alias = "getMap")]
+    pub fn hash_map_builder<K, V>(&self, name: impl Into<Arc<str>>) -> HashMapBuilder<K, V, C> {
+        HashMapBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Vec`](crate::Vec) stored under `name`.

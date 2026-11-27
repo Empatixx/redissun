@@ -116,6 +116,7 @@ where
 }
 
 /// The object-safe twin of [`MapWriter`].
+#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 pub(crate) trait ErasedWriter<K, V>: Send + Sync {
     fn write<'a>(
         &'a self,
@@ -175,7 +176,6 @@ impl<K, V> fmt::Debug for StoreOptions<K, V> {
     }
 }
 
-#[allow(dead_code)] // The builders call these from the next commit on.
 impl<K, V> StoreOptions<K, V>
 where
     K: Send + Sync + 'static,
@@ -216,7 +216,6 @@ impl<K, V> StoreOptions<K, V> {
         Ok(())
     }
 
-    #[allow(dead_code)] // The builders call it from the next commit on.
     /// Checks the settings and builds the store of the map `key`; `None` when there is neither a loader nor a writer, so the map does what it did without one.
     pub(crate) fn into_store<C: Codec>(
         self,
@@ -240,6 +239,7 @@ impl<K, V> StoreOptions<K, V> {
 }
 
 /// The loader and writer of one map. The map tells it what it did in encoded form, and it decodes the entries for the user's types.
+#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 pub(crate) struct Store<K, V, C: Codec> {
     key: Key,
     codec: C,
@@ -251,6 +251,13 @@ pub(crate) struct Store<K, V, C: Codec> {
 }
 
 #[allow(dead_code)] // The maps call these from the next commits on.
+impl<K, V, C: Codec> Store<K, V, C> {
+    pub(crate) fn has_loader(&self) -> bool {
+        self.loader.is_some()
+    }
+}
+
+#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 impl<K, V, C> Store<K, V, C>
 where
     K: Serialize + DeserializeOwned + Send + Sync,
@@ -259,10 +266,6 @@ where
 {
     fn name(&self) -> &str {
         self.key.name()
-    }
-
-    pub(crate) fn has_loader(&self) -> bool {
-        self.loader.is_some()
     }
 
     /// Asks the loader for the encoded key `k`; `None` without a loader.
@@ -338,6 +341,7 @@ where
 }
 
 /// Calls `call` up to `attempts` times (at least once), `interval` apart, and returns the last error: Redisson's `RetryableMapWriterAsync`.
+#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 pub(crate) async fn retry<F, Fut>(
     attempts: usize,
     interval: Duration,
@@ -364,7 +368,6 @@ where
 }
 
 /// The store settings of a map builder with a field `options: StoreOptions<K, V>`: `loader`, `writer`, `write_mode`, `writer_retry_attempts` and `writer_retry_interval`. Invoke it inside an `impl` block whose `K` and `V` are `Send + Sync + 'static`.
-#[allow(unused_macros)] // The builders invoke it from the next commit on.
 macro_rules! store_options {
     () => {
         /// Loads missing values from another store on a read: read-through. See [`MapLoader`](crate::MapLoader).
@@ -403,7 +406,6 @@ macro_rules! store_options {
         }
     };
 }
-#[allow(unused_imports)]
 pub(crate) use store_options;
 
 #[cfg(test)]
