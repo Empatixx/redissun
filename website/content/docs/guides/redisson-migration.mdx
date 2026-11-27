@@ -584,6 +584,9 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `GcraResult.getRetryAfterSeconds()` | `retry_after: Option<Duration>`; `-1` is `None` |
 | `GcraResult.getFullBurstAfterSeconds()` | `full_burst_after: Duration` |
 | `tryAcquire(maxBurst, tokensPerPeriod, period)`, `tryAcquire(maxBurst, tokensPerPeriod, period, tokens)` (deprecated) | not ported; use `init_rate` and `try_acquire` |
+| the `RGcraAsync` methods (`trySetRateAsync`, `setRateAsync`, `getConfigAsync`, `tryAcquireAsync`) | the same methods; every redissun method is async |
+| `delete()`, `expire(..)`, `clearExpire()` | `del()`, `expire(d)`, `persist()`, over both keys as in Redisson |
+| `isExists()`, `remainTimeToLive()`, `rename(..)` | `exists()`, `ttl()`, `rename(..)`; they cover `{name}:config` too, and `ttl` is its time |
 
 ## Config
 

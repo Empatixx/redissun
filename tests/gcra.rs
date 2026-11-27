@@ -1,6 +1,16 @@
 //! Tests of `Gcra`, Redisson's `RGcra`.
 //!
-//! Ported from Redisson 4.8.0 `RedissonGcraTest` (named `redisson_<snake_case>`).
+//! Ported from Redisson 4.8.0 `RedissonGcraTest` (named `redisson_<snake_case>`; the runs on the Lua path add `_lua`):
+//! `testTrySetRate`, `testTryAcquire`, `testTryAcquireWithTokens`, `testSetRate`, `testGetConfigNotSet`,
+//! `testTryAcquireRateNotSet`, `testValidation` (as `redisson_validation` and `redisson_validation_of_tokens`; the
+//! negative `maxBurst` case cannot be written in Rust, since `u64` excludes it) and `testDelete`.
+//!
+//! Not ported:
+//! - `testDeprecatedTryAcquire`: the deprecated `tryAcquire(maxBurst, tokensPerPeriod, period[, tokens])` overloads
+//!   are not ported.
+//!
+//! The native runs use `redis:8.8-m03-alpine`, the only image with the `GCRA` command, as Redisson's own test does;
+//! the Lua runs use Redis 7.4, and `works_on_redis_6_2` and `works_on_valkey` the oldest and the other server.
 
 mod common;
 
@@ -632,4 +642,64 @@ async fn concurrent_acquires(client: Client) {
 async fn concurrent_acquires_never_exceed_the_burst() {
     concurrent_acquires(client().await).await;
     concurrent_acquires(redis_gcra_client().await).await;
+}
+
+// Task 4. Review Focus 6: two keys in one slot, routed by `{name}:config`, on both paths.
+
+/// The sum of `calls` of `cmdstat_gcra` over every node of `topology`.
+async fn cluster_gcra_calls(topology: &common::topology::Topology) -> u64 {
+    let mut calls = 0;
+    for port in topology.base..topology.base + 6 {
+        let info = topology.cli(port, &["INFO", "commandstats"]).await;
+        calls += info
+            .lines()
+            .find_map(|line| line.strip_prefix("cmdstat_gcra:calls="))
+            .and_then(|rest| rest.split(',').next())
+            .map_or(0, |n| n.trim().parse::<u64>().unwrap());
+    }
+    calls
+}
+
+async fn every_operation_on(topology: &common::topology::Topology) {
+    let client = Client::builder()
+        .url(topology.cluster_url())
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    let u = unique("gcra-cluster");
+    for name in [u.clone(), format!("{{t}}:{u}")] {
+        let gcra = client.gcra(name.clone());
+        assert!(gcra.init_rate(5, 10, secs(1)).await.unwrap(), "{name}");
+        assert!(gcra.config().await.unwrap().is_some(), "{name}");
+        assert!(!acquire(&gcra).await.limited, "{name}");
+        assert!(
+            !gcra.try_acquire().tokens(2).await.unwrap().limited,
+            "{name}"
+        );
+        gcra.set_rate(6, 12, secs(2)).await.unwrap();
+        assert!(gcra.exists().await.unwrap(), "{name}");
+        assert!(gcra.expire(secs(60)).await.unwrap(), "{name}");
+        assert!(gcra.ttl().await.unwrap().is_some(), "{name}");
+        assert!(gcra.persist().await.unwrap(), "{name}");
+        let gcra = if name.starts_with("{t}") {
+            let renamed = format!("{name}2");
+            gcra.rename(&renamed).await.unwrap();
+            client.gcra(renamed)
+        } else {
+            gcra
+        };
+        assert!(gcra.config().await.unwrap().is_some(), "{name}");
+        assert!(gcra.del().await.unwrap(), "{name}");
+        assert!(!gcra.exists().await.unwrap(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn every_operation_runs_on_a_cluster() {
+    let lua = common::topology::Topology::cluster().await;
+    every_operation_on(&lua).await;
+    let native = common::topology::Topology::cluster_on(&format!("redis:{GCRA_TAG}")).await;
+    every_operation_on(&native).await;
+    // One probe for the client, and two acquires for each of the two names.
+    assert_eq!(cluster_gcra_calls(&native).await, 5);
 }

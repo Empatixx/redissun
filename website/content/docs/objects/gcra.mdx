@@ -58,3 +58,18 @@ The two paths store the state differently: the command keeps it in a `gcra` obje
 ## How it is stored
 
 The settings live in the hash `{name}:config` with the fields `maxBurst`, `rate` and `period`. The period is written in decimal seconds, as Redisson writes it: `1` for one second, `0.25` for 250 ms. The state lives at the key `name` and expires when the bucket is full again. These are Redisson's keys and fields, so a Redisson client and a redissun client can share one limiter on a server with `GCRA`.
+
+## Object methods
+
+The `Object` methods act on both keys, the state `name` and the settings `{name}:config`. `del`, `expire`, `persist` and `rename` change both at once; `exists` is `true` when either exists, so it is `true` right after `init_rate`. `ttl` is the time to live of `{name}:config`, the key whose time only you set: the next allowed acquire sets the state key's own time again, as the server does. In a cluster, the new name of `rename` must hash to the same slot as the old one, for example `{team}:api` to `{team}:api2`.
+
+## Compared with `RateLimiter`
+
+| | `Gcra` | `RateLimiter` |
+|---|---|---|
+| algorithm | GCRA: a steady rate plus a burst | sliding window |
+| keys | a hash and one timestamp | a hash, a string and a sorted set |
+| clock | the server's | the client's |
+| waiting `acquire` | no, `try_acquire` only | yes, with a timeout |
+| per client limits | no | `RateType::PerClient` |
+| result | `GcraResult` with the tokens left and when to retry | `bool` |
