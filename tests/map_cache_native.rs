@@ -1,12 +1,25 @@
 //! Tests of `MapCacheNative`, Redisson's `RMapCacheNative`.
 //!
-//! Ported from Redisson 4.8.0 `RedissonMapCacheNativeTest` (named `redisson_<snake_case>`): filled in as the methods arrive.
+//! Ported from Redisson 4.8.0 `RedissonMapCacheNativeTest` (named `redisson_<snake_case>`), and 0a's ports of
+//! `BaseMapTest` run on a `MapCacheNative` (named `<0a name>_on_native`, in `base_map_on_native`).
+//!
+//! Not ported:
+//! - `testSizeInMemory`: redissun has no `sizeInMemory`.
+//! - `testExpireAt`: `Object` has no `expireAt`; `testExpire` covers `Object::expire`.
+//! - `testPutIfExistWithNullValueDuration`, `testPutIfExistWithNullValueInstant`: Rust has no null value.
+//! - The loader and writer cases of `BaseMapTest` (`testWriter*`, `testMapLoader*`, `testLoadAll*`, `testWriteBehind*`):
+//!   covered by the `native_` tests in `tests/map_store.rs`.
+//!
+//! Recorded deviations the ports follow: a zero TTL means none, `expire_entry` without a time removes the TTL,
+//! `entry_ttls` answers in key order, and `replace`/`compare_and_set` keep the entry's TTL.
 
 mod common;
 
 use common::{client, own_redis_tag, raw_command, raw_command_at, unique};
 use futures::TryStreamExt;
-use redissun::{Client, Error, JsonCodec, MapCacheNative, MapScan, Object};
+use redissun::{
+    Client, Error, JsonCodec, MapCacheNative, MapEvent, MapEventKind, MapEvents, MapScan, Object,
+};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
@@ -1579,4 +1592,1022 @@ async fn entry_with_a_bad_time_fails_before_locking() {
     .unwrap();
     assert!(taken, "the lock was left taken");
     assert!(!map.contains_key("a").await.unwrap());
+}
+
+// --- Task 6: events ---
+
+async fn events_client(url: &str, flags: &str) -> Client {
+    raw_command_at(url, &["CONFIG", "SET", "notify-keyspace-events", flags]).await;
+    Client::builder()
+        .url(url.to_string())
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Reads events for up to `within` until every one of `wanted` arrived; other events are skipped.
+async fn wait_for_events(
+    events: &mut MapEvents<String, JsonCodec>,
+    wanted: &[MapEvent<String>],
+    within: Duration,
+) {
+    let mut missing: Vec<MapEvent<String>> = wanted.to_vec();
+    let deadline = tokio::time::Instant::now() + within;
+    while !missing.is_empty() {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("still missing {missing:?}"))
+            .unwrap();
+        missing.retain(|wanted| *wanted != event);
+    }
+}
+
+// Redisson testExpiration.
+#[tokio::test]
+async fn events_report_field_expiry() {
+    let (_container, url) = common::own_redis8().await;
+    let client = events_client(&url, "ETh").await;
+    let map: Native<String, String> = client.map_cache_native(unique("simple"));
+    let mut events = map.events().await.unwrap();
+    map.insert("1", "2").ttl(secs(1)).await.unwrap();
+    map.insert("3", "4")
+        .expire_at(SystemTime::now() + secs(2))
+        .await
+        .unwrap();
+    wait_for_events(
+        &mut events,
+        &[
+            MapEvent::EntryExpired { key: s("1") },
+            MapEvent::EntryExpired { key: s("3") },
+        ],
+        secs(10),
+    )
+    .await;
+}
+
+// Redisson testClearExpireListener.
+#[tokio::test]
+async fn events_report_cleared_ttls() {
+    let (_container, url) = common::own_redis8().await;
+    let client = events_client(&url, "ETh").await;
+    let map: Native<String, String> = client.map_cache_native(unique("simple"));
+    let mut events = map
+        .events_of(&[MapEventKind::EntryPersisted])
+        .await
+        .unwrap();
+    map.insert("1", "2").ttl(secs(60)).await.unwrap();
+    map.insert("3", "4").ttl(secs(60)).await.unwrap();
+    assert!(map.persist_entry("1").await.unwrap());
+    assert_eq!(map.persist_entries(&["3"]).await.unwrap(), vec![true]);
+    wait_for_events(
+        &mut events,
+        &[
+            MapEvent::EntryPersisted { key: s("1") },
+            MapEvent::EntryPersisted { key: s("3") },
+        ],
+        secs(10),
+    )
+    .await;
+}
+
+// Redisson testRemoveListener.
+#[tokio::test]
+async fn events_report_put_and_remove() {
+    let (_container, url) = common::own_redis8().await;
+    let client = events_client(&url, "ETh").await;
+    let map: Native<String, String> = client.map_cache_native(unique("testRemoveListener"));
+    let mut events = map.events().await.unwrap();
+    map.insert("1", "1").await.unwrap();
+    map.remove("1").await.unwrap();
+    wait_for_events(
+        &mut events,
+        &[
+            MapEvent::Put { key: s("1") },
+            MapEvent::Removed { key: s("1") },
+        ],
+        secs(5),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn field_events_without_subkey_names_have_no_key() {
+    let (_container, url) = common::own_redis().await;
+    let client = events_client(&url, "Eh").await;
+    let map: Native<String, String> = client.map_cache_native(unique("mcn-events-74"));
+    let mut events = map.events_of(&[MapEventKind::EntryExpired]).await.unwrap();
+    map.insert("1", "2").ttl(ms(200)).await.unwrap();
+    wait_for_events(
+        &mut events,
+        &[MapEvent::EntryExpired { key: None }],
+        secs(10),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn hash_map_rejects_the_field_ttl_kinds() {
+    let client = client().await;
+    let name = unique("mcn-events-plain");
+    for kind in [MapEventKind::EntryExpired, MapEventKind::EntryPersisted] {
+        match client
+            .hash_map::<String, String>(name.clone())
+            .events_of(&[kind])
+            .await
+        {
+            Err(Error::Config(message)) => assert!(message.contains("MapCacheNative"), "{message}"),
+            other => panic!("expected Config, got {other:?}"),
+        }
+        match client
+            .hash_map_cache::<String, String>(name.clone())
+            .keyspace_events_of(&[MapEventKind::Put, kind])
+            .await
+        {
+            Err(Error::Config(_)) => {}
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+}
+
+// --- Task 6: the rest of RedissonMapCacheNativeTest ---
+
+async fn native_of<K, V>(name: &str) -> Native<K, V> {
+    client().await.map_cache_native(unique(name))
+}
+
+async fn sorted<T: Ord>(stream: impl futures::Stream<Item = redissun::Result<T>>) -> Vec<T> {
+    let mut items: Vec<T> = stream.try_collect().await.unwrap();
+    items.sort();
+    items
+}
+
+#[tokio::test]
+async fn redisson_cache_values() {
+    let map: Native<String, String> = native_of("testRMapCacheValues").await;
+    map.insert("1234", "5678").ttl(secs(60)).await.unwrap();
+    map.insert("4321", "8765")
+        .expire_at(SystemTime::now() + secs(60))
+        .await
+        .unwrap();
+    assert_eq!(sorted(map.values()).await, ["5678", "8765"]);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_get_all_ttl() {
+    let map: Native<i32, i32> = native_of("getAll").await;
+    map.insert(&1, &100).await.unwrap();
+    map.insert(&2, &200).ttl(secs(1)).await.unwrap();
+    map.insert(&3, &300).ttl(secs(1)).await.unwrap();
+    map.insert(&4, &400).await.unwrap();
+    map.insert(&5, &500)
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        map.get_many(&[&2, &3, &5, &6]).await.unwrap(),
+        [Some(200), Some(300), Some(500), None]
+    );
+    sleep(ms(1050)).await;
+    assert_eq!(
+        map.get_many(&[&2, &3, &5, &6]).await.unwrap(),
+        [None, None, None, None]
+    );
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_get_all_with_string_keys() {
+    let map: Native<String, i32> = native_of("getAllStrings").await;
+    for (k, v) in [("A", 100), ("B", 200), ("C", 300), ("D", 400)] {
+        map.insert(k, &v).await.unwrap();
+    }
+    assert_eq!(
+        map.get_many(&["B", "C", "E"]).await.unwrap(),
+        [Some(200), Some(300), None]
+    );
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_expired_iterator() {
+    let cache: Native<String, String> = native_of("simple").await;
+    cache.insert("0", "8").await.unwrap();
+    cache.insert("1", "6").ttl(secs(1)).await.unwrap();
+    cache.insert("2", "4").ttl(secs(3)).await.unwrap();
+    cache.insert("3", "2").ttl(secs(4)).await.unwrap();
+    cache.insert("4", "4").ttl(secs(1)).await.unwrap();
+    let now = SystemTime::now();
+    cache
+        .insert("5", "6")
+        .expire_at(now + secs(1))
+        .await
+        .unwrap();
+    cache
+        .insert("6", "4")
+        .expire_at(now + secs(3))
+        .await
+        .unwrap();
+    cache
+        .insert("7", "2")
+        .expire_at(now + secs(4))
+        .await
+        .unwrap();
+    cache
+        .insert("8", "4")
+        .expire_at(now + secs(1))
+        .await
+        .unwrap();
+    sleep(ms(1050)).await;
+    assert_eq!(sorted(cache.keys()).await, ["0", "2", "3", "6", "7"]);
+    cache.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_expire() {
+    let cache: Native<String, String> = native_of("simple").await;
+    cache.insert("0", "8").ttl(secs(1)).await.unwrap();
+    cache
+        .insert("1", "8")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert!(cache.expire(ms(100)).await.unwrap());
+    sleep(ms(500)).await;
+    assert_eq!(cache.len().await.unwrap(), 0);
+}
+
+// Redisson testClear: clearExpire(k) is Boolean there, null for a missing key; here persist_entry gives false.
+#[tokio::test]
+async fn redisson_clear() {
+    let cache: Native<String, String> = native_of("simple").await;
+    for k in ["0", "02", "03"] {
+        cache.insert(k, "8").ttl(secs(1)).await.unwrap();
+    }
+    for k in ["04", "05", "06"] {
+        cache
+            .insert(k, "8")
+            .expire_at(SystemTime::now() + secs(1))
+            .await
+            .unwrap();
+    }
+    assert!(cache.persist_entry("0").await.unwrap());
+    assert!(!cache.persist_entry("01").await.unwrap());
+    assert!(cache.persist_entry("04").await.unwrap());
+    assert_eq!(
+        cache
+            .persist_entries(&["0", "02", "03", "04", "05", "06", "07"])
+            .await
+            .unwrap(),
+        [false, true, true, false, true, true, false]
+    );
+    cache.del().await.unwrap();
+}
+
+// Redisson testClearExpire: Object::expire and Object::persist on the whole hash.
+#[tokio::test]
+async fn redisson_clear_expire() {
+    let cache: Native<String, String> = native_of("simple").await;
+    cache.insert("0", "8").ttl(secs(1)).await.unwrap();
+    cache
+        .insert("1", "8")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert!(cache.expire(ms(100)).await.unwrap());
+    assert!(cache.persist().await.unwrap());
+    sleep(ms(500)).await;
+    assert_eq!(cache.len().await.unwrap(), 2);
+    cache.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_entry_set() {
+    let map: Native<i32, String> = native_of("simple12").await;
+    map.insert(&1, "12").await.unwrap();
+    map.insert(&2, "33").ttl(secs(1)).await.unwrap();
+    map.insert(&3, "43").await.unwrap();
+    map.insert(&4, "56")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    let entries = sorted(map.iter()).await;
+    assert!(entries.contains(&(1, "12".to_string())));
+    assert!(entries.contains(&(3, "43".to_string())));
+    assert_eq!(map.len().await.unwrap(), 4);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_key_set() {
+    let map: Native<String, String> = native_of("simple03").await;
+    map.insert("33", "44").ttl(secs(1)).await.unwrap();
+    map.insert("1", "2").await.unwrap();
+    map.insert("55", "2")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert_eq!(sorted(map.keys()).await, ["1", "33", "55"]);
+    sleep(ms(1050)).await;
+    assert_eq!(sorted(map.keys()).await, ["1"]);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_values() {
+    let map: Native<String, String> = native_of("simple05").await;
+    map.insert("33", "44").ttl(secs(1)).await.unwrap();
+    map.insert("55", "66")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    map.insert("1", "2").await.unwrap();
+    assert_eq!(sorted(map.values()).await, ["2", "44", "66"]);
+    sleep(ms(1050)).await;
+    assert_eq!(sorted(map.values()).await, ["2"]);
+    map.del().await.unwrap();
+}
+
+async fn pattern_map() -> MapCacheNative<String, String, redissun::StringCodec> {
+    let map = client()
+        .await
+        .with_codec(redissun::StringCodec)
+        .map_cache_native::<String, String>(unique("simple"));
+    map.insert("10", "100").await.unwrap();
+    map.insert("20", "200").ttl(secs(60)).await.unwrap();
+    map.insert("30", "300").await.unwrap();
+    map.insert("40", "400")
+        .expire_at(SystemTime::now() + secs(60))
+        .await
+        .unwrap();
+    map
+}
+
+fn pattern(p: &str) -> MapScan {
+    MapScan::new().pattern(p)
+}
+
+#[tokio::test]
+async fn redisson_key_set_by_pattern_ttl() {
+    let map = pattern_map().await;
+    assert_eq!(
+        sorted(map.keys_with(pattern("?0"))).await,
+        ["10", "20", "30", "40"]
+    );
+    assert!(sorted(map.keys_with(pattern("1"))).await.is_empty());
+    assert_eq!(sorted(map.keys_with(pattern("10"))).await, ["10"]);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_values_by_pattern_ttl() {
+    let map = pattern_map().await;
+    assert_eq!(
+        sorted(map.values_with(pattern("?0"))).await,
+        ["100", "200", "300", "400"]
+    );
+    assert!(sorted(map.values_with(pattern("1"))).await.is_empty());
+    assert_eq!(sorted(map.values_with(pattern("10"))).await, ["100"]);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_entry_set_by_pattern_ttl() {
+    let map = pattern_map().await;
+    let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+    assert_eq!(
+        sorted(map.iter_with(pattern("?0"))).await,
+        [
+            pair("10", "100"),
+            pair("20", "200"),
+            pair("30", "300"),
+            pair("40", "400")
+        ]
+    );
+    assert!(sorted(map.iter_with(pattern("1"))).await.is_empty());
+    assert_eq!(
+        sorted(map.iter_with(pattern("10"))).await,
+        [pair("10", "100")]
+    );
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_contains_value_ttl() {
+    let map: Native<String, String> = native_of("simple01").await;
+    assert!(!map.contains_value("34").await.unwrap());
+    map.insert("33", "44").ttl(secs(1)).await.unwrap();
+    map.insert("55", "66")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert!(map.contains_value("44").await.unwrap());
+    assert!(map.contains_value("66").await.unwrap());
+    assert!(!map.contains_value("34").await.unwrap());
+    sleep(ms(1050)).await;
+    assert!(!map.contains_value("44").await.unwrap());
+    assert!(!map.contains_value("66").await.unwrap());
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_contains_key_ttl() {
+    let map: Native<String, String> = native_of("simple30").await;
+    map.insert("33", "44").ttl(secs(1)).await.unwrap();
+    map.insert("55", "66")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert!(map.contains_key("33").await.unwrap());
+    assert!(map.contains_key("55").await.unwrap());
+    assert!(!map.contains_key("34").await.unwrap());
+    sleep(ms(1050)).await;
+    assert!(!map.contains_key("33").await.unwrap());
+    assert!(!map.contains_key("55").await.unwrap());
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_remove_value_ttl() {
+    let map: Native<String, String> = native_of("simple").await;
+    map.insert("1", "2").ttl(secs(1)).await.unwrap();
+    map.insert("3", "4")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert!(map.remove_if_eq("1", "2").await.unwrap());
+    assert!(map.remove_if_eq("3", "4").await.unwrap());
+    assert_eq!(map.get("1").await.unwrap(), None);
+    assert_eq!(map.get("3").await.unwrap(), None);
+    assert_eq!(map.len().await.unwrap(), 0);
+
+    map.insert("5", "6").ttl(secs(1)).await.unwrap();
+    map.insert("7", "8")
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    sleep(ms(1050)).await;
+    assert!(!map.remove_if_eq("5", "6").await.unwrap());
+    assert!(!map.remove_if_eq("7", "8").await.unwrap());
+    assert_eq!(map.get("5").await.unwrap(), None);
+    assert_eq!(map.get("7").await.unwrap(), None);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_remove_value_fail() {
+    let map: Native<String, String> = native_of("simple").await;
+    map.insert("1", "2").await.unwrap();
+    assert!(!map.remove_if_eq("2", "1").await.unwrap());
+    assert!(!map.remove_if_eq("1", "3").await.unwrap());
+    assert_eq!(map.get("1").await.unwrap(), s("2"));
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_replace_old_value_fail() {
+    let map: Native<String, String> = native_of("simple").await;
+    map.insert("1", "2").await.unwrap();
+    assert!(!map.compare_and_set("1", "43", "31").await.unwrap());
+    assert_eq!(map.get("1").await.unwrap(), s("2"));
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_replace_old_value_success() {
+    let map: Native<String, String> = native_of("simple").await;
+    map.insert("1", "2").await.unwrap();
+    assert!(map.compare_and_set("1", "2", "3").await.unwrap());
+    assert!(!map.compare_and_set("1", "2", "3").await.unwrap());
+    assert_eq!(map.get("1").await.unwrap(), s("3"));
+    map.del().await.unwrap();
+}
+
+// Redisson testEntryUpdate: a zero Duration is no TTL in both; Instant.ofEpochMilli(0) deletes at once in both.
+#[tokio::test]
+async fn redisson_entry_update() {
+    let map: Native<i32, i32> = native_of("simple").await;
+    map.insert(&1, &1).ttl(secs(1)).await.unwrap();
+    assert_eq!(map.get(&1).await.unwrap(), Some(1));
+    map.insert(&2, &2)
+        .expire_at(SystemTime::now() + secs(1))
+        .await
+        .unwrap();
+    assert_eq!(map.get(&2).await.unwrap(), Some(2));
+    sleep(ms(1050)).await;
+    assert_eq!(map.insert(&1, &1).ttl(Duration::ZERO).await.unwrap(), None);
+    assert_eq!(
+        map.insert(&2, &2).expire_at(UNIX_EPOCH).await.unwrap(),
+        None
+    );
+    assert_eq!(map.get(&1).await.unwrap(), Some(1));
+    assert_eq!(map.get(&2).await.unwrap(), None);
+    map.del().await.unwrap();
+}
+
+/// Redisson testTTLExpiration: entries of 1, 2 and 3 seconds, by `ttl` and by `expire_at`, checked each second.
+async fn ttl_expiration(map: &Native<String, i32>) {
+    let check = |left: [Option<i32>; 6]| async move {
+        let got = map
+            .get_many(&["12", "14", "15", "16", "18", "19"])
+            .await
+            .unwrap();
+        assert_eq!(got, left);
+    };
+    sleep(ms(1050)).await;
+    check([None, Some(2), Some(3), None, Some(2), Some(3)]).await;
+    sleep(secs(1)).await;
+    check([None, None, Some(3), None, None, Some(3)]).await;
+    sleep(secs(1)).await;
+    check([None; 6]).await;
+    map.clear().await.unwrap();
+}
+
+// Redisson testTTL with put, fastPut, putIfAbsent and fastPutIfAbsent.
+#[tokio::test]
+async fn redisson_ttl() {
+    let map: Native<String, i32> = native_of("simple").await;
+    let spec = [("12", 1, 1), ("14", 2, 2), ("15", 3, 3)];
+    let at = [("16", 1, 1), ("18", 2, 2), ("19", 3, 3)];
+
+    for (k, v, n) in spec {
+        map.insert(k, &v).ttl(secs(n)).await.unwrap();
+    }
+    let now = SystemTime::now();
+    for (k, v, n) in at {
+        map.insert(k, &v).expire_at(now + secs(n)).await.unwrap();
+    }
+    ttl_expiration(&map).await;
+
+    for (k, v, n) in spec {
+        map.set(k, &v).ttl(secs(n)).await.unwrap();
+    }
+    let now = SystemTime::now();
+    for (k, v, n) in at {
+        map.set(k, &v).expire_at(now + secs(n)).await.unwrap();
+    }
+    ttl_expiration(&map).await;
+
+    // putIfAbsent and fastPutIfAbsent are both try_insert.
+    for (k, v, n) in spec {
+        map.try_insert(k, &v).ttl(secs(n)).await.unwrap();
+    }
+    let now = SystemTime::now();
+    for (k, v, n) in at {
+        map.try_insert(k, &v)
+            .expire_at(now + secs(n))
+            .await
+            .unwrap();
+    }
+    ttl_expiration(&map).await;
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_rmap_cache_values() {
+    let map: Native<String, String> = native_of("testRMapCacheValues").await;
+    map.insert("1234", "5678").ttl(secs(60)).await.unwrap();
+    map.insert("4321", "8765")
+        .expire_at(SystemTime::now() + secs(60))
+        .await
+        .unwrap();
+    assert_eq!(sorted(map.values()).await, ["5678", "8765"]);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_read_all_entry_set() {
+    let map: Native<i32, String> = native_of("simple12").await;
+    map.insert(&1, "12").await.unwrap();
+    map.insert(&2, "33").ttl(secs(600)).await.unwrap();
+    map.insert(&3, "43").await.unwrap();
+    map.insert(&4, "55")
+        .expire_at(SystemTime::now() + secs(600))
+        .await
+        .unwrap();
+    let all: HashMap<i32, String> = map.to_hash_map().await.unwrap();
+    let streamed: HashMap<i32, String> = map.iter().try_collect().await.unwrap();
+    assert_eq!(all, streamed);
+    assert_eq!(all.len(), 4);
+    map.del().await.unwrap();
+}
+
+#[tokio::test]
+async fn redisson_read_all_values_ttl() {
+    let map: Native<String, String> = native_of("testRMapCacheAllValues").await;
+    map.insert("1234", "5678").ttl(secs(60)).await.unwrap();
+    map.insert("4321", "8765").ttl(secs(60)).await.unwrap();
+    let mut values: Vec<String> = map.to_hash_map().await.unwrap().into_values().collect();
+    values.sort();
+    assert_eq!(values, ["5678", "8765"]);
+    map.del().await.unwrap();
+}
+
+// --- Task 6: 0a's ports of Redisson 4.8.0 BaseMapTest, run on a MapCacheNative ---
+
+mod base_map_on_native {
+    use super::common::{client, own_redis, own_redis8, raw_command_at, unique};
+    use super::events_client;
+    use futures::TryStreamExt;
+    use redissun::map_cache_native::Entry;
+    use redissun::{
+        JsonCodec, MapCacheNative, MapEvent, MapEventKind, MapEvents, MapScan, StringCodec,
+    };
+    use serde::{Deserialize, Serialize};
+    use std::time::Duration;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct User {
+        name: String,
+    }
+
+    async fn native<K, V>(prefix: &str) -> MapCacheNative<K, V, JsonCodec> {
+        client().await.map_cache_native(unique(prefix))
+    }
+
+    async fn string_map(prefix: &str) -> MapCacheNative<String, String, StringCodec> {
+        client()
+            .await
+            .with_codec(StringCodec)
+            .map_cache_native(unique(prefix))
+    }
+
+    async fn next_event(events: &mut MapEvents<String, JsonCodec>) -> MapEvent<String> {
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("no event within 2 s")
+            .unwrap()
+    }
+
+    // Redisson: testRandomEntries
+    #[tokio::test]
+    async fn redisson_random_entries_on_native() {
+        let map = native::<i32, i32>("map").await;
+        assert!(map.random_entries(1).await.unwrap().is_empty());
+        for (k, v) in [(1, 11), (2, 21), (3, 31), (4, 41)] {
+            map.insert(&k, &v).await.unwrap();
+        }
+        let picked = map.random_entries(2).await.unwrap();
+        assert_eq!(picked.len(), 2);
+        assert!(picked.keys().all(|k| (1..=4).contains(k)));
+    }
+
+    // Redisson: testComputeIfPresent
+    #[tokio::test]
+    async fn redisson_compute_if_present_on_native() {
+        let map = native::<String, String>("map").await;
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            entry.insert("12".to_string()).await.unwrap();
+        }
+        assert_eq!(map.get("1").await.unwrap(), None);
+        map.insert("1", "10").await.unwrap();
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            assert_eq!(entry.get(), "10");
+            entry.insert("12".to_string()).await.unwrap();
+        }
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    }
+
+    // Redisson: testComputeIfPresentMutable
+    #[tokio::test]
+    async fn redisson_compute_if_present_mutable_on_native() {
+        let map = native::<String, User>("map").await;
+        let user = User {
+            name: "value1".into(),
+        };
+        map.insert("1", &user).await.unwrap();
+        map.entry("1")
+            .await
+            .unwrap()
+            .and_modify(|value| {
+                assert_eq!(value.name, "value1");
+                value.name = "value2".into();
+            })
+            .or_insert(user)
+            .await
+            .unwrap();
+        assert_eq!(
+            map.get("1").await.unwrap(),
+            Some(User {
+                name: "value2".into()
+            })
+        );
+    }
+
+    // Redisson: testComputeIfAbsent
+    #[tokio::test]
+    async fn redisson_compute_if_absent_on_native() {
+        let map = native::<String, String>("map").await;
+        map.entry("1")
+            .await
+            .unwrap()
+            .or_insert("12".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+        map.entry("1")
+            .await
+            .unwrap()
+            .or_insert("13".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+    }
+
+    // Redisson: testMerge
+    #[tokio::test]
+    async fn redisson_merge_on_native() {
+        let map = native::<String, String>("map").await;
+        map.entry("1")
+            .await
+            .unwrap()
+            .and_modify(|v| *v = "12".into())
+            .or_insert("2".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("2"));
+        map.entry("1")
+            .await
+            .unwrap()
+            .and_modify(|v| *v = "12".into())
+            .or_insert("2".into())
+            .await
+            .unwrap();
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("12"));
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            entry.remove().await.unwrap();
+        }
+        assert_eq!(map.get("1").await.unwrap(), None);
+    }
+
+    // Redisson: testCompute, testComputeAsync
+    #[tokio::test]
+    async fn redisson_compute_on_native() {
+        let map = native::<String, String>("map").await;
+        let first = map
+            .entry("1")
+            .await
+            .unwrap()
+            .or_insert("12".into())
+            .await
+            .unwrap();
+        assert_eq!(first, "12");
+        let second = map
+            .entry("1")
+            .await
+            .unwrap()
+            .and_modify(|old| old.push_str("34"))
+            .or_insert("12".into())
+            .await
+            .unwrap();
+        assert_eq!(second, "1234");
+        assert_eq!(map.get("1").await.unwrap().as_deref(), Some("1234"));
+        if let Entry::Occupied(entry) = map.entry("1").await.unwrap() {
+            assert_eq!(entry.remove().await.unwrap(), "1234");
+        }
+        assert_eq!(map.get("1").await.unwrap(), None);
+    }
+
+    // Redisson: testGetAll, testGetAllWithStringKeys
+    #[tokio::test]
+    async fn redisson_get_all_on_native() {
+        let map = native::<i32, i32>("map").await;
+        for (k, v) in [(1, 100), (2, 200), (3, 300), (4, 400)] {
+            map.insert(&k, &v).await.unwrap();
+        }
+        let found = map.get_many(&[&2, &3, &5]).await.unwrap();
+        assert_eq!(found, [Some(200), Some(300), None]);
+    }
+
+    // Redisson: testGetAllBig
+    #[tokio::test]
+    async fn redisson_get_all_big_on_native() {
+        let map = native::<i32, String>("map").await;
+        let keys: Vec<i32> = (0..10_000).collect();
+        let values: Vec<String> = keys.iter().map(i32::to_string).collect();
+        map.extend(keys.iter().zip(values.iter())).await.unwrap();
+        let wanted: Vec<&i32> = keys.iter().collect();
+        let all = map.get_many(&wanted).await.unwrap();
+        assert_eq!(all.len(), 10_000);
+        assert_eq!(all[9_999].as_deref(), Some("9999"));
+        assert_eq!(map.len().await.unwrap(), 10_000);
+    }
+
+    // Redisson: testPutAllBatched
+    #[tokio::test]
+    async fn redisson_put_all_batched_on_native() {
+        let map = native::<i32, String>("map").await;
+        for k in 1..=3 {
+            map.insert(&k, &k.to_string()).await.unwrap();
+        }
+        for range in [4..=6, 7..=11, 12..=18] {
+            let keys: Vec<i32> = range.collect();
+            let values: Vec<String> = keys.iter().map(i32::to_string).collect();
+            map.extend(keys.iter().zip(values.iter()))
+                .batch_size(5)
+                .await
+                .unwrap();
+        }
+        let mut keys = map.keys().try_collect::<Vec<_>>().await.unwrap();
+        keys.sort_unstable();
+        assert_eq!(keys, (1..=18).collect::<Vec<_>>());
+    }
+
+    // Redisson: testKeySetByPattern, testValuesByPattern, testEntrySetByPattern
+    #[tokio::test]
+    async fn redisson_scans_by_pattern_on_native() {
+        let map = string_map("simple").await;
+        for (k, v) in [("10", "100"), ("20", "200"), ("30", "300")] {
+            map.insert(k, v).await.unwrap();
+        }
+        let keys = |pattern: &'static str| {
+            let map = map.clone();
+            async move {
+                let mut keys: Vec<String> = map
+                    .keys_with(MapScan::new().pattern(pattern))
+                    .try_collect()
+                    .await
+                    .unwrap();
+                keys.sort();
+                keys
+            }
+        };
+        assert_eq!(keys("?0").await, ["10", "20", "30"]);
+        assert!(keys("1").await.is_empty());
+        assert_eq!(keys("10").await, ["10"]);
+        let mut values: Vec<String> = map
+            .values_with(MapScan::new().pattern("?0"))
+            .try_collect()
+            .await
+            .unwrap();
+        values.sort();
+        assert_eq!(values, ["100", "200", "300"]);
+        let entries: Vec<(String, String)> = map
+            .iter_with(MapScan::new().pattern("10"))
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(entries, [("10".to_string(), "100".to_string())]);
+    }
+
+    // Redisson: testReadAllEntrySetWithPattern, testReadAllKeySetWithPattern, testReadAllValuesWithPattern
+    #[tokio::test]
+    async fn redisson_read_all_with_pattern_on_native() {
+        let map = string_map("simple12").await;
+        for (k, v) in [("10", "12"), ("12", "33"), ("21", "43")] {
+            map.insert(k, v).await.unwrap();
+        }
+        let scan = || MapScan::new().pattern("1?");
+        let entries: Vec<(String, String)> = map.iter_with(scan()).try_collect().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        let mut keys: Vec<String> = map.keys_with(scan()).try_collect().await.unwrap();
+        keys.sort();
+        assert_eq!(keys, ["10", "12"]);
+        let mut values: Vec<String> = map.values_with(scan()).try_collect().await.unwrap();
+        values.sort();
+        assert_eq!(values, ["12", "33"]);
+    }
+
+    // Redisson: testIncrListener (notify-keyspace-events "Th": subkey events only)
+    #[tokio::test]
+    async fn redisson_incr_listener_on_native() {
+        let (_container, url) = own_redis8().await;
+        let client = events_client(&url, "Th").await;
+        let map = client.map_cache_native::<String, f64>(unique("testIncrListener"));
+        let mut events = map.events_of(&[MapEventKind::Incremented]).await.unwrap();
+        map.incr_by_float("1", 1.0).await.unwrap();
+        match next_event(&mut events).await {
+            MapEvent::Incremented { key } => assert_eq!(key.as_deref(), Some("1")),
+            other => panic!("expected an increment, got {other:?}"),
+        }
+        // Redisson's removeListener: dropping the handle unsubscribes.
+        drop(events);
+        for _ in 0..20 {
+            if raw_command_at(&url, &["PUBSUB", "NUMPAT"]).await == ":0\r\n" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the patterns stayed subscribed after the events were dropped");
+    }
+
+    // Redisson: testPutRemoveListener
+    #[tokio::test]
+    async fn redisson_put_remove_listener_on_native() {
+        let (_container, url) = own_redis8().await;
+        let client = events_client(&url, "Th").await;
+        let map = client
+            .with_codec(StringCodec)
+            .map_cache_native::<String, String>(unique("testPutRemoveListener"));
+        let mut events = map.events().await.unwrap();
+        map.insert("1", "2").await.unwrap();
+        map.remove("1").await.unwrap();
+        let mut seen = vec![];
+        for _ in 0..2 {
+            seen.push(
+                tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert!(seen.contains(&MapEvent::Put {
+            key: Some("1".into())
+        }));
+        assert!(seen.contains(&MapEvent::Removed {
+            key: Some("1".into())
+        }));
+    }
+
+    // Redisson: testPutListenerWithKeyevent
+    #[tokio::test]
+    async fn redisson_put_listener_with_keyevent_on_native() {
+        let (_container, url) = own_redis().await;
+        let client = events_client(&url, "Eh").await;
+        let map = client.map_cache_native::<String, String>(unique("testPutListenerWithKeyevent"));
+        let mut events = map.events_of(&[MapEventKind::Put]).await.unwrap();
+        map.insert("1", "2").await.unwrap();
+        assert_eq!(next_event(&mut events).await, MapEvent::Put { key: None });
+    }
+
+    // Redisson: testPutListenerWithKeyeventAndSubkeyevent
+    #[tokio::test]
+    async fn redisson_put_listener_with_keyevent_and_subkeyevent_on_native() {
+        let (_container, url) = own_redis8().await;
+        let client = events_client(&url, "TEh").await;
+        let map = client.map_cache_native::<String, String>(unique(
+            "testPutListenerWithKeyeventAndSubkeyevent",
+        ));
+        let mut events = map.events_of(&[MapEventKind::Put]).await.unwrap();
+        map.insert("1", "2").await.unwrap();
+        assert_eq!(
+            next_event(&mut events).await,
+            MapEvent::Put {
+                key: Some("1".into())
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err()
+        );
+    }
+}
+
+// --- Task 6: Review Focus 5, Redis Cluster ---
+
+#[tokio::test]
+async fn every_operation_runs_on_a_cluster() {
+    let topology = common::topology::Topology::cluster().await;
+    let client = Client::builder()
+        .url(topology.cluster_url())
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    let u = unique("mcn-cluster");
+    for name in [u.clone(), format!("{{t}}:{u}")] {
+        let map: Native<String, String> = client.map_cache_native(name.clone());
+        let minute = secs(60);
+        assert_eq!(
+            map.insert("a", "1").ttl(minute).await.unwrap(),
+            None,
+            "{name}"
+        );
+        assert!(map
+            .set("b", "2")
+            .expire_at(SystemTime::now() + minute)
+            .await
+            .unwrap());
+        assert_eq!(map.try_insert("c", "3").ttl(minute).await.unwrap(), None);
+        assert_eq!(map.replace("a", "4").ttl(minute).await.unwrap(), s("1"));
+        map.extend([("d", "5"), ("e", "6")])
+            .ttl(minute)
+            .await
+            .unwrap();
+        between(map.entry_ttl("a").await.unwrap(), secs(59), minute);
+        assert_eq!(map.entry_ttls(&["b", "x"]).await.unwrap().len(), 2);
+        assert!(map.expire_entry("a").ttl(secs(30)).if_less().await.unwrap());
+        assert_eq!(
+            map.expire_entries(&["d", "e"]).ttl(secs(30)).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            map.persist_entries(&["d", "x"]).await.unwrap(),
+            vec![true, false]
+        );
+        map.entry("f")
+            .ttl(minute)
+            .await
+            .unwrap()
+            .or_insert("7".to_string())
+            .await
+            .unwrap();
+        assert!(map.entry_ttl("f").await.unwrap().is_some());
+        let guard = map.lock("a").unwrap().lock().await.unwrap();
+        guard.unlock().await.unwrap();
+        let entries: Vec<(String, String)> =
+            map.iter_with(MapScan::new()).try_collect().await.unwrap();
+        assert_eq!(entries.len(), 6, "{name}");
+        assert!(map.del().await.unwrap());
+    }
 }

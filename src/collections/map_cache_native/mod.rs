@@ -7,6 +7,7 @@ mod ttl;
 
 use crate::codec::Codec;
 use crate::collections::hash_map::HashMap;
+use crate::collections::map::events::{self, MapEventKind, MapEvents};
 use crate::collections::map::key_hash::per_key_objects;
 use crate::collections::map::load::LoadAll;
 use crate::collections::map::scan::MapScan;
@@ -133,6 +134,21 @@ where
     C: Codec,
 {
     per_key_objects!();
+
+    /// Starts listening to every kind of change of the map, Redisson's `addListener` with the map and object listeners and `MapExpiredListener`/`MapClearExpireListener`: the [`MapEvent`](crate::MapEvent)s of a [`HashMap`](crate::HashMap), plus [`EntryExpired`](crate::MapEvent::EntryExpired) when the server deletes an expired entry (`hexpired`) and [`EntryPersisted`](crate::MapEvent::EntryPersisted) when a TTL is removed (`hpersist`). See [`MapEvents`] for the `notify-keyspace-events` setting it needs.
+    #[doc(
+        alias = "addListener",
+        alias = "MapExpiredListener",
+        alias = "MapClearExpireListener"
+    )]
+    pub async fn events(&self) -> Result<MapEvents<K, C>> {
+        self.events_of(&MapEventKind::NATIVE).await
+    }
+
+    /// Starts listening to the given kinds of change.
+    pub async fn events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
+        events::subscribe(&self.key, self.codec.clone(), kinds, None, true).await
+    }
 
     /// The time the entry has left, read with `HPTTL`, Redisson's `remainTimeToLive(key)`. `None` when the entry has no time to live or is missing. Needs Redis 7.4.
     #[doc(alias = "remainTimeToLive")]

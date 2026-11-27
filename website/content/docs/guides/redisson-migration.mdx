@@ -449,6 +449,7 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `getMapCacheNative(MapOptions)` | `client.map_cache_native_builder(name).loader(l).writer(w)….build().await` |
 | `compute(k, f)`, `computeIfAbsent(k, f)`, `computeIfPresent(k, f)`, `merge(k, v, f)` | `entry(&k)` → `map_cache_native::Entry`; a write clears the entry's TTL (`HSET`), as in Redisson |
 | `compute(k, Duration\|Instant, f)`, `computeIfAbsent(k, Duration\|Instant, f)` | `entry(&k).ttl(d)` / `entry(&k).expire_at(t)` |
+| `addListener(MapExpiredListener)`, `addListener(MapClearExpireListener)`, `addListener(ObjectListener)` | `events()` or `events_of(&[MapEventKind::EntryExpired, ..])` → `MapEvents`; `MapEvent::EntryExpired` and `MapEvent::EntryPersisted` besides the `HashMap` events; dropping it is `removeListener` |
 | `putAll(map, Duration)` | `extend(entries).ttl(d)` |
 | `putAll(PutArgs)` with `timeToLive`, `expireAt`, `keepTTL` | `extend(entries).ttl(d)`, `.expire_at(t)`, `.keep_ttl()` (`expire_at` and `keep_ttl` need Redis 8.0) |
 | `putIfAllKeysAbsent(PutArgs)` | `try_extend(entries)[.ttl(d) / .expire_at(t) / .keep_ttl()]` → `bool` (Redis 8.0) |

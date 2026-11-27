@@ -274,7 +274,7 @@ where
 
     /// Starts listening to the given kinds of change.
     pub async fn events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
-        events::subscribe(&self.key, self.codec.clone(), kinds, None).await
+        events::subscribe(&self.key, self.codec.clone(), kinds, None, false).await
     }
 
     per_key_objects!();

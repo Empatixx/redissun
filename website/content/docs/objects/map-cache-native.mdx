@@ -86,6 +86,29 @@ let n = visits
 - The writer gets every write after Redis stored it: `insert` and `set` always, `try_insert` when it stored, `replace` and `compare_and_set` when they replaced, `extend` once per batch, `try_extend` and `update_many` when they stored all entries, and `entry` writes and removes. `expire_entry`, `expire_entries`, `persist_entry` and `persist_entries` call no writer.
 - Write-behind (`WriteMode::WriteBehind`) and `flush()` work as on a `HashMap`.
 
+## Events
+
+`events()` listens to every change, Redisson's `addListener`: the `MapEvent`s of a `HashMap` (`Put`, `Incremented`, `Removed`, `Deleted`, `Expired`), plus `EntryExpired` when the server deletes an entry whose time ran out (`hexpired`, Redisson's `MapExpiredListener`) and `EntryPersisted` when a TTL is removed (`hpersist`, `MapClearExpireListener`). `events_of(&[MapEventKind::EntryExpired])` listens to some kinds only. Dropping the `MapEvents` stops listening.
+
+```rust
+let mut events = tokens.events_of(&[MapEventKind::EntryExpired]).await?;
+while let Ok(MapEvent::EntryExpired { key }) = events.recv().await {
+    println!("expired: {key:?}");
+}
+```
+
+The server sends these only when `notify-keyspace-events` enables them, as for Redisson:
+
+- `E` and `h` for the field events, `EntryExpired` and `EntryPersisted` among them (Redis 7.4).
+- `T`, on Redis 8.8 or newer, for the name of the changed entry (`key: Some(k)`); without it, `key` is `None`.
+- `g` for `Deleted` and `x` for `Expired`, the events of the whole map.
+
+`HashMap::events_of` and `HashMapCache::keyspace_events_of` with `EntryExpired` or `EntryPersisted` return `Error::Config`, as Redisson's `RMap.addListener` does not take those listeners.
+
+## What it does not have
+
+As in Redisson's `RMapCacheNative`, and unlike `HashMapCache`: no maximum size or eviction mode (`setMaxSize`, `trySetMaxSize`), no max idle, no entry events with values (`MapEntryListener`), no `peek` (`getWithTTLOnly`), no leases, no `updateEntryExpiration`, and no clean-up task. As on the other maps, `sizeInMemory`, `destroy`, `mapReduce`, `expireAt` and `expire` with a condition on the whole object, and batch views are not ported.
+
 ## How it is stored
 
 One hash at the raw name, with no braces added and no other keys, the same hash a `HashMap` of that name and a Redisson `RMapCacheNative` use. The server stores each field's deadline. Redisson and redissun clients share the data, and the per-key objects have Redisson's names (`{name}:<hash of the key>:lock`).
