@@ -14,7 +14,7 @@ tokens.insert("abc", &token).ttl(Duration::from_secs(60)).await?;
 let left = tokens.entry_ttl("abc").await?;
 ```
 
-It needs **Redis 7.4 or newer, or Valkey 9** (hash field expiration) for every method that sets or reads a time to live, and **Redis 8.0** for the methods that send `HSETEX`. On an older server such a method returns `Error::Unsupported` and writes nothing. The first such call per client asks the server with `COMMAND INFO`. The methods it shares with `HashMap` work on any server.
+It needs **Redis 7.4 or newer, or Valkey 9** (hash field expiration) for every method that sets or reads a time to live, and **Redis 8.0** for the methods that send `HSETEX`. On an older server such a method returns `Error::Unsupported` and writes nothing. Such a call first asks the server with `HPTTL` on the map's key (and `HSETEX` for the methods that send it), commands any user of the map may run, so an ACL user needs no `COMMAND`. A client keeps a yes and asks again after a no, so a client started before a server upgrade picks up the new commands. The methods it shares with `HashMap` work on any server.
 
 ## Compared with `HashMapCache`
 
@@ -58,7 +58,7 @@ A write takes `.ttl(Duration)` or `.expire_at(SystemTime)`; `extend`, `try_exten
 - A deadline in the past is passed through: the server deletes the entry at once, and `insert` still returns the old value. A `SystemTime` before 1970 is `Error::Config`, and nothing is written.
 - Which writes clear a TTL: `insert`, `set`, `extend` and the other writes without a time go through `HSET`, which leaves the entry without one. `replace` and `compare_and_set` keep it (their scripts read `HPTTL` and put it back), and `incr_by`/`incr_by_float` keep it because `HINCRBY` does. This differs from Redisson's `replace`, which clears it.
 - `extend(..).expire_at(t)`, `extend(..).keep_ttl()`, `try_extend` and `update_many` send `HSETEX`, which Redis 7.4 lacks: there they return `Error::Unsupported` and write nothing. `extend(..).ttl(d)` works on 7.4.
-- The server deletes an expired entry itself; `get`, `len` and the iterators never see it.
+- The server deletes an expired entry itself, when it is read or a little later on its own; `get` and the iterators never see it. Until then `len` (`HLEN`) still counts it.
 
 ## Entries
 

@@ -247,6 +247,75 @@ async fn ttl_methods_need_redis_7_4_and_write_nothing() {
     assert_eq!(map.get("a").await.unwrap(), Some("3".to_string()));
 }
 
+// The server probe uses only hash commands: an ACL user denied COMMAND (`-command`) still gets every method.
+#[tokio::test]
+async fn ttl_methods_work_for_a_user_without_the_command_command() {
+    let (_container, url) = common::own_redis8().await;
+    let created = raw_command_at(
+        &url,
+        &[
+            "ACL",
+            "SETUSER",
+            "app",
+            "on",
+            ">pw",
+            "~*",
+            "&*",
+            "+@read",
+            "+@write",
+            "+@hash",
+            "+@scripting",
+            "+@connection",
+            "-command",
+        ],
+    )
+    .await;
+    assert_eq!(created, "+OK\r\n");
+    let client = Client::builder()
+        .url(url.clone())
+        .username("app")
+        .password("pw")
+        .build()
+        .await
+        .unwrap();
+    let map: Native<String, String> = client.map_cache_native(unique("mcn-acl"));
+    map.insert("a", "1").ttl(secs(60)).await.unwrap();
+    let left = map.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left > secs(50) && left <= secs(60), "{left:?}");
+    assert_eq!(map.replace("a", "2").await.unwrap(), s("1"));
+    assert!(map.compare_and_set("a", "2", "3").await.unwrap());
+    assert!(map.entry_ttl("a").await.unwrap().is_some());
+    let at = SystemTime::now() + secs(60);
+    map.extend([("b", "1")]).expire_at(at).await.unwrap();
+    assert!(map.entry_ttl("b").await.unwrap().is_some());
+}
+
+// A probe answer that is neither a reply nor "unknown command" (here NOPERM) leaves plain replace and compare_and_set on HashMap's scripts.
+#[tokio::test]
+async fn replace_works_for_a_user_denied_hpttl() {
+    let (_container, url) = common::own_redis8().await;
+    let created = raw_command_at(
+        &url,
+        &[
+            "ACL", "SETUSER", "app", "on", ">pw", "~*", "&*", "+@all", "-hpttl",
+        ],
+    )
+    .await;
+    assert_eq!(created, "+OK\r\n");
+    let client = Client::builder()
+        .url(url.clone())
+        .username("app")
+        .password("pw")
+        .build()
+        .await
+        .unwrap();
+    let map: Native<String, String> = client.map_cache_native(unique("mcn-acl-hpttl"));
+    map.insert("a", "1").await.unwrap();
+    assert_eq!(map.replace("a", "2").await.unwrap(), s("1"));
+    assert!(map.compare_and_set("a", "2", "3").await.unwrap());
+    assert_eq!(map.get("a").await.unwrap(), s("3"));
+}
+
 #[tokio::test]
 async fn builder_without_options_reads_like_the_factory() {
     let client = client().await;

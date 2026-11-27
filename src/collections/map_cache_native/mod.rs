@@ -334,6 +334,8 @@ where
 
     /// Sets a new time to live on a present entry, Redisson's `expireEntry` and its `IfNotSet`/`IfGreater`/`IfLess` forms. Await it after [`ttl`](ExpireEntry::ttl) or [`expire_at`](ExpireEntry::expire_at), optionally with [`if_not_set`](ExpireEntry::if_not_set), [`if_greater`](ExpireEntry::if_greater) or [`if_less`](ExpireEntry::if_less). Returns whether it changed the entry; a missing entry gives `false`. No writer is called. Needs Redis 7.4.
     ///
+    /// An entry whose time ran out but that the server has not deleted yet is revived: it gets the new time and the call returns `true`. That is Redis's `HPEXPIRE`, and Redisson behaves the same.
+    ///
     /// Without a time, or with `.ttl(Duration::ZERO)`, it removes the TTL and returns whether the entry exists, as [`HashMapCache::expire_entry`](crate::HashMapCache::expire_entry) does; Redisson's `expireEntry(k, ZERO)` deletes the entry instead. A condition without a time is an [`Error::Config`](crate::Error::Config).
     ///
     /// ```no_run
@@ -357,7 +359,7 @@ where
         ExpireEntry::new(self, k)
     }
 
-    /// [`expire_entry`](MapCacheNative::expire_entry) for several entries in one script, Redisson's `expireEntries` and its `IfNotSet`/`IfGreater`/`IfLess` forms. Returns how many entries it changed; a key listed twice is counted twice. Without a time it removes the TTLs and counts the entries that exist. An empty list gives `0` without a call.
+    /// [`expire_entry`](MapCacheNative::expire_entry) for several entries in one script, Redisson's `expireEntries` and its `IfNotSet`/`IfGreater`/`IfLess` forms. Returns how many entries it changed; a key listed twice is counted twice. Without a time it removes the TTLs and counts the entries that exist. An empty list gives `0` without a call. As with `expire_entry`, an expired entry the server has not deleted yet is revived and counted (Redis's `HPEXPIRE`, as in Redisson).
     #[doc(
         alias = "expireEntries",
         alias = "expireEntriesIfNotSet",
@@ -439,7 +441,7 @@ where
         self.map.contains_key(k).await
     }
 
-    /// Same as [`HashMap::len`](crate::HashMap::len). Expired entries are gone, the server deletes them.
+    /// Same as [`HashMap::len`](crate::HashMap::len) (`HLEN`). It still counts an expired entry until the server deletes it, when the entry is read or a little later on its own.
     pub async fn len(&self) -> Result<usize> {
         self.map.len().await
     }

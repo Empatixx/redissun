@@ -342,10 +342,12 @@ New experimental `MapCacheNative`: a Redis hash whose entries expire on the serv
 - A zero `.ttl()` means no TTL everywhere; Redisson's `expireEntry(k, Duration.ZERO)` and `putAll(map, Duration.ZERO)` delete the entries.
 - `expire_entry(&k)` without a time clears the TTL (`HPERSIST`), like `HashMapCache::expire_entry`; Redisson requires a time.
 - `entry_ttls` returns a `Vec` in key order instead of a map; missing and permanent entries are both `None`.
-- TTL methods check once per client that the server has `HPEXPIRE`/`HSETEX` and return `Error::Unsupported` before writing anything.
+- `replace(k, v)` and `compare_and_set(k, old, new)` keep the entry's TTL, like `HashMapCache`; Redisson's `replace(k, v)` and `replace(k, old, new)` clear it (`HSET`).
+- TTL methods ask the server with `HPTTL`/`HSETEX` on the map's key (no `COMMAND`, so ACL users without it work), keep only a yes so a later server upgrade is picked up, and return `Error::Unsupported` before writing anything.
 
 ### Redis-side deviations from Redisson (recorded per CLAUDE.md)
-- None. Every script is Redisson's, verbatim; `extend(..).ttl(d)` uses Redisson's `putAll(map, ttl)` script so it runs on Redis 7.4.
+- `REPLACE_KEEP_TTL` and `COMPARE_AND_SET_KEEP_TTL`: Redisson's `replace(k, v)` and `replace(k, old, new)` scripts plus `HPTTL` before the `HSET` and `HPEXPIRE` with the remaining time after it, so the entry keeps its TTL; Redisson's scripts clear it. On a server without field TTLs (or when the probe gets no answer) the plain `HashMap` scripts run.
+- Every other script is Redisson's, verbatim; `extend(..).ttl(d)` uses Redisson's `putAll(map, ttl)` script so it runs on Redis 7.4.
 ```
 
 - [ ] **Step 2:** Check that the changelog, `map-cache-native.mdx` and `limitations.mdx` describe the same minimum versions, zero/no-time rules and TTL-clearing writes. No commit: Tasks 1–6 hold the commits.

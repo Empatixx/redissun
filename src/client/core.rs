@@ -63,9 +63,8 @@ pub(crate) struct Core {
     /// How the server writes lengths in `struct.pack` payloads, read with `INFO server` when the first map cache listener is added.
     pub(crate) map_cache_length_prefix:
         tokio::sync::OnceCell<crate::collections::hash_map_cache::LengthPrefix>,
-    /// Which hash field commands the server has, read with `COMMAND INFO` when a `MapCacheNative` first needs field TTLs.
-    pub(crate) hash_field_support:
-        tokio::sync::OnceCell<crate::collections::map_cache_native::HashFieldSupport>,
+    /// Which hash field commands the server has, probed with `HPTTL` and `HSETEX` when a `MapCacheNative` needs field TTLs; only a yes is kept.
+    pub(crate) hash_field_support: crate::collections::map_cache_native::HashFieldSupport,
 }
 
 impl Core {
@@ -103,7 +102,7 @@ impl Core {
             write_behind: Default::default(),
             batch_connections: Arc::new(tokio::sync::Semaphore::new(startup.pool_size)),
             map_cache_length_prefix: tokio::sync::OnceCell::new(),
-            hash_field_support: tokio::sync::OnceCell::new(),
+            hash_field_support: Default::default(),
         });
         if !startup.ping_interval.is_zero() {
             let ping = tokio::spawn(ping_loop(Arc::downgrade(&core), startup.ping_interval));

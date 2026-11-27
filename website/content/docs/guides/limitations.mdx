@@ -30,6 +30,8 @@ description: Things to know about this version.
   - Not ported: `mapReduce`, `TrackingListener`, `destroy`, `sizeInMemory`, `expireAt` and `expire` with a condition, and `MapCacheOptions.removeEmptyEvictionTask`.
 - **MapCacheNative and Redisson's `RMapCacheNative`** (experimental).
   - It needs Redis 7.4 or Valkey 9 (hash field expiration) for every method that sets or reads a time to live, and Redis 8.0 for the methods that send `HSETEX`: `extend(..).expire_at(t)`, `extend(..).keep_ttl()`, `try_extend` and `update_many`. On an older server they return `Error::Unsupported` and write nothing.
+  - A client asks the server which hash field commands it has with `HPTTL` and `HSETEX` and keeps only a yes. In a cluster with mixed Redis versions that answer may not hold for every node: a TTL write that reaches an older node fails after its `HSET`, and the entry stays without a time to live.
+  - `len` (`HLEN`) counts an expired entry until the server deletes it.
   - Plain writes (`insert`, `set`, `extend`, a write through `entry` without `.ttl()`) clear an entry's time to live (`HSET`), as in Redisson. `replace` and `compare_and_set` keep it, like `HashMapCache`; Redisson's `replace` and `replace(k, old, new)` clear it.
   - A zero TTL means none. Redisson's `expireEntry(k, Duration.ZERO)` deletes the entry; `expire_entry(&k).ttl(Duration::ZERO)` removes its TTL.
   - `entry_ttl` and `entry_ttls` give `None` both for a missing entry and for one without a time to live, where Redisson returns `-2` and `-1`.
