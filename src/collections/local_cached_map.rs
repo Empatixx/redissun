@@ -58,7 +58,7 @@ static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
 });
 
 /// `del` in [`StoreMode::Local`](crate::StoreMode::Local): Redis holds nothing to delete, so it only publishes `CLEAR` and returns whether the local cache held anything.
-static CLEAR_LOCAL: LazyLock<Lua> = LazyLock::new(|| {
+pub(crate) static CLEAR_LOCAL: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
         "if ARGV[2] ~= '0' then
             redis.call('PUBLISH', ARGV[1], ARGV[3])

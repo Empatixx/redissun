@@ -190,6 +190,12 @@ where
             Some(None) if local.store_cache_miss => return Ok(None),
             _ => {}
         }
+        if local.local_only() {
+            return match self.loads() {
+                true => load_value(&Target::Cache(self, None), field, false).await,
+                false => Ok(None),
+            };
+        }
         let read = local.local.begin_read(field);
         // An error or a cancelled call drops `read`, which caches nothing.
         let raw: Option<(Bytes, i64, i64)> = self
@@ -307,6 +313,16 @@ where
         if misses.is_empty() {
             return Ok(values);
         }
+        if local.local_only() {
+            if self.loads() {
+                for i in misses {
+                    if let (Some(field), Some(slot)) = (fields.get(i), values.get_mut(i)) {
+                        *slot = load_value(&Target::Cache(self, None), field, false).await?;
+                    }
+                }
+            }
+            return Ok(values);
+        }
         let missing: std::vec::Vec<&Bytes> = misses.iter().filter_map(|i| fields.get(*i)).collect();
         let read = self.read_expiring(local, &missing).await?;
         for ((i, field), (value, guard)) in misses.iter().zip(&missing).zip(read) {
@@ -347,17 +363,20 @@ where
             .iter()
             .filter_map(|i| fields.get(*i).cloned())
             .collect();
-        let raw: std::vec::Vec<Option<Bytes>> = self
-            .key
-            .core
-            .eval(
-                &GET_ALL_WITH_TTL_ONLY,
-                self.redis_keys(&[Name::Main, Name::Timeout]),
-                std::iter::once(now())
-                    .chain(missing.iter().cloned())
-                    .collect(),
-            )
-            .await?;
+        let raw: std::vec::Vec<Option<Bytes>> = if local.local_only() {
+            vec![None; missing.len()]
+        } else {
+            self.key
+                .core
+                .eval(
+                    &GET_ALL_WITH_TTL_ONLY,
+                    self.redis_keys(&[Name::Main, Name::Timeout]),
+                    std::iter::once(now())
+                        .chain(missing.iter().cloned())
+                        .collect(),
+                )
+                .await?
+        };
         for ((i, field), raw) in misses.iter().zip(&missing).zip(raw) {
             let mut value = self.decode_value(raw)?;
             if value.is_none() && self.loads() {
@@ -372,6 +391,9 @@ where
 
     /// Redisson's `preloadCache`: walks the keys with `SCAN_KEYS`, `page` at a time, and caches each page read with [`GET_ALL_EXPIRY`]. Returns how many entries it cached; a key that vanished between the two is skipped.
     pub(crate) async fn preload(&self, local: &LocalCache, page: usize) -> Result<usize> {
+        if local.local_only() {
+            return Ok(0);
+        }
         let mut cursor = "0".to_string();
         let mut cached = 0;
         loop {
@@ -396,6 +418,9 @@ where
     pub(crate) async fn contains_cached(&self, local: &LocalCache, field: &Bytes) -> Result<bool> {
         if let Some(cached) = local.local.lookup(field) {
             return Ok(cached.is_some());
+        }
+        if local.local_only() {
+            return Ok(false);
         }
         let read = local.local.begin_read(field);
         let found: i64 = self

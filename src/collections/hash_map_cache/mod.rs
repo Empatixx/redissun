@@ -3,6 +3,7 @@ mod builders;
 pub(crate) mod entry_events;
 mod lease;
 mod local;
+mod local_mode;
 mod names;
 mod scripts;
 
@@ -214,6 +215,18 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
 
     fn del_script(&self) -> Option<(&'static Lua, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
         let local = self.local.as_ref()?;
+        if local.local_only() {
+            // Redis holds nothing: only the clear is published, and the reply says whether the local cache held a value.
+            let held = !local.local.entries().is_empty();
+            local.local.forget_all();
+            let mut arguments = clear_arguments(local);
+            arguments.push(Bytes::from(if held { "1" } else { "0" }));
+            return Some((
+                &crate::collections::local_cached_map::CLEAR_LOCAL,
+                vec![self.key.redis_key()],
+                arguments,
+            ));
+        }
         local.local.forget_all();
         let mut keys = self.redis_keys(&[
             Name::Main,
@@ -333,6 +346,10 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
             local,
             _marker: PhantomData,
         };
+        if cache.local_only().is_some() {
+            // Redis holds no entries to clean up.
+            return cache;
+        }
         let mut keys = cache.redis_keys(&[
             Name::Main,
             Name::Timeout,
@@ -572,6 +589,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        if let Some(local) = self.local_only() {
+            let k = self.codec.encode(k)?;
+            let Some(previous) = Self::local_value(local, &k) else {
+                return Ok(None);
+            };
+            let entry = [(k, self.codec.encode(v)?)];
+            self.local_store(local, &entry, &limits(None, None)?)
+                .await?;
+            self.written(&entry).await?;
+            return self.decode_value(Some(previous));
+        }
         let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
         let raw: Option<Bytes> = self
             .eval_write(
@@ -604,6 +632,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        if let Some(local) = self.local_only() {
+            let k = self.codec.encode(k)?;
+            if Self::local_value(local, &k) != Some(self.codec.encode(old)?) {
+                return Ok(false);
+            }
+            let entry = [(k, self.codec.encode(new)?)];
+            self.local_store(local, &entry, &limits(None, None)?)
+                .await?;
+            self.written(&entry).await?;
+            return Ok(true);
+        }
         let (k, new) = (self.codec.encode(k)?, self.codec.encode(new)?);
         let keys = self.redis_keys(&[
             Name::Main,
@@ -646,6 +685,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        if let Some(local) = self.local_only() {
+            let k = self.codec.encode(k)?;
+            if Self::local_value(local, &k) != Some(self.codec.encode(v)?) {
+                return Ok(false);
+            }
+            self.local_forget(local, std::slice::from_ref(&k)).await?;
+            if let Some(store) = self.writer() {
+                store.deleted(&[k]).await?;
+            }
+            return Ok(true);
+        }
         let k = self.codec.encode(k)?;
         let keys = self.redis_keys(&[
             Name::Main,
@@ -686,6 +736,18 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        if let Some(local) = self.local_only() {
+            let fields = ks
+                .iter()
+                .map(|k| self.codec.encode(*k))
+                .collect::<Result<std::vec::Vec<_>>>()?;
+            let removed = self.local_remove(local, &fields).await?;
+            if let Some(store) = self.writer() {
+                let keys: std::vec::Vec<Bytes> = removed.iter().map(|(k, _)| k.clone()).collect();
+                store.deleted(&keys).await?;
+            }
+            return Ok(removed.len());
+        }
         if ks.is_empty() {
             return Ok(0);
         }
@@ -736,6 +798,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("incr_by")?;
         let result = self.add_and_get(k, delta.to_string()).await?;
         result
             .parse()
@@ -749,6 +812,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("incr_by_float")?;
         if !delta.is_finite() {
             return Err(Error::Config(format!("cannot add {delta}")));
         }
@@ -824,6 +888,7 @@ where
     /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client. Only entries written or read while a limit is set are tracked, so older entries are never dropped for space.
     #[doc(alias = "setMaxSize")]
     pub async fn set_max_size(&self, max: usize, mode: EvictionMode) -> Result<()> {
+        self.redis_store("set_max_size")?;
         let mut cmd = redis::cmd("HSET");
         cmd.arg(names::options(self.key.name())).arg(vec![
             ("max-size", max.to_string()),
@@ -836,6 +901,7 @@ where
     /// Sets the size limit only when none was set before, like `OnceLock::set`; returns whether it did. Redisson's `trySetMaxSize`.
     #[doc(alias = "trySetMaxSize")]
     pub async fn init_max_size(&self, max: usize, mode: EvictionMode) -> Result<bool> {
+        self.redis_store("init_max_size")?;
         let set: i64 = self
             .key
             .core
@@ -867,6 +933,7 @@ where
     ///
     /// As in Redisson, the first listener marks the cache in Redis, and from then on every write publishes its changes until the cache is deleted with [`Object::del`](crate::Object::del). Expired entries are always published by the clean-up. The payload is Redisson's, so listeners see the changes Redisson clients make too.
     pub async fn events_of(&self, kinds: &[EntryEventKind]) -> Result<EntryEvents<K, V, C>> {
+        self.redis_store("events")?;
         if !EntryEventKind::ALL.iter().any(|kind| kinds.contains(kind)) {
             return Err(Error::Config("listen to at least one kind of event".into()));
         }
@@ -905,6 +972,7 @@ where
 
     /// Starts listening to the given kinds of keyspace notification. See [`HashMapCache::keyspace_events`].
     pub async fn keyspace_events_of(&self, kinds: &[MapEventKind]) -> Result<MapEvents<K, C>> {
+        self.redis_store("keyspace_events")?;
         map_events::subscribe(
             &self.key,
             self.codec.clone(),
@@ -988,6 +1056,12 @@ where
                 Some(Some(value)) => return Ok(Some(self.codec.decode(&value)?)),
                 Some(None) if local.store_cache_miss => return Ok(None),
                 _ => {}
+            }
+            if local.local_only() {
+                return match self.loads() {
+                    true => load_value(&Target::Cache(self, None), &encoded, false).await,
+                    false => Ok(None),
+                };
             }
         }
         let raw: Option<Bytes> = self
@@ -1078,6 +1152,7 @@ where
         V: Borrow<W>,
         W: Serialize + ?Sized + Sync,
     {
+        self.redis_store("contains_value")?;
         let found: i64 = self
             .key
             .core
@@ -1103,6 +1178,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("value_len")?;
         let raw: usize = self
             .key
             .query({
@@ -1118,6 +1194,7 @@ where
     /// Returns up to `count` distinct random live keys. Redis picks `count` fields and the expired ones are left out, so fewer can come back while expired entries wait for the clean-up.
     #[doc(alias = "randomKeys")]
     pub async fn random_keys(&self, count: usize) -> Result<std::vec::Vec<K>> {
+        self.redis_store("random_keys")?;
         let raw: std::vec::Vec<Bytes> = self.random(&RANDOM_KEYS, count).await?;
         raw.iter().map(|bytes| self.codec.decode(bytes)).collect()
     }
@@ -1146,6 +1223,18 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        if let Some(local) = self.local_only() {
+            let field = self.codec.encode(k)?;
+            let removed = self
+                .local_remove(local, std::slice::from_ref(&field))
+                .await?;
+            if let Some(store) = self.writer() {
+                if !removed.is_empty() {
+                    store.deleted(&[field]).await?;
+                }
+            }
+            return self.decode_value(removed.into_iter().next().map(|(_, v)| v));
+        }
         let k = self.codec.encode(k)?;
         let raw: Option<Bytes> = self
             .eval_write(
@@ -1209,6 +1298,9 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        if let Some(local) = self.local_only() {
+            return Ok(Self::local_ttl(local, &self.codec.encode(k)?).flatten());
+        }
         let millis: i64 = self
             .key
             .core
@@ -1223,6 +1315,9 @@ where
 
     /// Number of entries in Redis. As in Redisson, expired entries count until the clean-up deletes them.
     pub async fn len(&self) -> Result<usize> {
+        if let Some(local) = self.local_only() {
+            return Ok(Self::local_snapshot(local).len());
+        }
         let len: usize = self
             .key
             .query({
@@ -1241,6 +1336,10 @@ where
 
     /// Deletes every entry. The size limit and the listener mark stay.
     pub async fn clear(&self) -> Result<()> {
+        if let Some(local) = self.local_only() {
+            self.local_clear(local).await?;
+            return Ok(());
+        }
         if let Some(local) = &self.local {
             local.local.forget_all();
             let mut keys =
@@ -1301,22 +1400,36 @@ where
 
     /// Streams the live entries, 100 at a time, in no particular order. Expired entries are skipped page by page, and an entry with an idle limit that is returned starts its idle time again. An entry that is present the whole time is returned at least once and can be returned twice.
     pub fn iter(&self) -> impl Stream<Item = Result<(K, V)>> + '_ {
-        self.iter_with(MapScan::new())
+        match self.local_only() {
+            Some(local) => stream::iter(
+                Self::local_snapshot(local)
+                    .into_iter()
+                    .map(|(k, v)| Ok((self.codec.decode(&k)?, self.codec.decode(&v)?))),
+            )
+            .left_stream(),
+            None => self.iter_with(MapScan::new()).right_stream(),
+        }
     }
 
     /// Streams the live keys, like [`HashMapCache::iter`].
     pub fn keys(&self) -> impl Stream<Item = Result<K>> + '_ {
-        self.keys_with(MapScan::new())
+        match self.local_only() {
+            Some(_) => self.iter().map_ok(|(k, _)| k).left_stream(),
+            None => self.keys_with(MapScan::new()).right_stream(),
+        }
     }
 
     /// Streams the live values, like [`HashMapCache::iter`].
     pub fn values(&self) -> impl Stream<Item = Result<V>> + '_ {
-        self.values_with(MapScan::new())
+        self.iter().map_ok(|(_, v)| v)
     }
 
     /// Streams the live entries `scan` selects, like [`HashMapCache::iter`]. Redisson's `entrySet(pattern, count)`.
     #[doc(alias = "entrySet")]
     pub fn iter_with(&self, scan: MapScan) -> impl Stream<Item = Result<(K, V)>> + '_ {
+        if let Err(error) = self.redis_store("iter_with") {
+            return stream::once(async move { Err(error) }).left_stream();
+        }
         let page = scan.page();
         let pattern = scan.match_pattern().map(str::to_string);
         stream::try_unfold(
@@ -1342,11 +1455,15 @@ where
             },
         )
         .try_flatten()
+        .right_stream()
     }
 
     /// Streams the live keys `scan` selects, like [`HashMapCache::iter`]. Redisson's `keySet(pattern, count)`.
     #[doc(alias = "keySet")]
     pub fn keys_with(&self, scan: MapScan) -> impl Stream<Item = Result<K>> + '_ {
+        if let Err(error) = self.redis_store("keys_with") {
+            return stream::once(async move { Err(error) }).left_stream();
+        }
         let page = scan.page();
         let pattern = scan.match_pattern().map(str::to_string);
         stream::try_unfold(
@@ -1370,6 +1487,7 @@ where
             },
         )
         .try_flatten()
+        .right_stream()
     }
 
     /// Streams the live values of the entries `scan` selects, like [`HashMapCache::iter`]. Redisson's `values(pattern, count)`.
@@ -1387,6 +1505,7 @@ where
     /// Up to `count` distinct random live entries, picked like [`HashMapCache::random_keys`]. Redisson's `randomEntries`.
     #[doc(alias = "randomEntries")]
     pub async fn random_entries(&self, count: usize) -> Result<std::collections::HashMap<K, V>> {
+        self.redis_store("random_entries")?;
         let raw: redis::Value = self.random(&RANDOM_ENTRIES, count).await?;
         Ok(decode_pairs(&self.codec, raw)?.into_iter().collect())
     }
@@ -1399,6 +1518,12 @@ where
         alias = "readAllValues"
     )]
     pub async fn to_hash_map(&self) -> Result<std::collections::HashMap<K, V>> {
+        if let Some(local) = self.local_only() {
+            return Self::local_snapshot(local)
+                .into_iter()
+                .map(|(k, v)| Ok((self.codec.decode(&k)?, self.codec.decode(&v)?)))
+                .collect();
+        }
         let raw: redis::Value = self
             .key
             .core
@@ -1460,6 +1585,9 @@ where
 
     /// The `GET` script for an encoded key: the live value, as [`get`](HashMapCache::get) reads it.
     pub(crate) async fn read_encoded(&self, k: &Bytes) -> Result<Option<V>> {
+        if let Some(local) = self.local_only() {
+            return self.decode_value(Self::local_value(local, k));
+        }
         let raw: Option<Bytes> = self
             .key
             .core
@@ -1487,6 +1615,11 @@ where
     ) -> Result<()> {
         let limits = limits(ttl, None)?;
         let value = self.codec.encode(v)?;
+        if let Some(local) = self.local_only() {
+            return self
+                .local_store(local, &[(k.clone(), value)], &limits)
+                .await;
+        }
         if limits.any() {
             self.fast_put_with_limits(&limits, k.clone(), value, Bytes::new())
                 .await?;
@@ -1499,6 +1632,9 @@ where
     /// Removes an encoded key with `FAST_REMOVE`, publishing `Removed` like [`remove_many`](HashMapCache::remove_many).
     pub(crate) async fn delete_encoded(&self, k: &Bytes) -> Result<()> {
         let fields = [k.clone()];
+        if let Some(local) = self.local_only() {
+            return self.local_forget(local, &fields).await;
+        }
         // With a local cache, the announced twin of the batch variant, which replies per key, so only a removal is announced.
         let _: redis::Value = self
             .eval_write(

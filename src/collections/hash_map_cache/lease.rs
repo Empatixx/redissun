@@ -171,6 +171,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("lease")?;
         if time.is_zero() {
             return Err(Error::Config("lease time should be positive".into()));
         }
@@ -226,6 +227,7 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        self.redis_store("invalidate")?;
         self.lease_remove(self.codec.encode(k)?).await
     }
 }

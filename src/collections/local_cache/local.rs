@@ -103,6 +103,11 @@ impl Local {
         self.cache().store.get(key)
     }
 
+    /// [`lookup`](Self::lookup) with the slot's [`Lifetime`].
+    pub(crate) fn lookup_with_lifetime(&self, key: &Bytes) -> Option<(Option<Bytes>, Lifetime)> {
+        self.cache().store.get_with_lifetime(key)
+    }
+
     pub(crate) fn write(&self, key: Bytes, value: Option<Bytes>, lifetime: Lifetime) {
         let mut cache = self.cache();
         cache.invalidate(&key);

@@ -314,6 +314,19 @@ impl LocalStore {
         }
     }
 
+    /// [`get`](Self::get) with the slot's [`Lifetime`].
+    pub(crate) fn get_with_lifetime(&mut self, key: &Bytes) -> Option<(Option<Bytes>, Lifetime)> {
+        match self {
+            LocalStore::Builtin(store) => {
+                let value = store.get(key)?;
+                let lifetime = store.slots.get(key)?.lifetime;
+                Some((value, lifetime))
+            }
+            #[cfg(feature = "moka")]
+            LocalStore::Moka(cache) => cache.get(key).map(|copy| (copy.value, copy.lifetime)),
+        }
+    }
+
     pub(crate) fn put(&mut self, key: Bytes, value: Option<Bytes>, lifetime: Lifetime) {
         match self {
             LocalStore::Builtin(store) => store.put(key, value, lifetime),

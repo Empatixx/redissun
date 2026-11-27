@@ -70,6 +70,12 @@ where
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
             let entry = [(key.clone(), value.clone())];
+            if let Some(local) = cache.local_only() {
+                let previous = HashMapCache::<K, V, C>::local_value(local, &key);
+                cache.local_store(local, &entry, &limits).await?;
+                cache.written(&entry).await?;
+                return cache.decode_value(previous);
+            }
             let previous: Option<Bytes> = if limits.any() {
                 cache
                     .eval_write(
@@ -157,6 +163,14 @@ where
             // Always the script with limits, with zeros when there are none: Redisson's script without limits leaves the old deadline of an expired entry in place.
             // Sent at most once: a second run would find this call's own value and return it as the existing one.
             let entry = [(key.clone(), value.clone())];
+            if let Some(local) = cache.local_only() {
+                if let Some(live) = HashMapCache::<K, V, C>::local_value(local, &key) {
+                    return cache.decode_value(Some(live));
+                }
+                cache.local_store(local, &entry, &limits).await?;
+                cache.written(&entry).await?;
+                return Ok(None);
+            }
             let live: Option<Bytes> = cache
                 .eval_write(
                     &PUT_IF_ABSENT_WITH_LIMITS,
@@ -249,6 +263,16 @@ where
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
             let value = cache.codec.encode(self.v)?;
+            if let Some(local) = cache.local_only() {
+                if self.token.is_some() {
+                    return Err(super::local_mode::needs_redis("set(..).lease"));
+                }
+                let new = HashMapCache::<K, V, C>::local_value(local, &key).is_none();
+                let entry = [(key, value)];
+                cache.local_store(local, &entry, &limits).await?;
+                cache.written(&entry).await?;
+                return Ok(new);
+            }
             if let Some(token) = self.token {
                 // An empty token would make the script store without any lease check.
                 if token.is_empty() {
@@ -352,6 +376,11 @@ where
             } else {
                 self.batch_size
             };
+            if let Some(local) = self.cache.local_only() {
+                let limits = limits(self.ttl, self.max_idle)?;
+                self.cache.local_store(local, &encoded, &limits).await?;
+                return self.cache.written(&encoded).await;
+            }
             for batch in encoded.chunks(size) {
                 // A fresh `now` per batch, as each batch is its own `putAll`.
                 let limits = limits(self.ttl, self.max_idle)?;
@@ -448,6 +477,11 @@ where
             let cache = self.cache;
             let limits = limits(self.ttl, self.max_idle)?;
             let key = cache.codec.encode(self.k)?;
+            if let Some(local) = cache.local_only() {
+                return cache
+                    .local_expire(local, &key, &limits, self.if_not_set)
+                    .await;
+            }
             let (script, announced) = if self.if_not_set {
                 (
                     &*EXPIRE_ENTRY_IF_NOT_SET,
@@ -541,6 +575,18 @@ where
                 .iter()
                 .map(|k| cache.codec.encode(*k))
                 .collect::<Result<std::vec::Vec<_>>>()?;
+            if let Some(local) = cache.local_only() {
+                let mut changed = 0;
+                for key in &keys {
+                    if cache
+                        .local_expire(local, key, &limits, self.if_not_set)
+                        .await?
+                    {
+                        changed += 1;
+                    }
+                }
+                return Ok(changed);
+            }
             let (script, announced) = if self.if_not_set {
                 (
                     &*EXPIRE_ENTRIES_IF_NOT_SET,

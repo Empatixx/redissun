@@ -119,6 +119,14 @@ When the client's pub/sub connection reconnects, messages may have been lost. `r
 
 When the hash `name` expires, every instance clears its local cache. `expiration_event_policy` chooses the notifications: `KeyeventPattern` (the default, `__keyevent@*:expired`) or `KeyspaceChannel` (`__keyspace@<db>__:name`), both needing `notify-keyspace-events` with `E`/`K` and `x` on the server; `None` listens to nothing.
 
+## Local store mode
+
+With `.store_mode(StoreMode::Local)` (Redisson's `LOCALCACHE`), the entries live only in the local caches, each with its own time to live and max idle. Here a local read does restart the idle time, because the local copy is the only copy. Redis carries the sync messages, the per-key lock while a loader or `entry` runs, and the write-behind queue; `build` sets no listener mark and the clean-up task does not run.
+
+Supported: `get`, `get_many`, `contains_key`, `peek`, `peek_many`, `insert`, `set`, `try_insert`, `extend` (with `.ttl` and `.max_idle`), `replace`, `compare_and_set`, `remove`, `remove_if_eq`, `remove_many`, `entry_ttl`, `expire_entry`, `expire_entries`, `len`, `is_empty`, `clear`, `iter`, `keys`, `values`, `to_hash_map` (a snapshot of the local entries), `entry`, `load_all`, `load_many`, `flush`, the local methods, `preload_cache` (returns `0`) and `Object::del`. `len` counts the local entries that hold a value.
+
+Every other method (`set(..).lease`, `incr_by`, `incr_by_float`, `set_max_size`, `init_max_size`, `events`, `keyspace_events`, `lease`, `invalidate`, `contains_value`, `value_len`, `random_keys`, `random_entries`, `iter_with`, `keys_with`, `values_with`) returns `Error::Config` ("needs StoreMode::LocalRedis") before sending anything.
+
 ## How it is stored
 
 The entries are `HashMapCache`'s: the hash `name`, the sorted sets `redissun__timeout__set:{name}`, `redissun__idle__set:{name}`, `redissun__map_cache__last_access__set:{name}` and the hash `{name}:redissun_options`. The sync messages go to the channel `redissun__local_cache:<name>`, and `ReconnectionStrategy::Load` keeps its log in `redissun__cache_updates_log:{name}`, as for `LocalCachedMap`. Every key is in the slot of the cache.

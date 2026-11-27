@@ -1066,3 +1066,183 @@ async fn moka_copies_expire_with_the_entry_ttl() {
     assert!(a.local_entries().unwrap().is_empty());
     assert_eq!(a.get("k").await.unwrap(), None);
 }
+
+// ---- Task 6: StoreMode::Local ----
+
+async fn local_mode(client: &Client, name: &str, sync: SyncStrategy) -> Cache {
+    client
+        .local_cached_map_cache::<String, String>(name.to_string())
+        .store_mode(redissun::StoreMode::Local)
+        .sync_strategy(sync)
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn exists(key: &str) -> String {
+    raw_command(&["EXISTS", key]).await.trim().to_string()
+}
+
+#[tokio::test]
+async fn local_mode_keeps_entries_out_of_redis() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = local_mode(&client, &name, SyncStrategy::Invalidate).await;
+    a.insert("k", "v")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(exists(&name).await, ":0");
+    assert_eq!(exists(&format!("{{{name}}}:redissun_options")).await, ":0");
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn local_mode_entries_honour_ttl_and_max_idle() {
+    let _gate = shared().await;
+    let client = client().await;
+    let a = local_mode(&client, &unique("lcmc"), SyncStrategy::Invalidate).await;
+    a.insert("t", "v").ttl(200 * MS).await.unwrap();
+    a.insert("i", "v").max_idle(200 * MS).await.unwrap();
+    a.insert("long", "v")
+        .ttl(Duration::from_secs(60))
+        .await
+        .unwrap();
+    let ttl = a.entry_ttl("long").await.unwrap().unwrap();
+    assert!(ttl <= Duration::from_secs(60) && ttl > Duration::from_secs(50));
+    for _ in 0..5 {
+        sleep(100 * MS).await;
+        assert_eq!(a.get("i").await.unwrap().as_deref(), Some("v"));
+    }
+    assert_eq!(a.get("t").await.unwrap(), None);
+    sleep(250 * MS).await;
+    assert_eq!(a.get("i").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn local_mode_syncs_other_instances() {
+    let _gate = shared().await;
+    let (first, second) = (client().await, client().await);
+    let name = unique("lcmc");
+    let a = local_mode(&first, &name, SyncStrategy::Update).await;
+    let b = local_mode(&second, &name, SyncStrategy::Update).await;
+    a.insert("k", "v")
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    eventually("b never got the update", || async {
+        b.get("k").await.unwrap().as_deref() == Some("v")
+    })
+    .await;
+    sleep(1100 * MS).await;
+    assert_eq!(b.get("k").await.unwrap(), None);
+
+    let name = unique("lcmc");
+    let a = local_mode(&first, &name, SyncStrategy::Invalidate).await;
+    let b = local_mode(&second, &name, SyncStrategy::Invalidate).await;
+    b.insert("k", "old").await.unwrap();
+    a.insert("k", "new").await.unwrap();
+    eventually("b kept its copy", || async { b.local_len() == 0 }).await;
+}
+
+#[tokio::test]
+async fn local_mode_len_iter_and_clear() {
+    use futures::TryStreamExt;
+    let _gate = shared().await;
+    let (first, second) = (client().await, client().await);
+    let name = unique("lcmc");
+    let a = local_mode(&first, &name, SyncStrategy::Invalidate).await;
+    let b = local_mode(&second, &name, SyncStrategy::Invalidate).await;
+    assert!(a.is_empty().await.unwrap());
+    a.insert("x", "1").await.unwrap();
+    a.insert("y", "2").await.unwrap();
+    b.insert("z", "3").await.unwrap();
+    assert_eq!(a.len().await.unwrap(), 2);
+    let mut entries: std::vec::Vec<(String, String)> = a.iter().try_collect().await.unwrap();
+    entries.sort();
+    assert_eq!(
+        entries,
+        [
+            ("x".to_string(), "1".to_string()),
+            ("y".to_string(), "2".to_string())
+        ]
+    );
+    assert_eq!(a.to_hash_map().await.unwrap().len(), 2);
+    a.clear().await.unwrap();
+    assert!(a.is_empty().await.unwrap());
+    eventually("b was not cleared", || async { b.local_len() == 0 }).await;
+}
+
+#[tokio::test]
+async fn local_mode_loader_and_writer() {
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let loader = MemoryStore::with(&[("k", "v")]);
+    let writer = MemoryStore::default();
+    let a: Cache = client
+        .local_cached_map_cache::<String, String>(name.clone())
+        .store_mode(redissun::StoreMode::Local)
+        .loader(loader.clone())
+        .writer(writer.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(a.local_len(), 1);
+    let loads = loader.loads();
+    assert_eq!(a.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(loader.loads(), loads);
+    assert_eq!(exists(&name).await, ":0");
+    a.insert("w", "1").await.unwrap();
+    assert_eq!(a.remove("w").await.unwrap().as_deref(), Some("1"));
+    assert_eq!(writer.write_calls(), vec![vec!["w"]]);
+    assert_eq!(writer.delete_calls(), vec![vec!["w"]]);
+}
+
+#[tokio::test]
+async fn local_mode_redis_only_methods_are_config_errors() {
+    use futures::StreamExt;
+    use redissun::{Error, EvictionMode, MapScan};
+    let _gate = shared().await;
+    let client = client().await;
+    let name = unique("lcmc");
+    let a = local_mode(&client, &name, SyncStrategy::Invalidate).await;
+    let check = |what: &str, result: Result<(), Error>| match result {
+        Err(Error::Config(m)) => assert!(m.contains("StoreMode::LocalRedis"), "{what}: {m}"),
+        other => panic!("{what}: {other:?}"),
+    };
+    check("incr_by", a.incr_by("n", 1).await.map(drop));
+    check(
+        "set_max_size",
+        a.set_max_size(1, EvictionMode::Lru).await.map(drop),
+    );
+    check(
+        "init_max_size",
+        a.init_max_size(1, EvictionMode::Lru).await.map(drop),
+    );
+    check("events", a.events().await.map(drop));
+    check("keyspace_events", a.keyspace_events().await.map(drop));
+    check(
+        "lease",
+        a.lease("k", Duration::from_secs(1)).await.map(drop),
+    );
+    check("invalidate", a.invalidate("k").await.map(drop));
+    check("contains_value", a.contains_value("v").await.map(drop));
+    check("value_len", a.value_len("k").await.map(drop));
+    check("random_keys", a.random_keys(1).await.map(drop));
+    check("random_entries", a.random_entries(1).await.map(drop));
+    let first = Box::pin(a.iter_with(MapScan::new())).next().await.unwrap();
+    check("iter_with", first.map(drop));
+    check("set lease", a.set("k", "v").lease("t").await.map(drop));
+    assert_eq!(exists(&name).await, ":0");
+}
+
+#[tokio::test]
+async fn local_mode_preload_returns_zero() {
+    let _gate = shared().await;
+    let client = client().await;
+    let a = local_mode(&client, &unique("lcmc"), SyncStrategy::Invalidate).await;
+    assert_eq!(a.preload_cache().await.unwrap(), 0);
+}
