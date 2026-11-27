@@ -70,10 +70,10 @@ impl Values for SetMultimapValues<String, JsonCodec> {
     }
 }
 
-/// The tests of `RedissonBaseMultimapCacheTest` for the multimap that `$factory(&Client, &str)` returns, with `String` keys and values and `JsonCodec`. `handle = #[attr]` and `scheduler = #[attr]` put an attribute (such as `#[ignore]`) on the tests of the value handle and on `redisson_scheduler`.
+/// The tests of `RedissonBaseMultimapCacheTest` for the multimap that `$factory(&Client, &str)` returns, with `String` keys and values and `JsonCodec`.
 #[macro_export]
 macro_rules! base_multimap_cache_tests {
-    ($factory:path $(, handle = #[$handle:meta])? $(, scheduler = #[$scheduler:meta])?) => {
+    ($factory:path) => {
         use redissun::Object as _;
         use $crate::common::multimap_cache::Values as _;
 
@@ -154,7 +154,6 @@ macro_rules! base_multimap_cache_tests {
         }
 
         #[tokio::test]
-        $(#[$handle])?
         async fn redisson_values_expired() {
             let client = $crate::common::client().await;
             let multimap = $factory(&client, &$crate::common::unique("test"));
@@ -177,7 +176,6 @@ macro_rules! base_multimap_cache_tests {
         }
 
         #[tokio::test]
-        $(#[$scheduler])?
         async fn redisson_scheduler() {
             let client = $crate::common::client().await;
             let cache = $factory(&client, &$crate::common::unique("simple33"));
@@ -248,7 +246,6 @@ macro_rules! base_multimap_cache_tests {
         }
 
         #[tokio::test]
-        $(#[$handle])?
         async fn redisson_contains_all() {
             let client = $crate::common::client().await;
             let multimap = $factory(&client, &$crate::common::unique("test"));

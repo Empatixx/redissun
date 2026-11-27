@@ -1,7 +1,24 @@
-//! Redisson's multimap Lua scripts, copied verbatim (4.8.0). Each `static` names the method it comes from. Edits are only the recorded deviations, each marked `Deviation from Redisson`.
+//! Redisson's multimap Lua scripts, copied verbatim (4.8.0). Each `static` names the method it comes from. Edits are only the recorded deviations (D1–D11), each marked `Deviation from Redisson`.
 
 use crate::lua::Lua;
 use std::sync::LazyLock;
+
+/// The start of the cache put and replace scripts (KEYS: map, values, ttl zset; ARGV: key, key hash, now, …): a key that has expired but is not yet cleaned up loses its values and its score, so the write starts a clean key without a TTL.
+///
+/// Deviation from Redisson (D5): Redisson writes into the hidden values, which a later `expireKey` revives and the clean-up deletes.
+macro_rules! drop_expired_key {
+    () => {
+        concat!(
+            "if redis.call('hexists', KEYS[1], ARGV[1]) == 1 then ",
+            "local expireDateScore = redis.call('zscore', KEYS[3], ARGV[1]); ",
+            "if expireDateScore ~= false and tonumber(expireDateScore) <= tonumber(ARGV[3]) then ",
+            "redis.call('del', KEYS[2]); ",
+            "redis.call('zrem', KEYS[3], ARGV[1]); ",
+            "end; ",
+            "end; ",
+        )
+    };
+}
 
 /// `RedissonListMultimap.putAsync`. KEYS: map, values. ARGV: key, key hash, value.
 pub(super) static LIST_PUT: LazyLock<Lua> = LazyLock::new(|| {
@@ -434,10 +451,16 @@ pub(super) static NATIVE_PERSIST_KEY: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// `RedissonMultimapCache.expireKeyAsync`. KEYS: map, ttl zset. ARGV: deadline in Unix ms (`0` clears it), key.
+/// `RedissonMultimapCache.expireKeyAsync`. KEYS: map, ttl zset. ARGV: deadline in Unix ms (`0` clears it), key, now.
+///
+/// Deviation from Redisson (D5): a key whose score is at or before `now` (expired, not yet cleaned up) returns 0 and keeps its score. Redisson sets the new deadline and so revives the old values.
 pub(super) static CACHE_EXPIRE_KEY: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
         "if redis.call('hexists', KEYS[1], ARGV[2]) == 1 then ",
+        "local expireDateScore = redis.call('zscore', KEYS[2], ARGV[2]); ",
+        "if expireDateScore ~= false and tonumber(expireDateScore) <= tonumber(ARGV[3]) then ",
+        "return 0; ",
+        "end; ",
         "if tonumber(ARGV[1]) > 0 then ",
         "redis.call('zadd', KEYS[2], ARGV[1], ARGV[2]); ",
         "else ",
@@ -708,49 +731,53 @@ pub(super) static CACHE_SET_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// `RedissonListMultimap.putAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, value.
+/// `RedissonListMultimap.putAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, value.
 ///
-/// Deviation from Redisson (D5): when `hsetnx` adds the key, its score is dropped from the ttl zset. `remove`, `remove_many` and `remove_from_all_keys` leave the score behind, so a key inserted again would read as expired and the clean-up would delete its new values.
+/// Deviation from Redisson (D5): when `hsetnx` adds the key, its score is dropped from the ttl zset. `remove`, `remove_many` and `remove_from_all_keys` leave the score behind, so a key inserted again would read as expired and the clean-up would delete its new values. `drop_expired_key!` first deletes the values and the score of a key that has expired but is not yet cleaned up, so the write starts a clean key without a TTL; Redisson writes into the hidden values, which a later `expireKey` revives and the clean-up deletes.
 pub(super) static CACHE_LIST_PUT: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hsetnx', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
-        "redis.call('rpush', KEYS[2], ARGV[3]); ",
+        "redis.call('rpush', KEYS[2], ARGV[4]); ",
         "return 1; ",
     ))
 });
 
-/// `RedissonSetMultimap.putAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, value.
+/// `RedissonSetMultimap.putAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, value.
 ///
-/// Deviation from Redisson (D5): when `hsetnx` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hsetnx` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_SET_PUT: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hsetnx', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
-        "return redis.call('sadd', KEYS[2], ARGV[3]); ",
+        "return redis.call('sadd', KEYS[2], ARGV[4]); ",
     ))
 });
 
-/// `RedissonListMultimap.putAllAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, values….
+/// `RedissonListMultimap.putAllAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, values….
 ///
-/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_LIST_PUT_ALL: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
         "local n = 0; ",
-        "for i=3, #ARGV, 5000 do ",
+        "for i=4, #ARGV, 5000 do ",
         "n = n + redis.call('rpush', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
         "end; ",
         "return n; ",
     ))
 });
 
-/// `RedissonSetMultimap.putAllAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, values….
+/// `RedissonSetMultimap.putAllAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, values….
 ///
-/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_SET_PUT_ALL: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
         "local n = 0; ",
-        "for i=3, #ARGV, 5000 do ",
+        "for i=4, #ARGV, 5000 do ",
         "n = n + redis.call('sadd', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
         "end; ",
         "",
@@ -758,16 +785,17 @@ pub(super) static CACHE_SET_PUT_ALL: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// `RedissonListMultimap.replaceValuesAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, values….
+/// `RedissonListMultimap.replaceValuesAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, values….
 ///
-/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_LIST_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
         "local members = redis.call('lrange', KEYS[2], 0, -1); ",
         "redis.call('del', KEYS[2]); ",
-        "if #ARGV > 2 then ",
-        "for i=3, #ARGV, 5000 do ",
+        "if #ARGV > 3 then ",
+        "for i=4, #ARGV, 5000 do ",
         "redis.call('rpush', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
         "end; ",
         "end; ",
@@ -775,16 +803,17 @@ pub(super) static CACHE_LIST_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// `RedissonSetMultimap.replaceValuesAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, values….
+/// `RedissonSetMultimap.replaceValuesAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, values….
 ///
-/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_SET_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
         "local members = redis.call('smembers', KEYS[2]); ",
         "redis.call('del', KEYS[2]); ",
-        "if #ARGV > 2 then ",
-        "for i=3, #ARGV, 5000 do ",
+        "if #ARGV > 3 then ",
+        "for i=4, #ARGV, 5000 do ",
         "redis.call('sadd', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
         "end; ",
         "end; ",
@@ -792,30 +821,32 @@ pub(super) static CACHE_SET_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
     ))
 });
 
-/// `RedissonListMultimap.fastReplaceValuesAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, values….
+/// `RedissonListMultimap.fastReplaceValuesAsync`, for `ListMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, values….
 ///
-/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_LIST_FAST_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
         "redis.call('del', KEYS[2]); ",
-        "if #ARGV > 2 then ",
-        "for i=3, #ARGV, 5000 do ",
+        "if #ARGV > 3 then ",
+        "for i=4, #ARGV, 5000 do ",
         "redis.call('rpush', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
         "end; ",
         "end; ",
     ))
 });
 
-/// `RedissonSetMultimap.fastReplaceValuesAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, values….
+/// `RedissonSetMultimap.fastReplaceValuesAsync`, for `SetMultimapCache`. KEYS: map, values, ttl zset. ARGV: key, key hash, now, values….
 ///
-/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset (see `CACHE_LIST_PUT`).
+/// Deviation from Redisson (D5): when `hset` adds the key, its score is dropped from the ttl zset, and a key that has expired but is not yet cleaned up first loses its values and score (see `CACHE_LIST_PUT`).
 pub(super) static CACHE_SET_FAST_REPLACE_VALUES: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
+        drop_expired_key!(),
         "if redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) == 1 then redis.call('zrem', KEYS[3], ARGV[1]); end; ",
         "redis.call('del', KEYS[2]); ",
-        "if #ARGV > 2 then ",
-        "for i=3, #ARGV, 5000 do ",
+        "if #ARGV > 3 then ",
+        "for i=4, #ARGV, 5000 do ",
         "redis.call('sadd', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
         "end; ",
         "end; ",
@@ -904,7 +935,7 @@ pub(super) static LV_CONTAINS_ALL: LazyLock<Lua> = LazyLock::new(|| {
 
 /// `RedissonListMultimapValues.removeAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
 ///
-/// Deviation from Redisson (D10, as in `LIST_VALUES_REMOVE_ALL`): `lrem(...) == 1` → `lrem(...) > 0`. `LREM` with count 0 returns how many it removed, so Redisson reports `false` for a value that occurred more than once.
+/// Deviation from Redisson (D11, the D10 fix of `LIST_VALUES_REMOVE_ALL`): `lrem(...) == 1` → `lrem(...) > 0`. `LREM` with count 0 returns how many it removed, so Redisson reports `false` for a value that occurred more than once.
 pub(super) static LV_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(concat!(
         "local expireDate = 92233720368547758; ",

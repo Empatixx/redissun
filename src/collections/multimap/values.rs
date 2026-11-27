@@ -370,7 +370,7 @@ where
 
     /// Removes every occurrence of each value and returns whether any was removed, Redisson's `removeAll`. The key goes when its list is emptied. No values send nothing.
     ///
-    /// A value that occurred several times counts as removed too. Redisson's script counts it only when it occurred exactly once (deviation D10).
+    /// A value that occurred several times counts as removed too. Redisson's script counts it only when it occurred exactly once (deviations D10 and D11).
     #[doc(alias = "removeAll")]
     pub async fn remove_values<'a, W>(
         &self,
@@ -529,7 +529,7 @@ where
             if raw.is_empty() {
                 return Ok(None);
             }
-            let next = (raw.len() as i64 == LIST_PAGE).then_some(offset + LIST_PAGE);
+            let next = (i64::try_from(raw.len()) == Ok(LIST_PAGE)).then_some(offset + LIST_PAGE);
             let values = self.ops().decode_all::<V>(raw)?;
             Ok(Some((stream::iter(values.into_iter().map(Ok)), next)))
         })

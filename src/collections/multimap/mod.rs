@@ -118,7 +118,8 @@ pub(crate) fn schedule_clean_up(key: &Key, mode: &Mode) {
     if let Some(timeout) = mode.timeout() {
         eviction::schedule(
             &key.core,
-            format!("redissun__multimap_eviction:{}", key.name()),
+            // The ttl zset name holds the shape, so a list and a set cache under one name each get a task.
+            format!("redissun__multimap_eviction:{timeout}"),
             &scripts::CACHE_EVICT,
             vec![key.redis_key(), timeout.to_string()],
             eviction_arguments,
@@ -227,11 +228,7 @@ impl<C: Codec> Ops<'_, C> {
 
     /// `put`: list always `true`, set `true` when the value is new.
     pub(crate) async fn insert(&self, slot: &Slot, value: Bytes) -> Result<bool> {
-        let args = vec![
-            slot.encoded_key.clone(),
-            Bytes::from(slot.key_hash.clone()),
-            value,
-        ];
+        let args = self.write_args(slot, vec![value]);
         let core = &self.key.core;
         let keys = self.write_keys(slot);
         let cache = self.mode.timeout().is_some();
@@ -340,10 +337,12 @@ impl<C: Codec> Ops<'_, C> {
         Bytes::from(prefix(self.key.name()))
     }
 
-    /// ARGV of the scripts that write a key: the key, its hash, then the values.
-    fn key_and_values(slot: &Slot, values: Vec<Bytes>) -> Vec<Bytes> {
+    /// The ARGV of the put and replace scripts: key, key hash, then the values; in cache mode the client clock goes between them, for the expired-key check (D5).
+    fn write_args(&self, slot: &Slot, values: Vec<Bytes>) -> Vec<Bytes> {
+        let now = self.mode.timeout().map(|_| Self::now_arg());
         [slot.encoded_key.clone(), Bytes::from(slot.key_hash.clone())]
             .into_iter()
+            .chain(now)
             .chain(values)
             .collect()
     }
@@ -360,7 +359,7 @@ impl<C: Codec> Ops<'_, C> {
         }
         let core = &self.key.core;
         let keys = self.write_keys(slot);
-        let args = Self::key_and_values(slot, values);
+        let args = self.write_args(slot, values);
         match (self.shape, self.mode) {
             (Shape::List, Mode::Plain) => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await,
             (Shape::List, Mode::Native) => {
@@ -427,7 +426,7 @@ impl<C: Codec> Ops<'_, C> {
         }
         let core = &self.key.core;
         let keys = self.write_keys(slot);
-        let args = Self::key_and_values(slot, values);
+        let args = self.write_args(slot, values);
         let cache = self.mode.timeout().is_some();
         match (self.shape, cache) {
             (Shape::List, false) => {
@@ -454,7 +453,7 @@ impl<C: Codec> Ops<'_, C> {
         }
         let core = &self.key.core;
         let keys = self.write_keys(slot);
-        let args = Self::key_and_values(slot, values);
+        let args = self.write_args(slot, values);
         let cache = self.mode.timeout().is_some();
         let () = match (self.shape, cache) {
             (Shape::List, false) => {
@@ -603,7 +602,11 @@ impl<C: Codec> Ops<'_, C> {
                 .eval(
                     &scripts::CACHE_EXPIRE_KEY,
                     vec![self.key.redis_key(), timeout.to_string()],
-                    vec![Bytes::from(deadline.to_string()), slot.encoded_key.clone()],
+                    vec![
+                        Bytes::from(deadline.to_string()),
+                        slot.encoded_key.clone(),
+                        Self::now_arg(),
+                    ],
                 )
                 .await?;
             return Ok(done == 1);
@@ -1135,7 +1138,7 @@ multimap_type!(
 );
 native_expire_key!(SetMultimapCacheNative);
 
-/// Adds `expire_key` over Redisson's ttl zset to a cache multimap type.
+/// Adds `expire_key` over the ttl zset (Redisson's layout with the redissun prefix) to a cache multimap type.
 macro_rules! cache_expire_key {
     ($name:ident) => {
         impl<K, V, C> $name<K, V, C>
@@ -1144,9 +1147,9 @@ macro_rules! cache_expire_key {
             V: ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync,
             C: $crate::codec::Codec,
         {
-            /// Sets the time to live of the key `k`, Redisson's `expireKey`: it records the deadline, now plus `ttl` on the client's clock (as in Redisson), as the key's score in the multimap's ttl zset. [`Duration::ZERO`](::std::time::Duration::ZERO) removes the key's TTL instead. Returns whether the key exists.
+            /// Sets the time to live of the key `k`, Redisson's `expireKey`: it records the deadline, now plus `ttl` on the client's clock (as in Redisson), as the key's score in the multimap's ttl zset. [`Duration::ZERO`](::std::time::Duration::ZERO) removes the key's TTL instead. Returns whether the key exists; a key that has expired but that the clean-up has not deleted yet counts as missing and stays expired (Redisson revives its old values).
             ///
-            /// Reads of one key ([`get_all`](Self::get_all), [`contains_key`](Self::contains_key), [`contains_entry`](Self::contains_entry), the handle from [`get`](Self::get)) and [`contains_value`](Self::contains_value) hide an expired key at once. [`len`](Self::len), [`key_len`](Self::key_len), [`keys_to_vec`](Self::keys_to_vec), [`remove_from_all_keys`](Self::remove_from_all_keys) and the streams count it until the clean-up task deletes it, as in Redisson. Writes to a live key keep its TTL; a key that is new to the multimap starts without one.
+            /// Reads of one key ([`get_all`](Self::get_all), [`contains_key`](Self::contains_key), [`contains_entry`](Self::contains_entry), the handle from [`get`](Self::get)) and [`contains_value`](Self::contains_value) hide an expired key at once. [`len`](Self::len), [`key_len`](Self::key_len), [`keys_to_vec`](Self::keys_to_vec), [`remove_from_all_keys`](Self::remove_from_all_keys) and the streams count it until the clean-up task deletes it, as in Redisson. Writes to a live key keep its TTL; a key that is new to the multimap starts without one. A put or replace over an expired key that is not yet cleaned up first deletes its old values and its score, so the key starts clean with only the new values and no TTL, and [`replace_values`](Self::replace_values) returns no old values.
             #[doc(alias = "expireKey")]
             pub async fn expire_key<Q>(
                 &self,
@@ -1166,7 +1169,7 @@ macro_rules! cache_expire_key {
 }
 
 multimap_type!(
-    /// **Experimental.** A [`ListMultimap`] whose keys can expire one by one, Redisson's `RListMultimapCache`. [`expire_key`](Self::expire_key) gives a key a deadline, kept in Redisson's ttl zset `{name}:redissun_list_multimap_ttl`; a background task deletes expired keys. It runs on Redis 6.2.
+    /// **Experimental.** A [`ListMultimap`] whose keys can expire one by one, Redisson's `RListMultimapCache`. [`expire_key`](Self::expire_key) gives a key a deadline, kept in a ttl zset with Redisson's layout with the redissun prefix, `{name}:redissun_list_multimap_ttl` (`name:redissun_list_multimap_ttl` for a name with a `{…}` hash tag); a background task deletes expired keys. It runs on Redis 6.2.
     ///
     /// It uses Redisson's layout, so Redisson clients read and write the same data. Get one with [`Client::list_multimap_cache`](crate::Client::list_multimap_cache).
     ListMultimapCache,
@@ -1177,7 +1180,7 @@ multimap_type!(
 cache_expire_key!(ListMultimapCache);
 
 multimap_type!(
-    /// **Experimental.** A [`SetMultimap`] whose keys can expire one by one, Redisson's `RSetMultimapCache`. [`expire_key`](Self::expire_key) gives a key a deadline, kept in Redisson's ttl zset `{name}:redissun_set_multimap_ttl`; a background task deletes expired keys. It runs on Redis 6.2.
+    /// **Experimental.** A [`SetMultimap`] whose keys can expire one by one, Redisson's `RSetMultimapCache`. [`expire_key`](Self::expire_key) gives a key a deadline, kept in a ttl zset with Redisson's layout with the redissun prefix, `{name}:redissun_set_multimap_ttl` (`name:redissun_set_multimap_ttl` for a name with a `{…}` hash tag); a background task deletes expired keys. It runs on Redis 6.2.
     ///
     /// It uses Redisson's layout, so Redisson clients read and write the same data. Get one with [`Client::set_multimap_cache`](crate::Client::set_multimap_cache).
     SetMultimapCache,

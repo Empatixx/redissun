@@ -114,7 +114,7 @@ The scripts name the sets from the hash, so in a cluster `rename` works only to 
 
 ## Cache
 
-**Experimental.** `client.set_multimap_cache(name)` returns a `SetMultimapCache`, Redisson's `RSetMultimapCache`. It is a `SetMultimap` with the same data and methods, plus `expire_key`, which gives one key a deadline. The deadlines live in Redisson's ttl zset `{name}:redissun_set_multimap_ttl` (members are the encoded keys, scores Unix milliseconds), so it runs on Redis 6.2:
+**Experimental.** `client.set_multimap_cache(name)` returns a `SetMultimapCache`, Redisson's `RSetMultimapCache`. It is a `SetMultimap` with the same data and methods, plus `expire_key`, which gives one key a deadline. The deadlines live in a ttl zset with Redisson's layout with the redissun prefix, `{name}:redissun_set_multimap_ttl`, or `name:redissun_set_multimap_ttl` for a name with a hash tag such as `{t}:carts` (members are the encoded keys, scores Unix milliseconds), so it runs on Redis 6.2:
 
 ```rust
 use std::time::Duration;
@@ -126,15 +126,16 @@ carts.expire_key("user-1", Duration::from_secs(600)).await?; // true: the key ex
 
 | Method | Redisson | Notes |
 |---|---|---|
-| `expire_key(&k, ttl)` | `expireKey(key, ttl, unit)` | records now + `ttl` as the key's score; `false` for a missing key |
-| `expire_key(&k, Duration::ZERO)` | — | removes the key's score, so the key no longer expires |
+| `expire_key(&k, ttl)` | `expireKey(key, ttl, unit)` | records now + `ttl` as the key's score; `false` for a missing key, and for an expired key that the clean-up has not deleted yet, which it does not revive |
+| `expire_key(&k, Duration::ZERO)` | — | removes the key's score, so the key no longer expires; `false` for a missing or expired key |
 
 - The deadline is taken from the client's clock, as in Redisson, and the scripts compare it with the client's clock too. Clients whose clocks disagree see a key expire at different times.
 - Reads of one key hide an expired key at once: `get_all`, `contains_key`, `contains_entry` and the handle from `get`, and also `contains_value`. `len`, `key_len`, `keys_to_vec`, `remove_from_all_keys` and the streams count an expired key until the clean-up task deletes it, as Redisson's unoverridden `size`, `keySize` and iterators do.
 - Writes to a live key keep its deadline. A key that is new to the hash starts without one: redissun's put scripts drop a stale score left by `remove`, `remove_many` or `remove_from_all_keys`, which Redisson's do not, so in Redisson such a key can read as expired at once.
+- A write to a key that has expired but that the clean-up has not deleted yet (`insert`, `extend`, `replace_values`, `set_values`, and the handle's `push`, `insert` and `extend`, which go through them) first deletes the key's old values and score, so the key starts clean: it holds only the new values and has no deadline, and `replace_values` returns no old values. Redisson writes into the hidden values instead: the write stays hidden, the clean-up later deletes it with the old values, and a later `expireKey` revives the old values. `expire_key` on such a key returns `false` and leaves it expired.
 - `remove_all` drops the key's score, as in Redisson.
 - The handle from `get` checks the TTL as the table in [Values of one key](#values-of-one-key) shows.
-- A background task deletes expired keys, Redisson's `MultimapEvictionTask`: each run takes up to 100 keys whose deadline passed and deletes their sets, their fields and their scores. It starts when `client.set_multimap_cache(name)` is first called for the name (one task per name and client), first runs after [`eviction_interval`](/docs/guides/configuration) (5 s by default), and adapts its pause between that interval and 30 minutes, as Redisson does. It stops with the client. Every client runs its own task and there is no lock between them, as in Redisson; each run is one atomic script, so that is harmless. redissun's script builds the set names like `suffix_name`, so a name with a hash tag, such as `{t}:carts`, is cleaned too; Redisson's misses its sets and fails on a cluster.
+- A background task deletes expired keys, Redisson's `MultimapEvictionTask`: each run takes up to 100 keys whose deadline passed and deletes their sets, their fields and their scores. It starts when `client.set_multimap_cache(name)` is first called for the name (one task per name and client; a `ListMultimapCache` and a `SetMultimapCache` under one name each get their own), first runs after [`eviction_interval`](/docs/guides/configuration) (5 s by default), and adapts its pause between that interval and 30 minutes, as Redisson does. It stops with the client. Every client runs its own task and there is no lock between them, as in Redisson; each run is one atomic script, so that is harmless. redissun's script builds the set names like `suffix_name`, so a name with a hash tag, such as `{t}:carts`, is cleaned too; Redisson's misses its sets and fails on a cluster.
 - `Object::del`, `expire` and `persist` cover the ttl zset too, with Redisson's scripts. `rename` renames the ttl zset with the rest, so key TTLs survive it; Redisson's cache does not, and drops them.
 
 ## CacheNative

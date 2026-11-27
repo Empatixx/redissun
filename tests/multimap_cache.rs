@@ -176,6 +176,53 @@ macro_rules! cache_tests {
         }
 
         #[tokio::test]
+        async fn writes_over_an_expired_key_start_clean() {
+            let name = unique("mmc");
+            let map = $factory(&client_without_clean_up().await, &name);
+            for k in ["i", "e", "s"] {
+                map.extend(k, ["old1", "old2"]).await.unwrap();
+                assert!(map.expire_key(k, Duration::from_millis(200)).await.unwrap());
+            }
+            sleep(Duration::from_millis(400)).await;
+            map.insert("i", "new").await.unwrap();
+            map.extend("e", ["new"]).await.unwrap();
+            map.set_values("s", ["new"]).await.unwrap();
+            for k in ["i", "e", "s"] {
+                assert_eq!(map.get_all(k).await.unwrap(), ["new"], "{k}");
+                assert_eq!(zscore(&ttl_set(&name), &format!("\"{k}\"")).await, None);
+            }
+        }
+
+        #[tokio::test]
+        async fn replace_values_over_an_expired_key_returns_no_old_values() {
+            let name = unique("mmc");
+            let map = $factory(&client_without_clean_up().await, &name);
+            map.extend("1", ["a", "b"]).await.unwrap();
+            assert!(map
+                .expire_key("1", Duration::from_millis(200))
+                .await
+                .unwrap());
+            sleep(Duration::from_millis(400)).await;
+            assert!(map.replace_values("1", ["new"]).await.unwrap().is_empty());
+            assert_eq!(map.get_all("1").await.unwrap(), ["new"]);
+            assert_eq!(zscore(&ttl_set(&name), "\"1\"").await, None);
+        }
+
+        #[tokio::test]
+        async fn expire_key_on_an_expired_key_is_false() {
+            let map = $factory(&client_without_clean_up().await, &unique("mmc"));
+            map.extend("1", ["a", "b"]).await.unwrap();
+            assert!(map
+                .expire_key("1", Duration::from_millis(200))
+                .await
+                .unwrap());
+            sleep(Duration::from_millis(400)).await;
+            assert!(!map.expire_key("1", Duration::from_secs(60)).await.unwrap());
+            assert!(!map.expire_key("1", Duration::ZERO).await.unwrap());
+            assert!(map.get_all("1").await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
         async fn writes_to_a_live_key_keep_its_ttl() {
             let name = unique("mmc");
             let map = $factory(&client().await, &name);
@@ -364,8 +411,11 @@ macro_rules! cache_tests {
             assert!(!values.remove_one("a").await);
             assert!(!values.remove_all_of(&["a", "b"]).await);
             assert!(!values.retain_of(&["x"]).await);
-            map.expire_key("1", Duration::ZERO).await.unwrap();
-            assert_eq!(values.size().await, 2);
+            // The values are untouched: `len` counts an expired key until the clean-up.
+            assert_eq!(map.len().await.unwrap(), 2);
+            // An expired key is not revived.
+            assert!(!map.expire_key("1", Duration::ZERO).await.unwrap());
+            assert_eq!(values.size().await, 0);
         }
 
         #[tokio::test]
@@ -573,5 +623,39 @@ mod set {
         assert!(values.contains_all(&["1", "2"]).await.unwrap());
         assert!(values.retain(&["1"]).await.unwrap());
         assert!(values.remove_values(&["1"]).await.unwrap());
+    }
+}
+
+/// A list and a set cache under one name each get a clean-up task: the task name includes the shape.
+#[tokio::test]
+async fn list_and_set_cache_under_one_name_are_both_cleaned() {
+    let name = unique("mmc-both");
+    let client =
+        connect_with(|builder| builder.eviction_interval(Duration::from_millis(300))).await;
+    let list = list_cache(&client, &name);
+    let set = set_cache(&client, &name);
+    list.insert("l", "a").await.unwrap();
+    set.insert("s", "a").await.unwrap();
+    let values = [
+        list.get("l").unwrap().name().to_string(),
+        set.get("s").unwrap().name().to_string(),
+    ];
+    assert!(list
+        .expire_key("l", Duration::from_millis(200))
+        .await
+        .unwrap());
+    assert!(set
+        .expire_key("s", Duration::from_millis(200))
+        .await
+        .unwrap());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(13);
+    for key in &values {
+        while exists(key).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{key} not cleaned after 13 s"
+            );
+            sleep(Duration::from_millis(200)).await;
+        }
     }
 }
