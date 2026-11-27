@@ -423,3 +423,142 @@ async fn streams_skip_keys_without_values() {
     keys.sort();
     assert_eq!(keys, ["a", "b"]);
 }
+
+#[tokio::test]
+async fn handle_writes_go_through_the_multimap() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    let values = map.get("0").unwrap();
+    values.push("1").await.unwrap();
+    values.extend(["2", "3"]).await.unwrap();
+    assert_eq!(map.key_len().await.unwrap(), 1);
+    assert!(map.contains_key("0").await.unwrap());
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"0\""]).await, ":1\r\n");
+    assert_eq!(map.get_all("0").await.unwrap(), ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn handle_remove_drops_the_key() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.extend("0", ["1", "2", "3"]).await.unwrap();
+    let values = map.get("0").unwrap();
+    assert!(values.remove_value("1").await.unwrap());
+    assert!(!values.remove_value("1").await.unwrap());
+    assert!(values.remove_values(["2"]).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 1);
+    assert!(values.remove_values(["3"]).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 0);
+    assert!(!values.remove_values(["3"]).await.unwrap());
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"0\""]).await, ":0\r\n");
+
+    map.insert("1", "x").await.unwrap();
+    assert!(map.get("1").unwrap().remove_value("x").await.unwrap());
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"1\""]).await, ":0\r\n");
+}
+
+#[tokio::test]
+async fn handle_clear_removes_the_key() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.extend("1", ["01", "02", "03"]).await.unwrap();
+    map.get("1").unwrap().clear().await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 0);
+    assert_eq!(map.get("1").unwrap().len().await.unwrap(), 0);
+    assert_eq!(map.key_len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn handle_reads() {
+    let map = list(&unique("lmm")).await;
+    map.extend("1", ["1", "2", "3", "4", "5", "2"])
+        .await
+        .unwrap();
+    let values = map.get("1").unwrap();
+    assert_eq!(values.range(..2).await.unwrap(), ["1", "2"]);
+    assert_eq!(values.range(1..=3).await.unwrap(), ["2", "3", "4"]);
+    assert_eq!(values.get(0).await.unwrap().as_deref(), Some("1"));
+    assert_eq!(values.get(9).await.unwrap(), None);
+    assert_eq!(values.position("2").await.unwrap(), Some(1));
+    assert_eq!(values.rposition("2").await.unwrap(), Some(5));
+    assert_eq!(values.position("9").await.unwrap(), None);
+    assert!(values.contains("5").await.unwrap());
+    assert!(!values.contains("9").await.unwrap());
+    assert!(values.contains_all(["1", "5"]).await.unwrap());
+    assert!(!values.contains_all(["1", "9"]).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 6);
+    assert!(!values.is_empty().await.unwrap());
+    assert_eq!(
+        values.to_vec().await.unwrap(),
+        ["1", "2", "3", "4", "5", "2"]
+    );
+    let streamed: Vec<String> = values.iter().try_collect().await.unwrap();
+    assert_eq!(streamed, ["1", "2", "3", "4", "5", "2"]);
+}
+
+#[tokio::test]
+async fn handle_index_writes() {
+    let map = list(&unique("lmm")).await;
+    map.extend("k", ["a", "b", "c", "b", "b"]).await.unwrap();
+    let values = map.get("k").unwrap();
+    values.set(0, "A").await.unwrap();
+    assert_eq!(values.replace(1, "B").await.unwrap(), "b");
+    values.insert(0, "0").await.unwrap();
+    values.insert_many(1, ["x", "y"]).await.unwrap();
+    assert_eq!(values.insert_before("c", "-").await.unwrap(), Some(9));
+    assert_eq!(values.insert_after("c", "+").await.unwrap(), Some(10));
+    assert_eq!(
+        values.to_vec().await.unwrap(),
+        ["0", "x", "y", "A", "B", "-", "c", "+", "b", "b"]
+    );
+    assert_eq!(values.remove(1).await.unwrap(), "x");
+    assert_eq!(values.pop().await.unwrap().as_deref(), Some("b"));
+    assert_eq!(values.remove_value_n("b", 5).await.unwrap(), 1);
+    values.push("y").await.unwrap();
+    assert_eq!(values.remove_value_all("y").await.unwrap(), 2);
+    assert!(values.retain_values(["A", "B", "c"]).await.unwrap());
+    assert_eq!(values.to_vec().await.unwrap(), ["A", "B", "c"]);
+    values.trim(1..).await.unwrap();
+    assert_eq!(map.get_all("k").await.unwrap(), ["B", "c"]);
+}
+
+#[tokio::test]
+async fn handle_empty_inputs() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    let values = map.get("k").unwrap();
+    let none: [&str; 0] = [];
+    values.extend(none).await.unwrap();
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"k\""]).await, ":0\r\n");
+    assert_eq!(map.key_len().await.unwrap(), 0);
+    assert!(!values.remove_values(none).await.unwrap());
+    assert!(values.contains_all(none).await.unwrap());
+}
+
+#[tokio::test]
+async fn index_writes_can_leave_an_empty_key_like_redisson() {
+    let map = list(&unique("lmm")).await;
+    map.insert("k", "a").await.unwrap();
+    assert_eq!(
+        map.get("k").unwrap().pop().await.unwrap().as_deref(),
+        Some("a")
+    );
+    assert!(!map.contains_key("k").await.unwrap());
+    assert!(map.get_all("k").await.unwrap().is_empty());
+    let entries: Vec<(String, String)> = map.iter().try_collect().await.unwrap();
+    assert!(entries.is_empty());
+    assert_eq!(map.key_len().await.unwrap(), 1);
+    map.remove_all("k").await.unwrap();
+    assert_eq!(map.key_len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn as_vec_reaches_the_raw_list() {
+    let name = unique("lmm");
+    let map = list(&name).await;
+    map.extend("key", ["a", "b"]).await.unwrap();
+    let values = map.get("key").unwrap();
+    assert_eq!(values.name(), values_key(&name, "IKm9EBQhlzpVIBxUXDHBWw"));
+    assert_eq!(values.as_vec().to_vec().await.unwrap(), ["a", "b"]);
+    assert_eq!(values.as_vec().name(), values.name());
+}

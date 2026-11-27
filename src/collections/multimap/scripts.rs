@@ -342,3 +342,37 @@ pub(super) static CLEAR_EXPIRE: LazyLock<Lua> = LazyLock::new(|| {
         "return redis.call('persist', KEYS[1]); ",
     ))
 });
+
+/// `RedissonListMultimap.InnerList.removeAllAsync`. KEYS: map, values. ARGV: key, values….
+pub(super) static LIST_VALUES_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local v = 0 ",
+        "for i = 2, #ARGV, 1 do ",
+        "if redis.call('lrem', KEYS[2], 0, ARGV[i]) == 1 then ",
+        "v = 1; ",
+        "end ",
+        "end ",
+        "if v == 1 and redis.call('exists', KEYS[2]) == 0 then ",
+        "redis.call('hdel', KEYS[1], ARGV[1]); ",
+        "end ",
+        "return v",
+    ))
+});
+
+/// `RedissonSetMultimap.InnerSet.removeAllAsync`. KEYS: map, values. ARGV: key, values….
+pub(super) static SET_VALUES_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local count = 0;",
+        "for i=2, #ARGV, 5000 do ",
+        "count = count + redis.call('srem', KEYS[2], unpack(ARGV, i, math.min(i+4999, table.getn(ARGV)))) ",
+        "end; ",
+        "",
+        "if count > 0 then ",
+        "if redis.call('scard', KEYS[2]) == 0 then ",
+        "redis.call('hdel', KEYS[1], ARGV[1]); ",
+        "end; ",
+        "return 1;",
+        "end;",
+        "return 0; ",
+    ))
+});

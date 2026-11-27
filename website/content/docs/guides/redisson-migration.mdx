@@ -489,6 +489,13 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `entries().contains(e)`, `entries().remove(e)` | `contains_entry(&k, &v)`, `remove(&k, &v)` |
 | `values().contains(v)`, `values().size()` | `contains_value(&v)`, `len()` |
 | `delete()`, `expire(..)`, `clearExpire()`, `rename(n)`, `isExists()`, `remainTimeToLive()` | `Object::del`, `expire`, `persist`, `rename`, `exists`, `ttl`, over the hash and every values key |
+| `get(k)` → `RList` / `RSet` | `get(&k)?` → `ListMultimapValues` / `SetMultimapValues`, lazy |
+| `get(k).add(v)`, `addAll(c)` | `push(&v)`, `extend(values)` (list); `insert(&v)`, `extend(values)` → `usize` (set) |
+| `get(k).remove(v)`, `removeAll(c)`, `retainAll(c)` | `remove_value(&v)`, `remove_values(values)`, `retain_values(values)` (list); `remove(&v)`, `remove_values(&[&v, ..])`, `retain(&[&v, ..])` (set) |
+| `get(k).delete()` | `clear()` |
+| `get(k).readAll()`, `size()`, `contains(v)`, `containsAll(c)`, `iterator()` | `to_vec()`, `len()`, `contains(&v)`, `contains_all(..)`, `iter()` |
+| `get(k).get(i)`, `range(..)`, `indexOf(v)`, `lastIndexOf(v)` (list) | `get(i)`, `range(r)`, `position(&v)`, `rposition(&v)` |
+| other `RList` / `RSet` methods on `get(k)` | `as_vec()` / `as_set()`, the raw `Vec` / `HashSet`; writes through it do not update the key index |
 
 ## LocalCachedMap
 

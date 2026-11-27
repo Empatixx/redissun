@@ -421,3 +421,126 @@ async fn streams_read_big_sets_with_sscan() {
     let read: std::collections::HashSet<String> = map.values_paged(7).try_collect().await.unwrap();
     assert_eq!(read.len(), 300);
 }
+
+async fn sorted_values(
+    values: &redissun::multimap::SetMultimapValues<String, JsonCodec>,
+) -> Vec<String> {
+    let mut all = values.to_vec().await.unwrap();
+    all.sort();
+    all
+}
+
+#[tokio::test]
+async fn handle_writes_go_through_the_multimap() {
+    let name = unique("smm");
+    let map = set(&name).await;
+    let values = map.get("0").unwrap();
+    assert!(values.insert("1").await.unwrap());
+    assert!(!values.insert("1").await.unwrap());
+    assert_eq!(values.extend(["2", "3", "1"]).await.unwrap(), 2);
+    assert_eq!(map.key_len().await.unwrap(), 1);
+    assert!(map.contains_key("0").await.unwrap());
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"0\""]).await, ":1\r\n");
+    assert_eq!(sorted(&map, "0").await, ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn handle_remove_drops_the_key() {
+    let name = unique("smm");
+    let map = set(&name).await;
+    map.extend("0", ["1", "2", "3"]).await.unwrap();
+    let values = map.get("0").unwrap();
+    assert!(values.remove("1").await.unwrap());
+    assert!(!values.remove("1").await.unwrap());
+    assert!(values.remove_values(&["2"]).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 1);
+    assert!(values.remove_values(&["3"]).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 0);
+    assert!(!values.remove_values(&["3"]).await.unwrap());
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"0\""]).await, ":0\r\n");
+
+    map.insert("1", "x").await.unwrap();
+    assert!(map.get("1").unwrap().remove("x").await.unwrap());
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"1\""]).await, ":0\r\n");
+}
+
+#[tokio::test]
+async fn handle_clear_removes_the_key() {
+    let map = set(&unique("smm")).await;
+    map.extend("1", ["01", "02", "03"]).await.unwrap();
+    map.get("1").unwrap().clear().await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 0);
+    assert_eq!(map.get("1").unwrap().len().await.unwrap(), 0);
+    assert_eq!(map.key_len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn handle_reads() {
+    let map = set(&unique("smm")).await;
+    map.extend("1", ["1", "2", "3"]).await.unwrap();
+    let values = map.get("1").unwrap();
+    assert!(values.contains("2").await.unwrap());
+    assert!(!values.contains("9").await.unwrap());
+    assert!(values.contains_all(&["1", "3"]).await.unwrap());
+    assert!(!values.contains_all(&["1", "9"]).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 3);
+    assert!(!values.is_empty().await.unwrap());
+    assert_eq!(sorted_values(&values).await, ["1", "2", "3"]);
+    let mut streamed: Vec<String> = values.iter().try_collect().await.unwrap();
+    streamed.sort();
+    assert_eq!(streamed, ["1", "2", "3"]);
+    assert!(values.retain(&["1", "2"]).await.unwrap());
+    assert!(!values.retain(&["1", "2"]).await.unwrap());
+    assert_eq!(sorted(&map, "1").await, ["1", "2"]);
+}
+
+#[tokio::test]
+async fn handle_empty_inputs() {
+    let name = unique("smm");
+    let map = set(&name).await;
+    let values = map.get("k").unwrap();
+    let none: [&str; 0] = [];
+    assert_eq!(values.extend(none).await.unwrap(), 0);
+    assert_eq!(raw_command(&["HEXISTS", &name, "\"k\""]).await, ":0\r\n");
+    assert_eq!(map.key_len().await.unwrap(), 0);
+    let none: &[&str] = &[];
+    assert!(!values.remove_values(none).await.unwrap());
+    assert!(values.contains_all(none).await.unwrap());
+}
+
+#[tokio::test]
+async fn index_writes_can_leave_an_empty_key_like_redisson() {
+    let map = set(&unique("smm")).await;
+    map.insert("k", "a").await.unwrap();
+    assert_eq!(
+        map.get("k")
+            .unwrap()
+            .as_set()
+            .pop()
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
+    assert!(!map.contains_key("k").await.unwrap());
+    assert!(map.get_all("k").await.unwrap().is_empty());
+    let entries: Vec<(String, String)> = map.iter().try_collect().await.unwrap();
+    assert!(entries.is_empty());
+    assert_eq!(map.key_len().await.unwrap(), 1);
+    map.remove_all("k").await.unwrap();
+    assert_eq!(map.key_len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn as_set_reaches_the_raw_set() {
+    let name = unique("smm");
+    let map = set(&name).await;
+    map.extend("key", ["a", "b"]).await.unwrap();
+    map.extend("other", ["b", "c"]).await.unwrap();
+    let values = map.get("key").unwrap();
+    let other = map.get("other").unwrap();
+    assert_eq!(values.name(), values_key(&name, "IKm9EBQhlzpVIBxUXDHBWw"));
+    let mut union = values.as_set().union(&[other.as_set()]).await.unwrap();
+    union.sort();
+    assert_eq!(union, ["a", "b", "c"]);
+}

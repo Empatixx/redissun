@@ -73,6 +73,11 @@ pub mod map_cache_native {
     };
 }
 
+/// The value handles [`ListMultimap::get`] and [`SetMultimap::get`] return.
+pub mod multimap {
+    pub use crate::collections::multimap::values::{ListMultimapValues, SetMultimapValues};
+}
+
 /// The builders [`SortedSet`] methods return.
 pub mod sorted_set {
     pub use crate::collections::sorted_set::Extend;

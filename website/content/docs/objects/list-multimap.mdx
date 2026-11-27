@@ -55,6 +55,28 @@ let pairs: Vec<(String, String)> = tags.iter().try_collect().await?;
 
 The keys are read with `HSCAN … COUNT n`, `n` being the page size (10 by default, as in Redisson; `0` means 10). The values of each key are read with `LRANGE` in pages of 100. Keys without values yield nothing in `iter` and `values`. Like every scan, a stream may miss or repeat entries that change while it runs.
 
+## Values of one key
+
+`get(&k)` returns a `ListMultimapValues` handle on the list of the key, Redisson's `get(key)`. It is lazy: building it sends nothing, and each method is one request.
+
+```rust
+let post = tags.get("post-1")?;
+post.push("tokio").await?;
+let first_two = post.range(..2).await?;
+```
+
+| Method | Redisson | Through |
+|---|---|---|
+| `push(&v)`, `extend(values)` | `add`, `addAll` | the multimap's `insert`/`extend`, so a new key joins the hash |
+| `remove_value(&v)`, `remove_values(values)` | `remove`, `removeAll` | the multimap scripts; the key goes with its last value |
+| `clear()` | `delete` | `remove_many` of the key |
+| `get(i)`, `range(r)`, `to_vec()`, `len()`, `is_empty()`, `contains(&v)`, `position(&v)`, `rposition(&v)`, `contains_all(values)`, `iter()` | `get`, `range`, `readAll`, `size`, `isEmpty`, `contains`, `indexOf`, `lastIndexOf`, `containsAll`, `iterator` | reads of the list |
+| `set`, `replace`, `insert`, `insert_many`, `insert_before`, `insert_after`, `remove(i)`, `pop`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values` | as on [`Vec`](./vec) | writes to the list only |
+
+`as_vec()` returns the raw [`Vec`](./vec) on the values key for the rest of `RList` (`sort`, moves, …). Writes through it do not add the key to the multimap, as with Redisson's inherited `RList` methods. `name()` is the name of the list.
+
+The index writes (`pop`, `remove(i)`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values`) do not touch the hash, as in Redisson. When one empties the list, `contains_key` is `false`, `get_all` is empty and the streams skip the key, but `key_len` and `keys` count it until `remove_all` or `remove_many`. Redisson's `removeAll` script counts a value as removed only when it occurred exactly once, and redissun keeps that.
+
 ## Object methods
 
 The `Object` methods cover the hash and the list of every key, with Redisson's scripts:
@@ -76,4 +98,4 @@ Redisson's layout:
 - A hash at the name maps each encoded key to `Hash.hash128toBase64` of the encoded key (a 22-character string, stored as is, not encoded). With `JsonCodec` the key `"key"` maps to `IKm9EBQhlzpVIBxUXDHBWw`.
 - The values of a key live in the list `{name}:<hash>`, or `name:<hash>` when the name already has a `{`. So every key of the multimap is in the slot of the name, also in a cluster.
 
-`remove_from_all_keys` never removes a key from the hash, as in Redisson, so a key whose list it emptied still counts in `key_len` and `keys_to_vec` until `remove_all` or `remove_many`; `contains_key` is `false` and `get_all` is empty for it.
+`remove_from_all_keys` and the index writes of the handle never remove a key from the hash, as in Redisson, so a key whose list it emptied still counts in `key_len` and `keys_to_vec` until `remove_all` or `remove_many`; `contains_key` is `false` and `get_all` is empty for it.

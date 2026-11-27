@@ -4,6 +4,7 @@
 
 pub(crate) mod scripts;
 pub(crate) mod stream;
+pub(crate) mod values;
 
 use crate::codec::Codec;
 use crate::collections::map::key_hash::hash128_base64;
@@ -55,12 +56,12 @@ pub(crate) fn values_name(name: &str, key_hash: &str) -> String {
 }
 
 /// One key of a multimap: the hash, the values key and the key's encoding.
+#[derive(Clone)]
 pub(crate) struct Slot {
     pub(crate) map: Key,
     pub(crate) values: Key,
     pub(crate) encoded_key: Bytes,
     pub(crate) key_hash: String,
-    #[expect(dead_code, reason = "the value handles (Task 5) read the mode")]
     pub(crate) mode: Mode,
 }
 
@@ -225,17 +226,21 @@ impl<C: Codec> Ops<'_, C> {
 
     /// `putAll(K, Iterable)`: whether any value was added. No values send nothing, so no key is left without values.
     pub(crate) async fn extend(&self, slot: &Slot, values: Vec<Bytes>) -> Result<bool> {
+        Ok(self.extend_count(slot, values).await? > 0)
+    }
+
+    /// `putAll(K, Iterable)` with the script's count: the list length after `RPUSH`, or the values `SADD` added. No values send nothing.
+    pub(crate) async fn extend_count(&self, slot: &Slot, values: Vec<Bytes>) -> Result<usize> {
         if values.is_empty() {
-            return Ok(false);
+            return Ok(0);
         }
         let core = &self.key.core;
         let keys = Self::slot_keys(slot);
         let args = Self::key_and_values(slot, values);
-        let added: i64 = match self.shape {
-            Shape::List => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await?,
-            Shape::Set => core.eval(&scripts::SET_PUT_ALL, keys, args).await?,
-        };
-        Ok(added > 0)
+        match self.shape {
+            Shape::List => core.eval_once(&scripts::LIST_PUT_ALL, keys, args).await,
+            Shape::Set => core.eval(&scripts::SET_PUT_ALL, keys, args).await,
+        }
     }
 
     /// `remove(K, V)`: whether the value was there; the key goes with its last value.
@@ -707,6 +712,22 @@ macro_rules! multimap_type {
             pub async fn clear(&self) -> $crate::error::Result<()> {
                 self.ops().delete().await?;
                 Ok(())
+            }
+
+            /// The values of the key `k` as a lazy handle, Redisson's `get(key)`. Building it sends nothing; it fails only when the key cannot be encoded.
+            pub fn get<Q>(
+                &self,
+                k: &Q,
+            ) -> $crate::error::Result<$crate::collections::multimap::values::$values<V, C>>
+            where
+                K: ::std::borrow::Borrow<Q>,
+                Q: ::serde::Serialize + ?Sized + Sync,
+            {
+                let slot = self.ops().slot(k)?;
+                Ok($crate::collections::multimap::values::$values::new(
+                    slot,
+                    self.codec.clone(),
+                ))
             }
 
             $crate::collections::map::key_hash::per_key_objects!();
