@@ -3,6 +3,7 @@
 mod common;
 
 use common::{client, connect_with, raw_command, unique};
+use futures::TryStreamExt;
 use redissun::{Client, JsonCodec, ListMultimapCache, SetMultimapCache};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -277,6 +278,63 @@ macro_rules! cache_tests {
         }
 
         #[tokio::test]
+        async fn cache_handle_push_registers_the_key() {
+            let map = $factory(&client().await, &unique("mmc"));
+            map.get("new").unwrap().add_one("a").await;
+            assert_eq!(map.key_len().await.unwrap(), 1);
+            assert_eq!(map.keys_to_vec().await.unwrap(), ["new"]);
+            assert_eq!(map.get_all("new").await.unwrap(), ["a"]);
+        }
+
+        #[tokio::test]
+        async fn cache_handle_clear_removes_a_key_without_ttl() {
+            let name = unique("mmc");
+            let map = $factory(&client().await, &name);
+            map.extend("1", ["a", "b"]).await.unwrap();
+            map.get("1").unwrap().clear().await.unwrap();
+            assert!(!map.contains_key("1").await.unwrap());
+            assert_eq!(raw_command(&["HEXISTS", &name, "\"1\""]).await, ":0\r\n");
+            assert_eq!(map.key_len().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn cache_handle_clear_drops_the_score() {
+            let name = unique("mmc");
+            let map = $factory(&client().await, &name);
+            map.insert("1", "a").await.unwrap();
+            assert!(map.expire_key("1", Duration::from_secs(60)).await.unwrap());
+            map.get("1").unwrap().clear().await.unwrap();
+            assert_eq!(zscore(&ttl_set(&name), "\"1\"").await, None);
+        }
+
+        #[tokio::test]
+        async fn cache_handle_writes_ignore_an_expired_key() {
+            let map = $factory(&client_without_clean_up().await, &unique("mmc"));
+            map.extend("1", ["a", "b"]).await.unwrap();
+            assert!(map
+                .expire_key("1", Duration::from_millis(200))
+                .await
+                .unwrap());
+            sleep(Duration::from_millis(400)).await;
+            let values = map.get("1").unwrap();
+            assert!(!values.remove_one("a").await);
+            assert!(!values.remove_all_of(&["a", "b"]).await);
+            assert!(!values.retain_of(&["x"]).await);
+            map.expire_key("1", Duration::ZERO).await.unwrap();
+            assert_eq!(values.size().await, 2);
+        }
+
+        #[tokio::test]
+        async fn cache_handle_empty_inputs() {
+            let map = $factory(&client().await, &unique("mmc"));
+            map.insert("1", "a").await.unwrap();
+            let values = map.get("1").unwrap();
+            assert!(values.contains_all_of(&[]).await);
+            assert!(!values.remove_all_of(&[]).await);
+            assert_eq!(values.size().await, 1);
+        }
+
+        #[tokio::test]
         async fn expire_and_persist_cover_the_ttl_zset() {
             let name = unique("mmc");
             let map = $factory(&client().await, &name);
@@ -295,15 +353,80 @@ macro_rules! cache_tests {
 }
 
 mod list {
-    base_multimap_cache_tests!(
-        super::list_cache,
-        handle = #[ignore = "Task 12"]
-    );
+    base_multimap_cache_tests!(super::list_cache);
     cache_tests!(super::list_cache, "redissun_list_multimap_ttl");
+
+    #[tokio::test]
+    async fn cache_handle_reads_respect_the_ttl() {
+        let map = list_cache(&client_without_clean_up().await, &unique("mmc"));
+        map.extend("1", ["1", "2", "1"]).await.unwrap();
+        let values = map.get("1").unwrap();
+        assert_eq!(values.get(0).await.unwrap().as_deref(), Some("1"));
+        assert_eq!(values.get(5).await.unwrap(), None);
+        assert_eq!(values.range(..).await.unwrap(), ["1", "2", "1"]);
+        assert_eq!(values.range(1..=2).await.unwrap(), ["2", "1"]);
+        let (start, end) = (2, 1);
+        assert!(values.range(start..end).await.unwrap().is_empty());
+        assert_eq!(values.position("1").await.unwrap(), Some(0));
+        assert_eq!(values.rposition("1").await.unwrap(), Some(2));
+        assert_eq!(values.rposition("3").await.unwrap(), None);
+        assert!(values.contains("2").await.unwrap());
+        assert_eq!(values.to_vec().await.unwrap(), ["1", "2", "1"]);
+        let all: Vec<String> = values.iter().try_collect().await.unwrap();
+        assert_eq!(all, ["1", "2", "1"]);
+        assert_eq!(values.len().await.unwrap(), 3);
+        assert!(map
+            .expire_key("1", Duration::from_millis(200))
+            .await
+            .unwrap());
+        sleep(Duration::from_millis(400)).await;
+        assert_eq!(values.get(0).await.unwrap(), None);
+        assert!(values.range(..).await.unwrap().is_empty());
+        assert_eq!(values.position("1").await.unwrap(), None);
+        assert_eq!(values.rposition("1").await.unwrap(), None);
+        assert!(!values.contains("2").await.unwrap());
+        assert!(values.to_vec().await.unwrap().is_empty());
+        let all: Vec<String> = values.iter().try_collect().await.unwrap();
+        assert!(all.is_empty());
+        assert_eq!(values.len().await.unwrap(), 0);
+        assert!(values.is_empty().await.unwrap());
+        assert_eq!(values.remove_value_all("1").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_handle_iter_reads_long_lists_in_pages() {
+        let map = list_cache(&client().await, &unique("mmc"));
+        let input: Vec<String> = (0..250).map(|i| i.to_string()).collect();
+        map.extend("1", input.iter().map(String::as_str))
+            .await
+            .unwrap();
+        assert!(map.expire_key("1", Duration::from_secs(60)).await.unwrap());
+        let all: Vec<String> = map.get("1").unwrap().iter().try_collect().await.unwrap();
+        assert_eq!(all, input);
+    }
+
+    #[tokio::test]
+    async fn cache_handle_remove_value_n_counts() {
+        let map = list_cache(&client().await, &unique("mmc"));
+        map.extend("1", ["x", "x", "x"]).await.unwrap();
+        let values = map.get("1").unwrap();
+        assert_eq!(values.remove_value_n("x", 0).await.unwrap(), 0);
+        assert_eq!(values.remove_value_n("x", 2).await.unwrap(), 2);
+        assert_eq!(values.remove_value_all("x").await.unwrap(), 1);
+        assert_eq!(values.remove_value_all("x").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_handle_remove_values_with_duplicates_reports_true() {
+        let map = list_cache(&client().await, &unique("mmc"));
+        map.extend("1", ["x", "x", "y"]).await.unwrap();
+        let values = map.get("1").unwrap();
+        assert!(values.remove_values(["x"]).await.unwrap());
+        assert_eq!(values.to_vec().await.unwrap(), ["y"]);
+    }
 
     // Redisson: RedissonListMultimapCacheTest.testValues
     #[tokio::test]
-    #[ignore = "Task 12"]
     async fn redisson_values() {
         let multimap = list_cache(&client().await, &unique("test"));
         for v in ["1", "2", "3", "3"] {
@@ -325,15 +448,68 @@ mod list {
 }
 
 mod set {
-    base_multimap_cache_tests!(
-        super::set_cache,
-        handle = #[ignore = "Task 12"]
-    );
+    base_multimap_cache_tests!(super::set_cache);
     cache_tests!(super::set_cache, "redissun_set_multimap_ttl");
+
+    #[tokio::test]
+    async fn cache_handle_reads_respect_the_ttl() {
+        let map = set_cache(&client_without_clean_up().await, &unique("mmc"));
+        map.extend("1", ["1", "2", "3"]).await.unwrap();
+        let values = map.get("1").unwrap();
+        assert!(values.contains("2").await.unwrap());
+        assert!(values.contains_all(&["1", "3"]).await.unwrap());
+        let mut all = values.to_vec().await.unwrap();
+        all.sort();
+        assert_eq!(all, ["1", "2", "3"]);
+        assert_eq!(values.len().await.unwrap(), 3);
+        assert!(map
+            .expire_key("1", Duration::from_millis(200))
+            .await
+            .unwrap());
+        sleep(Duration::from_millis(400)).await;
+        assert!(!values.contains("2").await.unwrap());
+        assert!(!values.contains_all(&["1"]).await.unwrap());
+        assert!(values.to_vec().await.unwrap().is_empty());
+        let all: Vec<String> = values.iter().try_collect().await.unwrap();
+        assert!(all.is_empty());
+        assert_eq!(values.len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_handle_iter_reads_big_sets_with_sscan() {
+        let map = set_cache(&client().await, &unique("mmc"));
+        let input: Vec<String> = (0..250).map(|i| i.to_string()).collect();
+        map.extend("1", input.iter().map(String::as_str))
+            .await
+            .unwrap();
+        assert!(map.expire_key("1", Duration::from_secs(60)).await.unwrap());
+        let mut all: Vec<String> = map.get("1").unwrap().iter().try_collect().await.unwrap();
+        all.sort();
+        all.dedup();
+        let mut expected = input.clone();
+        expected.sort();
+        assert_eq!(all, expected);
+    }
+
+    // Redisson: RedissonSetMultimapCacheTest.testIteratorAsync
+    #[tokio::test]
+    async fn redisson_iterator_async() {
+        let multimap = set_cache(&client().await, &unique("test"));
+        for v in ["1", "2", "3", "3"] {
+            multimap.insert("1", v).await.unwrap();
+        }
+        let values: std::collections::HashSet<String> = multimap
+            .get("1")
+            .unwrap()
+            .iter()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(values.len(), 3);
+    }
 
     // Redisson: RedissonSetMultimapCacheTest.testValues
     #[tokio::test]
-    #[ignore = "Task 12"]
     async fn redisson_values() {
         let multimap = set_cache(&client().await, &unique("test"));
         for v in ["1", "2", "3", "3"] {

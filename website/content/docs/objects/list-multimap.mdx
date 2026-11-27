@@ -65,15 +65,16 @@ post.push("tokio").await?;
 let first_two = post.range(..2).await?;
 ```
 
-| Method | Redisson | Through |
-|---|---|---|
-| `push(&v)`, `extend(values)` | `add`, `addAll` | the multimap's `insert`/`extend`, so a new key joins the hash |
-| `remove_value(&v)`, `remove_values(values)` | `remove`, `removeAll` | the multimap scripts; the key goes with its last value |
-| `clear()` | `delete` | `remove_many` of the key |
-| `get(i)`, `range(r)`, `to_vec()`, `len()`, `is_empty()`, `contains(&v)`, `position(&v)`, `rposition(&v)`, `contains_all(values)`, `iter()` | `get`, `range`, `readAll`, `size`, `isEmpty`, `contains`, `indexOf`, `lastIndexOf`, `containsAll`, `iterator` | reads of the list |
-| `set`, `replace`, `insert`, `insert_many`, `insert_before`, `insert_after`, `remove(i)`, `pop`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values` | as on [`Vec`](./vec) | writes to the list only |
+| Method | Redisson | Through | On a `ListMultimapCache` |
+|---|---|---|---|
+| `push(&v)`, `extend(values)` | `add`, `addAll` | the multimap's `insert`/`extend`, so a new key joins the hash | the same; Redisson's cache handle writes the list only |
+| `remove_value(&v)`, `remove_values(values)` | `remove`, `removeAll` | the multimap scripts; the key goes with its last value | Redisson's TTL-aware scripts: nothing for an expired key, and the key stays in the hash |
+| `clear()` | `delete` | `remove_many` of the key | the multimap's `remove_all`, which also drops the key's TTL; Redisson's deletes nothing for a key without a TTL |
+| `get(i)`, `range(r)`, `to_vec()`, `len()`, `is_empty()`, `contains(&v)`, `position(&v)`, `rposition(&v)`, `contains_all(values)`, `iter()` | `get`, `range`, `readAll`, `size`, `isEmpty`, `contains`, `indexOf`, `lastIndexOf`, `containsAll`, `iterator` | reads of the list | Redisson's TTL-aware scripts: an expired key reads as empty; `iter` reads pages of 100 with `range` |
+| `remove_value_n`, `remove_value_all`, `retain_values` | `remove(value, count)`, `removeAll`, `retainAll` | writes to the list only | Redisson's TTL-aware scripts: nothing for an expired key |
+| `set`, `replace`, `insert`, `insert_many`, `insert_before`, `insert_after`, `remove(i)`, `pop`, `trim` | as on [`Vec`](./vec) | writes to the list only | the same; they do not check the TTL, as in Redisson |
 
-`as_vec()` returns the raw [`Vec`](./vec) on the values key for the rest of `RList` (`sort`, moves, …). Writes through it do not add the key to the multimap, as with Redisson's inherited `RList` methods. `name()` is the name of the list.
+`as_vec()` returns the raw [`Vec`](./vec) on the values key for the rest of `RList` (`sort`, moves, …). Writes through it do not add the key to the multimap or check its TTL, as with Redisson's inherited `RList` methods. `name()` is the name of the list.
 
 The index writes (`pop`, `remove(i)`, `trim`, `remove_value_n`, `remove_value_all`, `retain_values`) do not touch the hash, as in Redisson. When one empties the list, `contains_key` is `false`, `get_all` is empty and the streams skip the key, but `key_len` and `keys` count it until `remove_all` or `remove_many`. `remove_values` reports `true` and drops the key when it empties the list, also for a value that occurred several times. Redisson's `removeAll` script counts a value only when it occurred exactly once, so it reports `false` there and keeps the key in the hash; redissun fixes that.
 
@@ -133,6 +134,7 @@ carts.expire_key("user-1", Duration::from_secs(600)).await?; // true: the key ex
 - Reads of one key hide an expired key at once: `get_all`, `contains_key`, `contains_entry` and the handle from `get`, and also `contains_value`. `len`, `key_len`, `keys_to_vec`, `remove_from_all_keys` and the streams count an expired key until the clean-up task deletes it, as Redisson's unoverridden `size`, `keySize` and iterators do.
 - Writes to a live key keep its deadline. A key that is new to the hash starts without one: redissun's put scripts drop a stale score left by `remove`, `remove_many` or `remove_from_all_keys`, which Redisson's do not, so in Redisson such a key can read as expired at once.
 - `remove_all` drops the key's score, as in Redisson.
+- The handle from `get` checks the TTL as the table in [Values of one key](#values-of-one-key) shows. Where Redisson's handle scripts are wrong, redissun's differ: `rposition` reads the list (Redisson's `lastIndexOf` script reads the ttl zset and fails with `WRONGTYPE`), `remove_value_n` and `remove_value_all` return how many values went (Redisson's script returns only whether any did), and `remove_values` counts a value that occurred several times, as on the plain handle.
 - A background task deletes expired keys, Redisson's `MultimapEvictionTask`: each run takes up to 100 keys whose deadline passed and deletes their lists, their fields and their scores. It starts when `client.list_multimap_cache(name)` is first called for the name (one task per name and client), first runs after [`eviction_interval`](/docs/guides/configuration) (5 s by default), and adapts its pause between that interval and 30 minutes, as Redisson does. It stops with the client. Every client runs its own task and there is no lock between them, as in Redisson; each run is one atomic script, so that is harmless. redissun's script builds the list names like `suffix_name`, so a name with a hash tag, such as `{t}:carts`, is cleaned too; Redisson's misses its lists and fails on a cluster.
 - `Object::del`, `expire` and `persist` cover the ttl zset too, with Redisson's scripts. `rename` renames the ttl zset with the rest, so key TTLs survive it; Redisson's cache does not, and drops them.
 

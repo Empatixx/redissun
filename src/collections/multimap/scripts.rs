@@ -847,3 +847,342 @@ pub(super) static CACHE_EVICT: LazyLock<Lua> = LazyLock::new(|| {
         "return #expiredKeys;",
     ))
 });
+
+/// `RedissonListMultimapValues.sizeAsync`. KEYS: ttl zset, values. ARGV: now, key.
+pub(super) static LV_SIZE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "return redis.call('llen', KEYS[2]);",
+    ))
+});
+
+/// `RedissonListMultimapValues.removeAsync(o, count)`. KEYS: ttl zset, values. ARGV: now, count, key, value.
+///
+/// Deviation from Redisson (D7): returns the `LREM` count instead of `> 0 and 1 or 0`, so `remove_value_n` and `remove_value_all` return how many went. The data effect is unchanged.
+pub(super) static LV_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[3]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "return redis.call('lrem', KEYS[2], ARGV[2], ARGV[4]);",
+    ))
+});
+
+/// `RedissonListMultimapValues.containsAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
+pub(super) static LV_CONTAINS_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "local items = redis.call('lrange', KEYS[2], 0, -1);",
+        "for i = 1, #items, 1 do ",
+        "for j = #ARGV, 3, -1 do ",
+        "if ARGV[j] == items[i] ",
+        "then table.remove(ARGV, j) end ",
+        "end; ",
+        "end;",
+        "return #ARGV == 2 and 1 or 0; ",
+    ))
+});
+
+/// `RedissonListMultimapValues.removeAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
+///
+/// Deviation from Redisson (D10, as in `LIST_VALUES_REMOVE_ALL`): `lrem(...) == 1` → `lrem(...) > 0`. `LREM` with count 0 returns how many it removed, so Redisson reports `false` for a value that occurred more than once.
+pub(super) static LV_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "local v = 0 ",
+        "for i = 3, #ARGV, 1 do ",
+        "if redis.call('lrem', KEYS[2], 0, ARGV[i]) > 0 ",
+        "then v = 1 end ",
+        "end ",
+        "return v ",
+    ))
+});
+
+/// `RedissonListMultimapValues.retainAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
+pub(super) static LV_RETAIN_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "local changed = 0; ",
+        "local s = redis.call('lrange', KEYS[2], 0, -1); ",
+        "local i = 1; ",
+        "while i <= #s do ",
+        "local element = s[i]; ",
+        "local isInAgrs = false; ",
+        "for j = 3, #ARGV, 1 do ",
+        "if ARGV[j] == element then ",
+        "isInAgrs = true; ",
+        "break; ",
+        "end; ",
+        "end; ",
+        "if isInAgrs == false then ",
+        "redis.call('lrem', KEYS[2], 0, element); ",
+        "changed = 1; ",
+        "end; ",
+        "i = i + 1; ",
+        "end; ",
+        "return changed; ",
+    ))
+});
+
+/// `RedissonListMultimapValues.getAsync(index)`. KEYS: ttl zset, values. ARGV: now, index, key.
+pub(super) static LV_GET: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[3]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore); ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return nil;",
+        "end; ",
+        "return redis.call('lindex', KEYS[2], ARGV[2]);",
+    ))
+});
+
+/// `RedissonListMultimapValues.indexOfAsync`. KEYS: ttl zset, values. ARGV: now, key, value.
+pub(super) static LV_INDEX_OF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore); ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return -1;",
+        "end; ",
+        "local items = redis.call('lrange', KEYS[2], 0, -1); ",
+        "for i=1,#items do ",
+        "if items[i] == ARGV[3] then ",
+        "return i - 1; ",
+        "end; ",
+        "end; ",
+        "return -1;",
+    ))
+});
+
+/// `RedissonListMultimapValues.lastIndexOfAsync`. KEYS: ttl zset, values. ARGV: now, key, value.
+///
+/// Deviation from Redisson (D6): `lrange KEYS[1]` → `KEYS[2]` and `ARGV[1]` → `ARGV[3]`. Redisson's script reads the ttl zset as a list (`WRONGTYPE`) and compares the timestamp instead of the value.
+pub(super) static LV_LAST_INDEX_OF: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore); ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return -1;",
+        "end; ",
+        "local items = redis.call('lrange', KEYS[2], 0, -1) ",
+        "for i = #items, 1, -1 do ",
+        "if items[i] == ARGV[3] then ",
+        "return i - 1 ",
+        "end ",
+        "end ",
+        "return -1",
+    ))
+});
+
+/// `RedissonListMultimapValues.rangeAsync(from, to)`. KEYS: ttl zset, values. ARGV: now, key, start, stop.
+pub(super) static LV_RANGE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return {};",
+        "end; ",
+        "return redis.call('lrange', KEYS[2], ARGV[3], ARGV[4]);",
+    ))
+});
+
+/// `RedissonSetMultimapValues.sizeAsync`. KEYS: ttl zset, values. ARGV: now, key.
+pub(super) static SV_SIZE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "return redis.call('scard', KEYS[2]);",
+    ))
+});
+
+/// `RedissonSetMultimapValues.containsAsync`. KEYS: ttl zset, values. ARGV: now, key, value.
+pub(super) static SV_CONTAINS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "return redis.call('sismember', KEYS[2], ARGV[3]);",
+    ))
+});
+
+/// `RedissonSetMultimapValues.scanIteratorAsync`. KEYS: ttl zset, values. ARGV: now, cursor, key, (pattern,) count.
+pub(super) static SV_SCAN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[3]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return {0, {}};",
+        "end;",
+        "local res; ",
+        "if (#ARGV == 5) then ",
+        "res = redis.call('sscan', KEYS[2], ARGV[2], 'match', ARGV[4], 'count', ARGV[5]); ",
+        "else ",
+        "res = redis.call('sscan', KEYS[2], ARGV[2], 'count', ARGV[4]); ",
+        "end;",
+        "return res;",
+    ))
+});
+
+/// `RedissonSetMultimapValues.readAllAsync`. KEYS: ttl zset, values. ARGV: now, key.
+pub(super) static SV_READ_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return {};",
+        "end; ",
+        "return redis.call('smembers', KEYS[2]);",
+    ))
+});
+
+/// `RedissonSetMultimapValues.removeAsync`. KEYS: ttl zset, values. ARGV: now, key, value.
+pub(super) static SV_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "return redis.call('srem', KEYS[2], ARGV[3]) > 0 and 1 or 0;",
+    ))
+});
+
+/// `RedissonSetMultimapValues.containsAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
+pub(super) static SV_CONTAINS_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "local s = redis.call('smembers', KEYS[2]);",
+        "for i = 1, #s, 1 do ",
+        "for j = #ARGV, 3, -1 do ",
+        "if ARGV[j] == s[i] ",
+        "then table.remove(ARGV, j) end ",
+        "end; ",
+        "end;",
+        "return #ARGV == 2 and 1 or 0; ",
+    ))
+});
+
+/// `RedissonSetMultimapValues.retainAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
+pub(super) static SV_RETAIN_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "local changed = 0 ",
+        "local s = redis.call('smembers', KEYS[2]) ",
+        "local i = 1 ",
+        "while i <= #s do ",
+        "local element = s[i] ",
+        "local isInAgrs = false ",
+        "for j = 3, #ARGV, 1 do ",
+        "if ARGV[j] == element then ",
+        "isInAgrs = true ",
+        "break ",
+        "end ",
+        "end ",
+        "if isInAgrs == false then ",
+        "redis.call('SREM', KEYS[2], element) ",
+        "changed = 1 ",
+        "end ",
+        "i = i + 1 ",
+        "end ",
+        "return changed ",
+    ))
+});
+
+/// `RedissonSetMultimapValues.removeAllAsync`. KEYS: ttl zset, values. ARGV: now, key, values….
+pub(super) static SV_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local expireDate = 92233720368547758; ",
+        "local expireDateScore = redis.call('zscore', KEYS[1], ARGV[2]); ",
+        "if expireDateScore ~= false then ",
+        "expireDate = tonumber(expireDateScore) ",
+        "end; ",
+        "if expireDate <= tonumber(ARGV[1]) then ",
+        "return 0;",
+        "end; ",
+        "local v = 0 ",
+        "for i = 3, #ARGV, 1 do ",
+        "if redis.call('srem', KEYS[2], ARGV[i]) == 1 ",
+        "then v = 1 end ",
+        "end ",
+        "return v ",
+    ))
+});

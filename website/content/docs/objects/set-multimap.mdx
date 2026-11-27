@@ -65,15 +65,15 @@ post.insert("tokio").await?;
 let has_both = post.contains_all(&["rust", "tokio"]).await?;
 ```
 
-| Method | Redisson | Through |
-|---|---|---|
-| `insert(&v)`, `extend(values)` | `add`, `addAll` | the multimap's `insert`/`extend`, so a new key joins the hash; `extend` returns how many values were new |
-| `remove(&v)`, `remove_values(&[&v, ..])` | `remove`, `removeAll` | the multimap scripts; the key goes with its last value |
-| `clear()` | `delete` | `remove_many` of the key |
-| `contains(&v)`, `contains_all(&[&v, ..])`, `len()`, `is_empty()`, `to_vec()`, `iter()` | `contains`, `containsAll`, `size`, `isEmpty`, `readAll`, `iterator` | reads of the set |
-| `retain(&[&v, ..])` | `retainAll` | writes to the set only |
+| Method | Redisson | Through | On a `SetMultimapCache` |
+|---|---|---|---|
+| `insert(&v)`, `extend(values)` | `add`, `addAll` | the multimap's `insert`/`extend`, so a new key joins the hash; `extend` returns how many values were new | the same; Redisson's cache handle writes the set only |
+| `remove(&v)`, `remove_values(&[&v, ..])` | `remove`, `removeAll` | the multimap scripts; the key goes with its last value | Redisson's TTL-aware scripts: nothing for an expired key, and the key stays in the hash |
+| `clear()` | `delete` | `remove_many` of the key | the multimap's `remove_all`, which also drops the key's TTL; Redisson's deletes nothing for a key without a TTL |
+| `contains(&v)`, `contains_all(&[&v, ..])`, `len()`, `is_empty()`, `to_vec()`, `iter()` | `contains`, `containsAll`, `size`, `isEmpty`, `readAll`, `iterator` | reads of the set | Redisson's TTL-aware scripts: an expired key reads as empty; `iter` is Redisson's script around `SSCAN … COUNT 10` |
+| `retain(&[&v, ..])` | `retainAll` | writes to the set only | Redisson's TTL-aware script: nothing for an expired key |
 
-`as_set()` returns the raw [`HashSet`](./hash-set) on the values key for the rest of `RSet` (set algebra, `pop`, `random`, `move_to`, …). Writes through it do not add the key to the multimap, as with Redisson's inherited `RSet` methods. `name()` is the name of the set.
+`as_set()` returns the raw [`HashSet`](./hash-set) on the values key for the rest of `RSet` (set algebra, `pop`, `random`, `move_to`, …). Writes through it do not add the key to the multimap or check its TTL, as with Redisson's inherited `RSet` methods. `name()` is the name of the set.
 
 `retain` and writes through `as_set()` do not touch the hash, as in Redisson. When one empties the set, `contains_key` is `false`, `get_all` is empty and the streams skip the key, but `key_len` and `keys` count it until `remove_all` or `remove_many`.
 
@@ -133,6 +133,7 @@ carts.expire_key("user-1", Duration::from_secs(600)).await?; // true: the key ex
 - Reads of one key hide an expired key at once: `get_all`, `contains_key`, `contains_entry` and the handle from `get`, and also `contains_value`. `len`, `key_len`, `keys_to_vec`, `remove_from_all_keys` and the streams count an expired key until the clean-up task deletes it, as Redisson's unoverridden `size`, `keySize` and iterators do.
 - Writes to a live key keep its deadline. A key that is new to the hash starts without one: redissun's put scripts drop a stale score left by `remove`, `remove_many` or `remove_from_all_keys`, which Redisson's do not, so in Redisson such a key can read as expired at once.
 - `remove_all` drops the key's score, as in Redisson.
+- The handle from `get` checks the TTL as the table in [Values of one key](#values-of-one-key) shows.
 - A background task deletes expired keys, Redisson's `MultimapEvictionTask`: each run takes up to 100 keys whose deadline passed and deletes their sets, their fields and their scores. It starts when `client.set_multimap_cache(name)` is first called for the name (one task per name and client), first runs after [`eviction_interval`](/docs/guides/configuration) (5 s by default), and adapts its pause between that interval and 30 minutes, as Redisson does. It stops with the client. Every client runs its own task and there is no lock between them, as in Redisson; each run is one atomic script, so that is harmless. redissun's script builds the set names like `suffix_name`, so a name with a hash tag, such as `{t}:carts`, is cleaned too; Redisson's misses its sets and fails on a cluster.
 - `Object::del`, `expire` and `persist` cover the ttl zset too, with Redisson's scripts. `rename` renames the ttl zset with the rest, so key TTLs survive it; Redisson's cache does not, and drops them.
 
