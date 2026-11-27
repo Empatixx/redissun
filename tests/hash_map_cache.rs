@@ -5528,6 +5528,26 @@ async fn the_clean_up_waits_while_the_migration_runs() {
     );
 }
 
+// The clean-up of a handle created before the first migration call must not drop the deadlines of old entries either.
+#[tokio::test]
+async fn the_clean_up_waits_for_old_data_before_the_migration_starts() {
+    let name = unique("cache");
+    write_0_23_layout(&name, 0).await;
+    // A 0.24 client's clean-up runs several times before anybody migrates.
+    let (_cleaner_client, _cleaner) = cleaner(&name).await;
+    sleep(Duration::from_millis(800)).await;
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(name.clone());
+    let (_, total) = migrate_all(&cache, 1000).await;
+    assert_eq!(total, 4);
+    assert_eq!(cache.get("gone").await.unwrap(), None);
+    assert_eq!(cache.len().await.unwrap(), 3);
+    assert_eq!(cache.get("a").await.unwrap(), Some("x".to_string()));
+    assert_eq!(cache.get("b").await.unwrap(), Some("y".to_string()));
+    assert_eq!(cache.get("c").await.unwrap(), Some("z".to_string()));
+}
+
 // Finding 2: a failed incr_by must not leave ADD_AND_GET's temporary field in the hash.
 #[tokio::test]
 async fn a_failed_incr_by_leaves_no_temporary_field() {

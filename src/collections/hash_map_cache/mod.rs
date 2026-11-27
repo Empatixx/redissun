@@ -210,6 +210,15 @@ fn companions(name: &str) -> std::vec::Vec<String> {
     ]
 }
 
+/// The keys whose existence shows that `name` still holds redissun 0.23 data, all in the slot of the cache: the old options hash and last-access set and, for a name without `{`, the old main hash. The clean-up waits while one exists, as it would drop the deadlines of entries still in the old layout and the migration would then move them as live.
+fn old_layout_keys(name: &str) -> std::vec::Vec<String> {
+    let mut keys = vec![names::old_options(name), names::old_last_access(name)];
+    if !name.contains('{') {
+        keys.push(names::old_main(name));
+    }
+    keys
+}
+
 impl<K, V, C: Codec> HashMapCache<K, V, C> {
     pub(crate) fn new(key: Key, codec: C) -> Self {
         let cache = Self {
@@ -231,6 +240,7 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
             &EVICT,
             keys,
             eviction_arguments,
+            old_layout_keys(cache.key.name()),
         );
         cache
     }
@@ -1215,7 +1225,7 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
     /// while cache.migrate_from_0_23().batch_size(1000).await? > 0 {}
     /// ```
     ///
-    /// Stop the 0.23 clients first, then run the loop once per cache, from one client, before any client of this version uses that cache. Each script is atomic; the whole migration is not: until the loop has returned `0`, part of the data is in each layout, so old and new clients must not mix and new clients should not write to the cache (a 0.23 client cannot read the new layout, and the event formats differ). A live entry keeps its time to live, max idle time and use score; the old last-access set and the size limit move to their new keys in the last call. One script scans at most ten times `batch_size` fields, and a call runs scripts until it has handled `batch_size` old entries or the scan is complete. Every call holds the clean-up latch of the cache for 30 seconds and the last call frees it, so no client of this version deletes expired entries meanwhile (that would drop the deadlines of entries still in the old layout and the migration would move them as live): start the loop right after creating the handle and do not pause between calls. Running the loop again changes nothing: on a name without `{` it returns `0` at once; on a name with a hash tag it scans the whole hash once more and moves nothing. It leaves data that Redisson wrote alone, as that is already in the new layout. See the "Upgrading redissun" guide.
+    /// Stop the 0.23 clients first, then run the loop once per cache, from one client, before any client of this version uses that cache. Each script is atomic; the whole migration is not: until the loop has returned `0`, part of the data is in each layout, so old and new clients must not mix and new clients should not write to the cache (a 0.23 client cannot read the new layout, and the event formats differ). A live entry keeps its time to live, max idle time and use score; the old last-access set and the size limit move to their new keys in the last call. One script scans at most ten times `batch_size` fields, and a call runs scripts until it has handled `batch_size` old entries or the scan is complete. Deleting expired entries meanwhile would drop the deadlines of entries still in the old layout and the migration would move them as live, so the clean-up waits: every call holds the clean-up latch of the cache for 30 seconds and the last call frees it, and before that the clean-up of every client of this version skips its runs while the old options hash, the old last-access set or (for a name without `{`) the old main hash exists, until one check finds none. A name with a hash tag whose 0.23 cache had no size limit keeps its old data in the main hash only, which nothing tells apart from the new layout: for such a cache, start the loop right after creating the handle. Do not pause for more than 30 seconds between calls. Running the loop again changes nothing: on a name without `{` it returns `0` at once; on a name with a hash tag it scans the whole hash once more and moves nothing. It leaves data that Redisson wrote alone, as that is already in the new layout. See the "Upgrading redissun" guide.
     pub fn migrate_from_0_23(&self) -> Migrate<'_, K, V, C> {
         Migrate::new(self)
     }
