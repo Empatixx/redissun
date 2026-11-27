@@ -24,7 +24,25 @@ A `max_burst` of 0 is valid: the bucket then holds one token. A `tokens_per_peri
 
 ## Taking tokens
 
-Coming with `try_acquire`.
+```rust
+let result = gcra.try_acquire().await?;           // one token
+let result = gcra.try_acquire().tokens(3).await?; // three at once
+if result.limited {
+    // refused: nothing was taken
+}
+```
+
+`try_acquire()` takes one token if the limit allows it right now, and `.tokens(n)` takes `n` at once. It never waits. It resolves to a `GcraResult`:
+
+| Field | Meaning |
+|---|---|
+| `limited` | `true` when the request was refused. A refused request takes no tokens. |
+| `max_tokens` | the bucket size, `max_burst + 1` |
+| `available_tokens` | the tokens you can take right now, after this request |
+| `retry_after` | when to try again. `None` when the request was allowed, and also when it asks for more than `max_tokens`, which never passes. |
+| `full_burst_after` | how long until the bucket is full again |
+
+The times are whole seconds, rounded up by the server. They come from the server's clock, so the clocks of your clients do not matter, unlike `RateLimiter`. `.tokens(0)` is `Error::Config`. A limiter without a rate is an `Error::Redis` containing "GCRA rate is not set".
 
 ## Which server
 

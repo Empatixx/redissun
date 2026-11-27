@@ -6,7 +6,8 @@ use crate::object::{suffix_name, Key, Object};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -26,6 +27,78 @@ static SET_RATE: LazyLock<Lua> = LazyLock::new(|| {
         "redis.call('del', KEYS[2]);",
     ))
 });
+
+/// RedissonGcra.tryAcquireAsync
+static TRY_ACQUIRE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local maxBurst = redis.call('hget', KEYS[1], 'maxBurst');",
+        "local rate = redis.call('hget', KEYS[1], 'rate');",
+        "local period = redis.call('hget', KEYS[1], 'period');",
+        "assert(maxBurst ~= false and rate ~= false and period ~= false, 'GCRA rate is not set');",
+        "if tonumber(ARGV[1]) == 1 then ",
+        "return redis.call('GCRA', KEYS[2], maxBurst, rate, period);",
+        "end;",
+        "return redis.call('GCRA', KEYS[2], maxBurst, rate, period, 'TOKENS', ARGV[1]);",
+    ))
+});
+
+/// Port of gcraCommand (redis/src/gcra.c) for servers without `GCRA`, after Redisson's config prefix.
+static TRY_ACQUIRE_LUA: LazyLock<Lua> =
+    LazyLock::new(|| Lua::from_lua("return redis.error_reply('GCRA is not available')"));
+
+/// Reads the reply to the probe `GCRA <name> 0 1 1 TOKENS`, which a server with the command refuses for its missing `TOKENS` value before it looks at the key.
+///
+/// "unknown command" means the server has no `GCRA`. Any other error reply, such as `NOPERM`, counts as no too, since Redisson's script would fail the same way; a failure that is not a server reply is passed on, and nothing is kept.
+fn probe_answer(reply: Result<redis::Value>) -> Result<bool> {
+    match reply {
+        Ok(_) => Ok(true),
+        Err(Error::Redis(message)) => {
+            let message = message.to_lowercase();
+            Ok(!message.contains("unknown command") && message.contains("missing tokens"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the five integers of a `GCRA` reply, Redisson's `GcraResultDecoder`.
+fn decode_result(value: redis::Value) -> Result<GcraResult> {
+    let unexpected =
+        |value: &redis::Value| Error::Redis(format!("unexpected GCRA reply: {value:?}"));
+    let numbers: Option<Vec<i64>> = match &value {
+        redis::Value::Array(items) if items.len() == 5 => items
+            .iter()
+            .map(|item| match item {
+                redis::Value::Int(n) => Some(*n),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    };
+    let Some([limited, max_tokens, available, retry, full_burst]) =
+        numbers.and_then(|numbers| <[i64; 5]>::try_from(numbers).ok())
+    else {
+        return Err(unexpected(&value));
+    };
+    let count = |n: i64| u64::try_from(n).unwrap_or(0);
+    Ok(GcraResult {
+        limited: limited != 0,
+        max_tokens: count(max_tokens),
+        available_tokens: count(available),
+        retry_after: u64::try_from(retry).ok().map(Duration::from_secs),
+        full_burst_after: Duration::from_secs(count(full_burst)),
+    })
+}
+
+/// Redisson's `validateTokens`.
+fn tokens_arg(tokens: u64) -> Result<Bytes> {
+    if tokens == 0 {
+        return Err(Error::Config("tokens must be positive".into()));
+    }
+    if i64::try_from(tokens).is_err() {
+        return Err(Error::Config("tokens must be at most i64::MAX".into()));
+    }
+    Ok(Bytes::from(tokens.to_string()))
+}
 
 /// Redisson's `toSeconds`: the period in decimal seconds, trailing zeros stripped (`250ms` → `"0.25"`).
 fn period_arg(period: Duration) -> String {
@@ -96,6 +169,27 @@ pub struct GcraConfig {
     /// The period of the steady rate.
     #[doc(alias = "getPeriod")]
     pub period: Duration,
+}
+
+/// What one [`Gcra::try_acquire`] got, Redisson's `GcraResult`. The times are whole seconds, rounded up by the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GcraResult {
+    /// Whether the request was refused; a refused request takes no tokens.
+    #[doc(alias = "isLimited")]
+    pub limited: bool,
+    /// The bucket size, `max_burst + 1`.
+    #[doc(alias = "getMaxTokens")]
+    pub max_tokens: u64,
+    /// Tokens that can be taken right now after this request.
+    #[doc(alias = "getAvailableTokens")]
+    pub available_tokens: u64,
+    /// When to try again: `None` when the request was allowed, and also when it was refused because it asks for more than `max_tokens`, which never passes. Redisson's `-1`.
+    #[doc(alias = "getRetryAfterSeconds")]
+    pub retry_after: Option<Duration>,
+    /// How long until the bucket is full again.
+    #[doc(alias = "getFullBurstAfterSeconds")]
+    pub full_burst_after: Duration,
 }
 
 /// **Experimental.** A shared rate limiter on the Generic Cell Rate Algorithm (GCRA), Redisson's `RGcra`, with the same scripts and keys.
@@ -199,6 +293,61 @@ impl Gcra {
         }))
     }
 
+    /// Takes one token if the limit allows it right now, Redisson's `tryAcquire`. Add `.tokens(n)` to take `n` at once.
+    ///
+    /// A refused request takes nothing; [`GcraResult::retry_after`] says when to try again. Times come from the server's clock. A limiter without a rate is an [`Error::Redis`] containing "GCRA rate is not set".
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// let gcra = client.gcra("api");
+    /// let result = gcra.try_acquire().tokens(2).await?;
+    /// if result.limited {
+    ///     println!("try again in {:?}", result.retry_after);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(alias = "tryAcquire")]
+    pub fn try_acquire(&self) -> TryAcquire<'_> {
+        TryAcquire {
+            gcra: self,
+            tokens: 1,
+        }
+    }
+
+    /// Whether the server has the `GCRA` command, asked once per client with a probe that the server refuses for its arguments, so it never writes.
+    async fn has_gcra(&self) -> Result<bool> {
+        let cell = &self.key.core.gcra_command;
+        let answer = cell
+            .get_or_try_init(|| async {
+                let mut cmd = self.key.key_cmd("GCRA");
+                cmd.arg(0).arg(1).arg(1).arg("TOKENS");
+                probe_answer(self.key.query::<redis::Value>(cmd).await)
+            })
+            .await?;
+        Ok(*answer)
+    }
+
+    async fn acquire(&self, tokens: u64) -> Result<GcraResult> {
+        let tokens = tokens_arg(tokens)?;
+        let script: &Lua = if self.has_gcra().await? {
+            &TRY_ACQUIRE
+        } else {
+            &TRY_ACQUIRE_LUA
+        };
+        // Sent at most once: a script whose reply was lost has taken its tokens.
+        let reply: redis::Value = self
+            .key
+            .core
+            .eval_once(
+                script,
+                vec![self.config_key(), self.key.redis_key()],
+                vec![tokens],
+            )
+            .await?;
+        decode_result(reply)
+    }
+
     async fn exists_any(&self) -> Result<bool> {
         let mut cmd = self.key.key_cmd("EXISTS");
         cmd.arg(self.config_key());
@@ -239,6 +388,32 @@ impl Object for Gcra {
 
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
         self.key.persist_all(vec![self.config_key()])
+    }
+}
+
+/// A pending [`Gcra::try_acquire`]. Await it, optionally after [`TryAcquire::tokens`].
+#[must_use = "try_acquire does nothing until it is awaited"]
+#[derive(Debug)]
+pub struct TryAcquire<'a> {
+    gcra: &'a Gcra,
+    tokens: u64,
+}
+
+impl TryAcquire<'_> {
+    /// Takes `tokens` at once instead of 1, Redisson's `tryAcquire(tokens)`; the last call wins. Zero is [`Error::Config`], and nothing is sent.
+    #[doc(alias = "tryAcquire")]
+    pub fn tokens(mut self, tokens: u64) -> Self {
+        self.tokens = tokens;
+        self
+    }
+}
+
+impl<'a> IntoFuture for TryAcquire<'a> {
+    type Output = Result<GcraResult>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.gcra.acquire(self.tokens))
     }
 }
 
@@ -284,6 +459,73 @@ mod tests {
             Err(Error::Config(message)) => message,
             other => panic!("expected a config error, got {other:?}"),
         }
+    }
+
+    fn server(message: &str) -> crate::error::Result<redis::Value> {
+        Err(Error::Redis(message.into()))
+    }
+
+    #[test]
+    fn probe_answer_reads_the_server() {
+        assert!(probe_answer(Ok(redis::Value::Okay)).unwrap());
+        assert!(probe_answer(server("ERR Missing TOKENS value")).unwrap());
+        assert!(!probe_answer(server(
+            "ERR unknown command 'GCRA', with args beginning with: 'k' '0' '1' '1' 'TOKENS' "
+        ))
+        .unwrap());
+        assert!(!probe_answer(server(
+            "NOPERM User app has no permissions to run the 'gcra' command"
+        ))
+        .unwrap());
+        assert!(matches!(
+            probe_answer(Err(Error::Timeout)),
+            Err(Error::Timeout)
+        ));
+    }
+
+    fn reply(items: &[i64]) -> redis::Value {
+        redis::Value::Array(items.iter().map(|&n| redis::Value::Int(n)).collect())
+    }
+
+    fn unexpected(value: redis::Value) {
+        match decode_result(value) {
+            Err(Error::Redis(message)) => {
+                assert!(message.contains("unexpected GCRA reply"), "{message}")
+            }
+            other => panic!("expected an unexpected reply error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_result_reads_the_five_integers() {
+        let allowed = decode_result(reply(&[0, 3, 2, -1, 1])).unwrap();
+        assert!(!allowed.limited);
+        assert_eq!(allowed.max_tokens, 3);
+        assert_eq!(allowed.available_tokens, 2);
+        assert_eq!(allowed.retry_after, None);
+        assert_eq!(allowed.full_burst_after, Duration::from_secs(1));
+        let limited = decode_result(reply(&[1, 3, 0, 2, 3])).unwrap();
+        assert!(limited.limited);
+        assert_eq!(limited.retry_after, Some(Duration::from_secs(2)));
+        assert_eq!(limited.full_burst_after, Duration::from_secs(3));
+        let never = decode_result(reply(&[1, 3, 0, -1, 0])).unwrap();
+        assert!(never.limited);
+        assert_eq!(never.retry_after, None);
+        assert_eq!(never.full_burst_after, Duration::ZERO);
+    }
+
+    #[test]
+    fn decode_result_rejects_other_replies() {
+        unexpected(reply(&[0, 3, 2, -1]));
+        unexpected(reply(&[0, 3, 2, -1, 1, 0]));
+        unexpected(redis::Value::Int(1));
+        unexpected(redis::Value::Array(vec![
+            redis::Value::Int(0),
+            redis::Value::Int(3),
+            redis::Value::BulkString(b"2".to_vec()),
+            redis::Value::Int(-1),
+            redis::Value::Int(1),
+        ]));
     }
 
     #[test]

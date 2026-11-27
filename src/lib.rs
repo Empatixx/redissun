@@ -98,6 +98,11 @@ pub mod rate_limiter {
     pub use crate::coordination::rate_limiter::{InitRate, SetRate, UpdateRate};
 }
 
+/// The builders [`Gcra`] methods return.
+pub mod gcra {
+    pub use crate::coordination::gcra::TryAcquire;
+}
+
 /// The builders [`Buckets`] methods return.
 pub mod buckets {
     pub use crate::values::buckets::{TrySet, Update};
@@ -135,7 +140,7 @@ pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};
-pub use coordination::gcra::{Gcra, GcraConfig};
+pub use coordination::gcra::{Gcra, GcraConfig, GcraResult};
 pub use coordination::latch::CountDownLatch;
 pub use coordination::permit_semaphore::{PermitExpirableSemaphore, PermitRequest};
 pub use coordination::rate_limiter::{RateLimiter, RateLimiterConfig, RateType};

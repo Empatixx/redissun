@@ -100,6 +100,52 @@ pub async fn redis8_client() -> Client {
         .unwrap()
 }
 
+static CONTAINER_GCRA: OnceCell<(ContainerAsync<Redis>, String)> = OnceCell::const_new();
+static CONTAINER_GCRA_ID: OnceLock<String> = OnceLock::new();
+
+/// The only published image whose Redis has the `GCRA` command: a preview, as Redis held the command out of 8.8.0 and later.
+pub const GCRA_TAG: &str = "8.8-m03-alpine";
+
+extern "C" fn remove_container_gcra() {
+    if let Some(id) = CONTAINER_GCRA_ID.get() {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", "-v", id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// A Redis server with the `GCRA` command (`redis:8.8-m03-alpine`); `REDISSUN_TEST_REDIS_GCRA_URL` names one you already run.
+pub async fn redis_gcra_url() -> String {
+    if let Ok(url) = std::env::var("REDISSUN_TEST_REDIS_GCRA_URL") {
+        return url;
+    }
+    CONTAINER_GCRA
+        .get_or_init(|| async {
+            let container = Redis::default().with_tag(GCRA_TAG).start().await.unwrap();
+            let port = container.get_host_port_ipv4(6379).await.unwrap();
+            if CONTAINER_GCRA_ID.set(container.id().to_string()).is_ok() {
+                unsafe {
+                    libc::atexit(remove_container_gcra);
+                }
+            }
+            wait_until_ready(port).await;
+            (container, format!("redis://127.0.0.1:{port}"))
+        })
+        .await
+        .1
+        .clone()
+}
+
+pub async fn redis_gcra_client() -> Client {
+    Client::builder()
+        .url(redis_gcra_url().await)
+        .build()
+        .await
+        .unwrap()
+}
+
 /// A Redis server of its own, removed when the returned container is dropped, for tests that wipe every database.
 pub async fn own_redis() -> (ContainerAsync<Redis>, String) {
     own_redis_tag("7.4").await
