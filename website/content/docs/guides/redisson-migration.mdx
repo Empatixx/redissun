@@ -47,6 +47,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RPermitExpirableSemaphore` | `PermitExpirableSemaphore` |
 | `RCountDownLatch` | `CountDownLatch` |
 | `RRateLimiter` | `RateLimiter` |
+| `RGcra` | `Gcra` |
 | `RScript` | `Script` (`client.script()`) |
 | `RFunction` | `Function` (`client.function()`) |
 | `StringCodec`, `ByteArrayCodec` | `StringCodec`, `BytesCodec` |
@@ -566,6 +567,17 @@ As in Redisson, timeouts of blocking calls are rounded down to whole seconds, wi
 | `availablePermits()` | `available_permits()` |
 | `getConfig()` | `config()`, `None` when the limiter is not set |
 | `RateType.OVERALL`, `PER_CLIENT` | `RateType::Overall`, `RateType::PerClient` |
+
+## Gcra
+
+| Redisson | redissun |
+|---|---|
+| `getGcra(name)` | `client.gcra(name)` |
+| `getGcra(CommonOptions)` | `client.gcra(name)`; the timeouts and retries are the client's |
+| `trySetRate(maxBurst, tokensPerPeriod, period)` | `init_rate(max_burst, tokens_per_period, period)` → `bool` |
+| `setRate(maxBurst, tokensPerPeriod, period)` | `set_rate(max_burst, tokens_per_period, period)` |
+| `getConfig()` | `config()`, `None` instead of `null` when no rate is set |
+| `GcraConfig.getMaxBurst()`, `getTokensPerPeriod()`, `getPeriod()` | the fields `max_burst`, `tokens_per_period`, `period` |
 
 ## Config
 

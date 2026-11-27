@@ -1,0 +1,35 @@
+---
+title: Gcra
+description: A rate limiter on the Generic Cell Rate Algorithm, Redisson's RGcra. Experimental.
+---
+
+**Experimental.** A `Gcra` is a rate limiter on the Generic Cell Rate Algorithm (GCRA). It is Redisson's `RGcra`. It hands out `tokens_per_period` tokens per `period` at a steady rate, and up to `max_burst` tokens more at once. There is no background task, and the whole state is one timestamp: the time at which the next token is due.
+
+```rust
+use std::time::Duration;
+
+let gcra = client.gcra("api");
+gcra.init_rate(5, 10, Duration::from_secs(1)).await?;
+```
+
+## Setting the rate
+
+| Method | What it does |
+|---|---|
+| `init_rate(max_burst, tokens_per_period, period)` | sets the rate, only if none is set yet. Returns `true` if it set it. |
+| `set_rate(max_burst, tokens_per_period, period)` | replaces the rate and forgets the tokens already used |
+| `config()` | the settings as `Option<GcraConfig>` with `max_burst`, `tokens_per_period` and `period`; `None` when no rate is set |
+
+A `max_burst` of 0 is valid: the bucket then holds one token. A `tokens_per_period` or a `period` of zero is `Error::Config`, and nothing is sent.
+
+## Taking tokens
+
+Coming with `try_acquire`.
+
+## Which server
+
+Coming with `try_acquire`.
+
+## How it is stored
+
+The settings live in the hash `{name}:config` with the fields `maxBurst`, `rate` and `period`. The period is written in decimal seconds, as Redisson writes it: `1` for one second, `0.25` for 250 ms. The state lives at the key `name`. These are Redisson's keys and fields, so a Redisson client and a redissun client can share one limiter.

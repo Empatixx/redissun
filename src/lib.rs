@@ -135,6 +135,7 @@ pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};
+pub use coordination::gcra::{Gcra, GcraConfig};
 pub use coordination::latch::CountDownLatch;
 pub use coordination::permit_semaphore::{PermitExpirableSemaphore, PermitRequest};
 pub use coordination::rate_limiter::{RateLimiter, RateLimiterConfig, RateType};

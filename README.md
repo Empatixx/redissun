@@ -95,6 +95,7 @@ async fn main() -> redissun::Result<()> {
 | [`PermitExpirableSemaphore`](https://empatixx.github.io/redissun/docs/objects/permit-expirable-semaphore) | string, sorted set and pub/sub | stable |
 | [`CountDownLatch`](https://empatixx.github.io/redissun/docs/objects/count-down-latch) | string and pub/sub | stable |
 | [`RateLimiter`](https://empatixx.github.io/redissun/docs/objects/rate-limiter) | hash, string and sorted set | stable |
+| [`Gcra`](https://empatixx.github.io/redissun/docs/objects/gcra) | hash and a timestamp key | experimental |
 | [`Keys`](https://empatixx.github.io/redissun/docs/objects/keys) | any key, on every master | stable |
 | [`Nodes`](https://empatixx.github.io/redissun/docs/guides/nodes) | the servers of the client | stable |
 | [`Batch`](https://empatixx.github.io/redissun/docs/objects/batch) | the commands it holds | experimental |
