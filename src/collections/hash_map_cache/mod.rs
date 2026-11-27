@@ -1,11 +1,15 @@
+mod announced;
 mod builders;
 mod entry_events;
 mod lease;
+mod local;
 mod names;
 mod scripts;
 
 use crate::client::request::Request;
 use crate::codec::Codec;
+use crate::collections::local_cache::messages::{message, updates_log_name, CLEAR};
+use crate::collections::local_cache::LocalCache;
 use crate::collections::map::entry::Target;
 use crate::collections::map::events::{self as map_events, MapEventKind, MapEvents};
 use crate::collections::map::key_hash::per_key_objects;
@@ -38,6 +42,7 @@ pub use builders::{
 };
 pub(crate) use entry_events::LengthPrefix;
 pub use lease::{Lease, LeaseGuard, LeaseInsert};
+pub(crate) use local::Op;
 
 /// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
 const TEMP_VAL_FIELD: &[u8] = b"redissun__temp_val";
@@ -159,6 +164,8 @@ pub struct HashMapCache<K, V, C: Codec> {
     codec: C,
     /// The loader and writer; `None` keeps every call as it is without them.
     store: Option<Arc<Store<K, V, C>>>,
+    /// The local cache of a [`LocalCachedMapCache`](crate::LocalCachedMapCache); `None` keeps every call as Redisson's `RMapCache` sends it.
+    local: Option<Arc<LocalCache>>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -168,6 +175,7 @@ impl<K, V, C: Codec> Clone for HashMapCache<K, V, C> {
             key: self.key.clone(),
             codec: self.codec.clone(),
             store: self.store.clone(),
+            local: self.local.clone(),
             _marker: PhantomData,
         }
     }
@@ -185,7 +193,11 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
     }
 
     fn companions(&self) -> std::vec::Vec<String> {
-        companions(self.key.name())
+        let mut keys = companions(self.key.name());
+        if self.local.is_some() {
+            keys.push(updates_log_name(self.key.name()));
+        }
+        keys
     }
 
     fn renamed_key(&self, new_name: &str) -> String {
@@ -193,7 +205,25 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
     }
 
     fn renamed_companions(&self, new_name: &str) -> Option<std::vec::Vec<String>> {
-        Some(companions(new_name))
+        let mut keys = companions(new_name);
+        if self.local.is_some() {
+            keys.push(updates_log_name(new_name));
+        }
+        Some(keys)
+    }
+
+    fn del_script(&self) -> Option<(&'static Lua, std::vec::Vec<String>, std::vec::Vec<Bytes>)> {
+        let local = self.local.as_ref()?;
+        local.local.forget_all();
+        let mut keys = self.redis_keys(&[
+            Name::Main,
+            Name::Timeout,
+            Name::Idle,
+            Name::LastAccess,
+            Name::Options,
+        ]);
+        keys.push(local.updates_log.clone());
+        Some((&announced::DEL_ANNOUNCED, keys, clear_arguments(local)))
     }
 
     fn expire_script(&self) -> Option<&'static Lua> {
@@ -207,6 +237,27 @@ impl<K, V, C: Codec> HasKey for HashMapCache<K, V, C> {
     fn persist_script(&self) -> Option<&'static Lua> {
         Some(&CLEAR_EXPIRE)
     }
+}
+
+/// Marks the cache `key` in Redis so every client's writes publish their entry events, as Redisson's `addListener` does.
+pub(crate) async fn mark_listeners(key: &Key) -> Result<()> {
+    let options = names::options(key.name());
+    let mut cmd = redis::cmd("HSET");
+    cmd.arg(&options).arg(("has-listeners", 1));
+    let _: i64 = key
+        .core
+        .query(Request::new(cmd).key(options.as_bytes()))
+        .await?;
+    Ok(())
+}
+
+/// `channel, mode, clear message`, the ARGV of [`announced::CLEAR_ANNOUNCED`] and [`announced::DEL_ANNOUNCED`].
+fn clear_arguments(local: &LocalCache) -> std::vec::Vec<Bytes> {
+    vec![
+        Bytes::from(local.channel.clone()),
+        local.mode(),
+        message(&local.local.id, CLEAR, &[]),
+    ]
 }
 
 /// The keys besides the main hash, in the order of Redisson's `expire`, `clearExpire` and `delete`.
@@ -235,10 +286,21 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
 
     /// A cache with the loader and writer of `store`; like [`new`](HashMapCache::new), it schedules the clean-up.
     pub(crate) fn with_store(key: Key, codec: C, store: Option<Arc<Store<K, V, C>>>) -> Self {
+        Self::with_local(key, codec, store, None)
+    }
+
+    /// A cache with the loader and writer of `store` and, for a [`LocalCachedMapCache`](crate::LocalCachedMapCache), a local cache; like [`new`](HashMapCache::new), it schedules the clean-up.
+    pub(crate) fn with_local(
+        key: Key,
+        codec: C,
+        store: Option<Arc<Store<K, V, C>>>,
+        local: Option<Arc<LocalCache>>,
+    ) -> Self {
         let cache = Self {
             key,
             codec,
             store,
+            local,
             _marker: PhantomData,
         };
         let mut keys = cache.redis_keys(&[
@@ -288,7 +350,7 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
     }
 
     /// How the server writes the lengths in event payloads, read once per client with `INFO server`, as Redisson does when the first listener is added.
-    async fn length_prefix(&self) -> Result<LengthPrefix> {
+    pub(crate) async fn length_prefix(&self) -> Result<LengthPrefix> {
         let prefix = self
             .key
             .core
@@ -770,10 +832,7 @@ where
             return Err(Error::Config("listen to at least one kind of event".into()));
         }
         let prefix = self.length_prefix().await?;
-        let mut cmd = redis::cmd("HSET");
-        cmd.arg(names::options(self.key.name()))
-            .arg(("has-listeners", 1));
-        let _: i64 = self.on_options(cmd).await?;
+        mark_listeners(&self.key).await?;
         let mut sources = std::vec::Vec::new();
         for kind in EntryEventKind::ALL {
             if kinds.contains(&kind) {
@@ -824,6 +883,9 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let encoded = self.codec.encode(k)?;
+        if let Some(local) = &self.local {
+            return self.read_cached(local, &encoded).await;
+        }
         match self.read_encoded(&encoded).await? {
             None if self.loads() => load_value(&Target::Cache(self, None), &encoded, false).await,
             value => Ok(value),
@@ -1032,10 +1094,9 @@ where
     {
         let k = self.codec.encode(k)?;
         let raw: Option<Bytes> = self
-            .key
-            .core
-            .eval(
+            .eval_write(
                 &REMOVE,
+                &announced::REMOVE,
                 self.redis_keys(&[
                     Name::Main,
                     Name::Timeout,
@@ -1045,6 +1106,8 @@ where
                     Name::Options,
                 ]),
                 vec![now(), k.clone(), Bytes::from(PUBLISH)],
+                Op::IfSome(&k),
+                false,
             )
             .await?;
         self.deleted(k).await?;
@@ -1059,6 +1122,9 @@ where
         Q: Serialize + ?Sized + Sync,
     {
         let encoded = self.codec.encode(k)?;
+        if let Some(local) = &self.local {
+            return self.contains_cached(local, &encoded).await;
+        }
         let found: i64 = self
             .key
             .core
@@ -1121,6 +1187,18 @@ where
 
     /// Deletes every entry. The size limit and the listener mark stay.
     pub async fn clear(&self) -> Result<()> {
+        if let Some(local) = &self.local {
+            local.local.forget_all();
+            let mut keys =
+                self.redis_keys(&[Name::Main, Name::Timeout, Name::Idle, Name::LastAccess]);
+            keys.push(local.updates_log.clone());
+            let _: i64 = self
+                .key
+                .core
+                .eval(&announced::CLEAR_ANNOUNCED, keys, clear_arguments(local))
+                .await?;
+            return Ok(());
+        }
         self.key
             .del_all(vec![
                 names::timeout(self.key.name()),
@@ -1400,24 +1478,30 @@ impl<K, V, C: Codec> HashMapCache<K, V, C> {
 
     /// Redisson's `PUT`: replaces the entry, clears its limits and frees a lease on the key. Returns the encoded live value it replaced.
     async fn put(&self, limits: &Limits, k: Bytes, v: Bytes) -> Result<Option<Bytes>> {
-        self.key
-            .core
-            .eval(
-                &PUT,
-                self.redis_keys(&[
-                    Name::Main,
-                    Name::Timeout,
-                    Name::Idle,
-                    Name::Created,
-                    Name::Updated,
-                    Name::LastAccess,
-                    Name::Removed,
-                    Name::Options,
-                    Name::Lease,
-                ]),
-                vec![limits.now(), k, v, Bytes::from(PUBLISH)],
-            )
-            .await
+        let entries = [(k.clone(), v.clone())];
+        self.eval_write(
+            &PUT,
+            &announced::PUT,
+            self.redis_keys(&[
+                Name::Main,
+                Name::Timeout,
+                Name::Idle,
+                Name::Created,
+                Name::Updated,
+                Name::LastAccess,
+                Name::Removed,
+                Name::Options,
+                Name::Lease,
+            ]),
+            vec![limits.now(), k, v, Bytes::from(PUBLISH)],
+            Op::Put {
+                entries: &entries,
+                ttl_timeout: 0,
+                idle_delta: 0,
+            },
+            false,
+        )
+        .await
     }
 
     /// Redisson's `FAST_PUT_WITH_LIMITS` with the lease `token`, empty for none. Returns whether there was no live entry.

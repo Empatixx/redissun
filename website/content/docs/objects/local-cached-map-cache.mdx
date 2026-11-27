@@ -1,0 +1,75 @@
+---
+title: LocalCachedMapCache
+description: A HashMapCache with a cache inside your program. Experimental.
+---
+
+**Experimental.** A `LocalCachedMapCache` is a [`HashMapCache`](/docs/objects/hash-map-cache) that keeps the entries it has read in your program's memory, as Redisson's `RLocalCachedMapCache` (a Redisson PRO object; redissun ports its interface). The data in Redis is `HashMapCache`'s, which is Redisson's `RMapCache` layout, so a `HashMapCache` or a Redisson `RMapCache` of the same name and codec reads and writes the same entries. The local cache and the messages between instances are [`LocalCachedMap`](/docs/objects/local-cached-map)'s.
+
+```rust
+use redissun::SyncStrategy;
+
+let sessions = client
+    .local_cached_map_cache::<String, String>("sessions")
+    .sync_strategy(SyncStrategy::Update)
+    .cache_size(10_000)
+    .build()
+    .await?;
+
+sessions.insert("s1", "jirka").ttl(Duration::from_secs(1800)).await?;
+let user = sessions.get("s1").await?; // from the local cache
+```
+
+## Options
+
+The local cache options are `LocalCachedMap`'s, with the same defaults; see [its options](/docs/objects/local-cached-map#options): `cache_size`, `eviction_policy`, `ttl`, `max_idle`, `sync_strategy`, `reconnection_strategy`, `store_cache_miss`, `store_mode`, `cache_provider`, `expiration_event_policy`. The loader and writer options are `HashMapCache`'s: `loader`, `writer`, `write_mode`, `writer_retry_attempts`, `writer_retry_interval`. The local `ttl` and `max_idle` limit the local copies only; the limits of an entry in Redis come from `insert(..).ttl(..)` and the other `HashMapCache` writes.
+
+## Methods
+
+Every `HashMapCache` method works and returns the same builders (`hash_map_cache::Insert`, …). The local methods are `LocalCachedMap`'s.
+
+| Method | Notes |
+|---|---|
+| `get(&k)` | local cache first, then Redis; a value read from Redis is cached for as long as its entry lives (see below) |
+| `contains_key(&k)` | a cached key answers without a round trip; a miss is cached only with `store_cache_miss` |
+| `insert(&k, &v)[.ttl(d)][.max_idle(d)]` | `HashMapCache::insert`; caches the new value with its limits and tells the others |
+| `remove(&k)` | tells the others when a live entry was removed |
+| `clear()` | empties the cache for everybody; the others are told when something was deleted |
+| `len()`, `is_empty()` | ask Redis; expired entries count until the clean-up deletes them, as on `HashMapCache` |
+| `local_len()`, `local_entries()`, `clear_local()` | the local cache of this instance only |
+| `clear_local_everywhere()` | empties the local cache of every instance without changing Redis, Redisson's `clearLocalCache` |
+
+## How long a local copy lives
+
+A local copy lives until the earliest of:
+
+- the builder's local `ttl` and `max_idle`, as in `LocalCachedMap`;
+- the entry's time-to-live deadline in Redis;
+- for an entry with a max idle time, half that time after it was last read from Redis.
+
+Local hits do not reach Redis, so they cannot restart the entry's idle time there. With the half-life, a copy that is read all the time is read from Redis again every `max_idle / 2`; that read restarts the idle time in Redis, so the entry stays alive while it is used, and the copy never outlives it. An entry that has already expired, or is about to, is not cached.
+
+## Which reads use the local cache
+
+| Method | A local hit answers | A miss reads | The miss is cached |
+|---|---|---|---|
+| `get` | yes | `GET` with the entry's deadlines | yes, for its lifetime; a missing key only with `store_cache_miss` |
+| `contains_key` | yes | `CONTAINS_KEY` | only a missing key, with `store_cache_miss` |
+| every other read | no | `HashMapCache`'s script | no |
+
+## What a write announces
+
+Before a write, the key is forgotten locally. After the reply, an unconditional write caches the new value with its limits; everything else stays forgotten until it is read again.
+
+| Write | Announced when | Message with `SyncStrategy::Update` | Local copy after |
+|---|---|---|---|
+| `insert` | always | the value and its deadlines | cached with the write's limits |
+| `remove` | a live entry was removed | an invalidation | forgotten |
+| `clear`, `Object::del` | something was deleted | clear | all forgotten |
+
+With `SyncStrategy::Invalidate` every write sends an invalidation (or clear); with `SyncStrategy::None` (and no `ReconnectionStrategy::Load`) nothing is published. Writes through a plain `HashMapCache` or Redisson are not announced; other instances see them when their copy's lifetime ends.
+
+## How it is stored
+
+The entries are `HashMapCache`'s: the hash `name`, the sorted sets `redissun__timeout__set:{name}`, `redissun__idle__set:{name}`, `redissun__map_cache__last_access__set:{name}` and the hash `{name}:redissun_options`. The sync messages go to the channel `redissun__local_cache:<name>`, and `ReconnectionStrategy::Load` keeps its log in `redissun__cache_updates_log:{name}`, as for `LocalCachedMap`. Every key is in the slot of the cache.
+
+Each write runs Redisson's `RMapCache` script inside a redissun wrapper that publishes the sync message in the same script, so the data written is byte for byte what a plain `HashMapCache` writes. `build` sets `has-listeners` in the options hash, as Redisson's `addListener` does, so from then on every client's writes to this cache publish entry events.

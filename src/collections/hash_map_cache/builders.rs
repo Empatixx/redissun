@@ -4,7 +4,7 @@ use super::scripts::{
     EXPIRE_ENTRIES, EXPIRE_ENTRIES_IF_NOT_SET, EXPIRE_ENTRY, EXPIRE_ENTRY_IF_NOT_SET,
     MIGRATE_FROM_0_23, PUT_ALL_TTL_IDLE, PUT_IF_ABSENT_WITH_LIMITS, PUT_WITH_LIMITS,
 };
-use super::{limits, names, HashMapCache, Name, PUBLISH};
+use super::{announced, limits, names, HashMapCache, Name, Op, PUBLISH};
 use crate::codec::Codec;
 use crate::collections::map::entry::{Entry, Target};
 use crate::error::{Error, Result};
@@ -72,10 +72,9 @@ where
             let entry = [(key.clone(), value.clone())];
             let previous: Option<Bytes> = if limits.any() {
                 cache
-                    .key
-                    .core
-                    .eval(
+                    .eval_write(
                         &PUT_WITH_LIMITS,
+                        &announced::PUT_WITH_LIMITS,
                         cache.redis_keys(&[
                             Name::Main,
                             Name::Timeout,
@@ -87,6 +86,12 @@ where
                             Name::Options,
                         ]),
                         limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
+                        Op::Put {
+                            entries: &entry,
+                            ttl_timeout: limits.ttl_timeout,
+                            idle_delta: limits.idle_delta,
+                        },
+                        false,
                     )
                     .await?
             } else {

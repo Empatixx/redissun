@@ -17,6 +17,7 @@ use crate::collections::hash_map::{HashMap, HashMapBuilder};
 use crate::collections::hash_map_cache::{HashMapCache, HashMapCacheBuilder};
 use crate::collections::hash_set_cache::HashSetCache;
 use crate::collections::local_cached_map::LocalCachedMapBuilder;
+use crate::collections::local_cached_map_cache::LocalCachedMapCacheBuilder;
 use crate::collections::map_cache_native::{MapCacheNative, MapCacheNativeBuilder};
 use crate::collections::multimap::{
     ListMultimap, ListMultimapCache, ListMultimapCacheNative, Mode as MultimapMode, SetMultimap,
@@ -301,6 +302,15 @@ impl<C: Codec> Client<C> {
         name: impl Into<Arc<str>>,
     ) -> LocalCachedMapBuilder<K, V, C> {
         LocalCachedMapBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Starts a [`LocalCachedMapCache`](crate::LocalCachedMapCache) stored under `name`, Redisson's `getLocalCachedMapCache`. Set its options, then `.build().await`. Experimental.
+    #[doc(alias = "getLocalCachedMapCache")]
+    pub fn local_cached_map_cache<K, V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> LocalCachedMapCacheBuilder<K, V, C> {
+        LocalCachedMapCacheBuilder::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`Stream`] stored under `name`.

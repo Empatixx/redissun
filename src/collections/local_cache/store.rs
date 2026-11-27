@@ -338,10 +338,13 @@ impl LocalStore {
         }
     }
 
-    /// Every slot, cached misses included.
+    /// Every live slot, cached misses included; expired slots are dropped first, as moka does.
     pub(crate) fn len(&mut self) -> usize {
         match self {
-            LocalStore::Builtin(store) => store.slots.len(),
+            LocalStore::Builtin(store) => {
+                store.remove_expired();
+                store.slots.len()
+            }
             #[cfg(feature = "moka")]
             LocalStore::Moka(cache) => {
                 cache.run_pending_tasks();

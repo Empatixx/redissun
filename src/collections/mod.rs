@@ -5,6 +5,7 @@ pub(crate) mod hash_set_cache;
 pub(crate) mod list;
 pub(crate) mod local_cache;
 pub(crate) mod local_cached_map;
+pub(crate) mod local_cached_map_cache;
 pub(crate) mod map;
 pub(crate) mod map_cache_native;
 pub(crate) mod multimap;

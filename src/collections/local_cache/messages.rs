@@ -33,7 +33,6 @@ pub(crate) fn message(id: &[u8; ID_LEN], kind: u8, body: &[&[u8]]) -> Bytes {
 }
 
 /// An `E` message: `key` now holds `value` until the deadline `ttl_timeout` (the writer's Unix ms) and with the max idle `idle_delta` (ms), `0` meaning no limit.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn expiring_update(
     id: &[u8; ID_LEN],
     ttl_timeout: i64,
@@ -59,7 +58,12 @@ pub(crate) fn channel(key: &Key) -> String {
 }
 
 pub(crate) fn updates_log(key: &Key) -> String {
-    format!("redissun__cache_updates_log:{}", tagged(key.name()))
+    updates_log_name(key.name())
+}
+
+/// The updates log of the object `name`, in its slot.
+pub(crate) fn updates_log_name(name: &str) -> String {
+    format!("redissun__cache_updates_log:{}", tagged(name))
 }
 
 /// The scripts' `now`, updates log entry (8 random bytes, then the key) and keep time for a change of `field`.

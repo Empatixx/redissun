@@ -139,6 +139,7 @@ pub use collections::local_cache::{
     SyncStrategy,
 };
 pub use collections::local_cached_map::{LocalCachedMap, LocalCachedMapBuilder};
+pub use collections::local_cached_map_cache::{LocalCachedMapCache, LocalCachedMapCacheBuilder};
 pub use collections::map::events::{MapEvent, MapEventKind, MapEvents};
 pub use collections::map::scan::MapScan;
 pub use collections::map::store::{BoxError, MapLoader, MapWriter, WriteMode};
