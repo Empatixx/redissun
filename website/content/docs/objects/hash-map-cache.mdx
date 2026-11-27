@@ -22,6 +22,13 @@ let found = sessions.get("abc").await?;
 | `insert(&k, &v).ttl(ttl)` | the entry expires after `ttl`. Zero means no limit. |
 | `insert(&k, &v).max_idle(idle)` | the entry expires when nobody reads it for `idle`. Every `get` and `contains_key` starts the time again. |
 | `try_insert(&k, &v)` | inserts only when there is no live entry, like Redisson's `putIfAbsent`. Returns `None` when it stored the entry, or `Some(live value)` and stores nothing, like `HashMap::try_insert`. It takes `.ttl(..)` and `.max_idle(..)` too. |
+| `set(&k, &v)` | the same write as `insert`, with `.ttl(..)` and `.max_idle(..)` too, but returns `true` when there was no live entry (exactly when `insert` returns `None`) instead of the old value. Redisson's `fastPut`. |
+| `replace(&k, &v)` | replaces the value of a live entry and returns the old one; a missing or expired entry is left alone. Keeps the entry's limits. |
+| `compare_and_set(&k, &old, &new)` | sets `new` only when the live entry holds `old`. Keeps the limits. |
+| `remove_if_eq(&k, &v)` | removes the live entry only when it holds `v` |
+| `remove_many(&[&k, ..])` | removes several entries and returns how many were in Redis (an expired entry not cleaned up yet counts too, as in Redisson) |
+| `incr_by(&k, n)`, `incr_by_float(&k, x)` | adds to the number stored under the key, creating it, and returns the result. Keeps the limits. |
+| `extend(entries)` | inserts all entries, each as `insert` would. It takes `.ttl(..)`, `.max_idle(..)` and `.batch_size(n)` (one atomic script per batch). |
 | `get(&k)`, `contains_key(&k)` | never show an expired entry. Both start the idle time again and count as a use for the size limit. |
 | `remove(&k)` | removes a live entry and returns its value. An expired entry is left for the clean-up. |
 | `entry_ttl(&k)` | time left. `None` means no limit or no entry |
@@ -33,6 +40,10 @@ let found = sessions.get("abc").await?;
 | `keyspace_events()`, `keyspace_events_of(kinds)` | keyspace notifications of the hash (`MapEvent`), what `HashMap::events()` returns. See below. |
 
 `ttl` and `max_idle` can be used together. The entry expires at whichever comes first.
+
+### Writes
+
+Every plain write (`insert`, `set`, `entry`, `extend` without `.ttl()`/`.max_idle()`) replaces the entry and clears its limits, the way `HashMap::insert` replaces the value. `set` differs from `insert` only in returning `bool`. `replace`, `compare_and_set` and `incr_by` change the value of an existing entry and keep its limits.
 
 ## How expiry works
 

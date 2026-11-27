@@ -383,6 +383,14 @@ They map like `Topic`. A `ReliableTopic` also has `len()` (Redisson's `size()`),
 | `put(k, v)` | `insert(&k, &v)` |
 | `put(k, v, ttl, unit)` | `insert(&k, &v).ttl(ttl)` |
 | `fastPutIfAbsent(k, v)`, `putIfAbsent(k, v)` | `try_insert(&k, &v)`: `None` when it stored the entry, `Some(live value)` when it stored nothing, like `HashMap::try_insert` |
+| `fastPut(k, v[, ttl, unit[, maxIdle, unit]])` | `set(&k, &v)[.ttl(ttl)][.max_idle(idle)]` → `bool`; clears the TTL, unlike Redisson's `fastPut` |
+| `replace(k, v)`, `fastReplace(k, v)` | `replace(&k, &v)` → `Option<V>`; keeps the limits |
+| `putIfExists(k, v)`, `fastPutIfExists(k, v)` | `replace(&k, &v)`; keeps the idle time, where Redisson's `putIfExists` resets it |
+| `replace(k, old, new)` | `compare_and_set(&k, &old, &new)` |
+| `remove(k, v)` | `remove_if_eq(&k, &v)` |
+| `fastRemove(k...)` | `remove_many(&[&k, ..])` → `usize` |
+| `addAndGet(k, n)` | `incr_by(&k, n)`, `incr_by_float(&k, x)` |
+| `putAll(map[, ttl, unit[, maxIdle, unit]])`, `putAll(map, batchSize)` | `extend(entries)[.ttl(ttl)][.max_idle(idle)][.batch_size(n)]`; clears the TTL without `.ttl()`, unlike Redisson's `putAll(map)` |
 | `remainTimeToLive(k)` | `entry_ttl(&k)` |
 | `addListener(MapEntryListener)` (`EntryCreatedListener`, …) | `events()`, `events_of(&[EntryEventKind])` → `EntryEvents` |
 | `addListener(MapPutListener / MapIncrListener / MapRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `keyspace_events()`, `keyspace_events_of(&[MapEventKind])` → `MapEvents` (what `HashMap::events()` returns) |

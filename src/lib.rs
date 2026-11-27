@@ -53,6 +53,11 @@ pub mod hash_map {
     pub use crate::collections::hash_map::{Entry, Extend, OccupiedEntry, VacantEntry};
 }
 
+/// The builders [`HashMapCache`] methods return.
+pub mod hash_map_cache {
+    pub use crate::collections::hash_map_cache::{Extend, Insert, Set, TryInsert};
+}
+
 /// The builders [`SortedSet`] methods return.
 pub mod sorted_set {
     pub use crate::collections::sorted_set::Extend;
@@ -98,7 +103,7 @@ pub use client::Client;
 pub use codec::{BytesCodec, Codec, JsonCodec, StringCodec};
 pub use collections::hash_map::HashMap;
 pub use collections::hash_map_cache::{
-    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache, Insert, TryInsert,
+    EntryEvent, EntryEventKind, EntryEvents, EvictionMode, HashMapCache,
 };
 pub use collections::hash_set::HashSet;
 pub use collections::hash_set_cache::{Expirations, HashSetCache, SetInsert};

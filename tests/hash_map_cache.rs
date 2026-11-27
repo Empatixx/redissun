@@ -2329,3 +2329,291 @@ async fn keyspace_events_skip_the_temporary_incr_field() {
         "unexpected error {outcome:?}"
     );
 }
+
+/// `HGET` of the raw field and the `ZSCORE`s of the timeout and idle sets, as RESP text.
+async fn stored_state(name: &str, field: &str) -> (String, String, String) {
+    let hget = raw_command(&["HGET", name, field]).await;
+    let timeout = raw_command(&[
+        "ZSCORE",
+        &format!("redissun__timeout__set:{{{name}}}"),
+        field,
+    ])
+    .await;
+    let idle = raw_command(&["ZSCORE", &format!("redissun__idle__set:{{{name}}}"), field]).await;
+    (hget, timeout, idle)
+}
+
+#[tokio::test]
+async fn set_reports_a_new_key() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    assert!(cache.set("a", &1i64).await.unwrap());
+    assert!(!cache.set("a", &2i64).await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), Some(2));
+    assert!(cache
+        .set("b", &1i64)
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap());
+    sleep(Duration::from_millis(250)).await;
+    assert!(cache.set("b", &2i64).await.unwrap());
+}
+
+#[tokio::test]
+async fn set_reports_what_insert_reports() {
+    for limited in [false, true] {
+        let c = client().await;
+        let by_set = c.hash_map_cache::<String, i64>(unique("cache"));
+        let by_insert = c.hash_map_cache::<String, i64>(unique("cache"));
+        let ttl = Duration::from_secs(60);
+        let set = |k: &'static str, v: i64| {
+            let by_set = by_set.clone();
+            async move {
+                if limited {
+                    by_set.set(k, &v).ttl(ttl).await.unwrap()
+                } else {
+                    by_set.set(k, &v).await.unwrap()
+                }
+            }
+        };
+        let insert = |k: &'static str, v: i64| {
+            let by_insert = by_insert.clone();
+            async move {
+                if limited {
+                    by_insert.insert(k, &v).ttl(ttl).await.unwrap()
+                } else {
+                    by_insert.insert(k, &v).await.unwrap()
+                }
+            }
+        };
+        // Missing, then live.
+        assert!(set("a", 1).await);
+        assert_eq!(insert("a", 1).await, None);
+        assert!(!set("a", 2).await);
+        assert_eq!(insert("a", 2).await, Some(1));
+        // Expired but not evicted yet.
+        for cache in [&by_set, &by_insert] {
+            cache
+                .insert("e", &1i64)
+                .ttl(Duration::from_millis(100))
+                .await
+                .unwrap();
+        }
+        sleep(Duration::from_millis(250)).await;
+        assert!(set("e", 2).await, "limited: {limited}");
+        assert_eq!(insert("e", 2).await, None, "limited: {limited}");
+    }
+}
+
+#[tokio::test]
+async fn set_and_insert_both_clear_the_limits() {
+    let c = client().await;
+    let by_set_name = unique("cache");
+    let by_insert_name = unique("cache");
+    let by_set = c.hash_map_cache::<String, i64>(by_set_name.clone());
+    let by_insert = c.hash_map_cache::<String, i64>(by_insert_name.clone());
+    for cache in [&by_set, &by_insert] {
+        cache
+            .insert("a", &1i64)
+            .ttl(Duration::from_secs(60))
+            .max_idle(Duration::from_secs(60))
+            .await
+            .unwrap();
+    }
+    assert!(!by_set.set("a", &2i64).await.unwrap());
+    assert_eq!(by_insert.insert("a", &2i64).await.unwrap(), Some(1));
+    for cache in [&by_set, &by_insert] {
+        assert_eq!(cache.entry_ttl("a").await.unwrap(), None);
+        assert_eq!(cache.get("a").await.unwrap(), Some(2));
+    }
+    let after_set = stored_state(&by_set_name, "\"a\"").await;
+    let after_insert = stored_state(&by_insert_name, "\"a\"").await;
+    assert_eq!(after_set.1.trim(), "$-1");
+    assert_eq!(after_set.2.trim(), "$-1");
+    assert_eq!(after_set, after_insert);
+}
+
+#[tokio::test]
+async fn set_with_limits_sends_created_and_updated_events() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache
+        .events_of(&[EntryEventKind::Created, EntryEventKind::Updated])
+        .await
+        .unwrap();
+    let ttl = Duration::from_secs(60);
+    assert!(cache.set("a", "x").ttl(ttl).await.unwrap());
+    assert_eq!(
+        next(&mut events).await,
+        EntryEvent::Created {
+            key: "a".into(),
+            value: "x".into()
+        }
+    );
+    assert!(!cache.set("a", "y").max_idle(ttl).await.unwrap());
+    assert_eq!(
+        next(&mut events).await,
+        EntryEvent::Updated {
+            key: "a".into(),
+            value: "y".into(),
+            previous: "x".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn replace_keeps_the_idle_time() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    cache
+        .insert("a", "x")
+        .max_idle(Duration::from_millis(400))
+        .await
+        .unwrap();
+    assert_eq!(cache.replace("a", "y").await.unwrap(), Some("x".into()));
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(cache.get("a").await.unwrap(), Some("y".into()));
+    sleep(Duration::from_millis(600)).await;
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    assert_eq!(cache.replace("missing", "y").await.unwrap(), None);
+    assert!(!cache.contains_key("missing").await.unwrap());
+}
+
+#[tokio::test]
+async fn compare_and_set_and_remove_if_eq_follow_the_value() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    cache.insert("a", "x").await.unwrap();
+    assert!(!cache.compare_and_set("a", "wrong", "y").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), Some("x".into()));
+    assert!(cache.compare_and_set("a", "x", "y").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), Some("y".into()));
+    assert!(!cache.remove_if_eq("a", "x").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), Some("y".into()));
+    assert!(cache.remove_if_eq("a", "y").await.unwrap());
+    assert_eq!(cache.get("a").await.unwrap(), None);
+    cache
+        .insert("e", "x")
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(250)).await;
+    assert!(!cache.compare_and_set("e", "x", "y").await.unwrap());
+    assert!(!cache.remove_if_eq("e", "x").await.unwrap());
+    assert!(!cache.compare_and_set("missing", "x", "y").await.unwrap());
+}
+
+#[tokio::test]
+async fn remove_many_counts_and_publishes() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, String>(unique("cache"));
+    let mut events = cache.events_of(&[EntryEventKind::Removed]).await.unwrap();
+    for k in ["a", "b", "c"] {
+        cache.insert(k, "v").await.unwrap();
+    }
+    assert_eq!(cache.remove_many(&["a", "b", "missing"]).await.unwrap(), 2);
+    let mut removed = HashSet::new();
+    for _ in 0..2 {
+        match next(&mut events).await {
+            EntryEvent::Removed { key, value } => {
+                assert_eq!(value, "v");
+                removed.insert(key);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(removed, HashSet::from(["a".to_string(), "b".to_string()]));
+    nothing_arrives(&mut events).await;
+    assert_eq!(keys(&cache).await, vec!["c".to_string()]);
+    assert_eq!(cache.remove_many::<str>(&[]).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn incr_by_creates_and_adds() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, f64>(unique("cache"));
+    assert_eq!(cache.incr_by("n", 5).await.unwrap(), 5);
+    assert_eq!(cache.incr_by("n", 2).await.unwrap(), 7);
+    assert_eq!(cache.incr_by_float("n", 0.5).await.unwrap(), 7.5);
+    assert_eq!(cache.get("n").await.unwrap(), Some(7.5));
+    assert!(matches!(
+        cache.incr_by_float("n", f64::NAN).await,
+        Err(Error::Config(_))
+    ));
+}
+
+#[tokio::test]
+async fn extend_with_ttl_and_batches() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    let entries: Vec<(String, i64)> = (0..250).map(|i| (format!("k{i}"), i)).collect();
+    cache
+        .extend(entries.iter().map(|(k, v)| (k.as_str(), v)))
+        .batch_size(100)
+        .ttl(Duration::from_millis(300))
+        .await
+        .unwrap();
+    assert_eq!(cache.len().await.unwrap(), 250);
+    assert_eq!(cache.get("k249").await.unwrap(), Some(249));
+    sleep(Duration::from_millis(500)).await;
+    for (k, _) in &entries {
+        assert_eq!(cache.get(k.as_str()).await.unwrap(), None, "{k}");
+    }
+}
+
+#[tokio::test]
+async fn extend_with_max_idle_only() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache
+        .extend([("a", &1i64)])
+        .max_idle(Duration::from_millis(300))
+        .await
+        .unwrap();
+    let left = cache.entry_ttl("a").await.unwrap().unwrap();
+    assert!(left <= Duration::from_millis(300), "{left:?}");
+}
+
+#[tokio::test]
+async fn extend_without_limits_clears_them() {
+    let name = unique("cache");
+    let cache = client().await.hash_map_cache::<String, i64>(name.clone());
+    cache
+        .insert("a", &1i64)
+        .ttl(Duration::from_secs(60))
+        .max_idle(Duration::from_secs(60))
+        .await
+        .unwrap();
+    cache.extend([("a", &2i64)]).await.unwrap();
+    assert_eq!(cache.entry_ttl("a").await.unwrap(), None);
+    let (_, timeout, idle) = stored_state(&name, "\"a\"").await;
+    assert_eq!(timeout.trim(), "$-1");
+    assert_eq!(idle.trim(), "$-1");
+    assert_eq!(cache.get("a").await.unwrap(), Some(2));
+    cache
+        .extend(std::iter::empty::<(&str, &i64)>())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn extend_respects_the_size_limit() {
+    let cache = client()
+        .await
+        .hash_map_cache::<String, i64>(unique("cache"));
+    cache.set_max_size(10, EvictionMode::Lru).await.unwrap();
+    let entries: Vec<(String, i64)> = (0..25).map(|i| (format!("k{i}"), i)).collect();
+    cache
+        .extend(entries.iter().map(|(k, v)| (k.as_str(), v)))
+        .await
+        .unwrap();
+    assert_eq!(cache.len().await.unwrap(), 10);
+}

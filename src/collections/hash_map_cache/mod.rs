@@ -1,3 +1,4 @@
+mod builders;
 mod entry_events;
 mod names;
 mod scripts;
@@ -12,18 +13,17 @@ use crate::object::{millis, now_millis, HasKey, Key};
 use bytes::Bytes;
 use futures::{stream, Stream, TryStreamExt};
 use scripts::{
-    CLEAR_EXPIRE, CONTAINS_KEY, EVICT, EXPIRE, GET, PUT, PUT_IF_ABSENT_WITH_LIMITS,
-    PUT_WITH_LIMITS, REMAIN_TTL, REMOVE, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
+    ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, EVICT, EXPIRE, FAST_REMOVE, GET, REMAIN_TTL, REMOVE,
+    REMOVE_IF, REPLACE, REPLACE_IF, SCAN_ENTRIES, SCAN_KEYS, TOUCH_IDLE, TRY_SET_MAX_SIZE,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
-use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::time::Duration;
 
+pub use builders::{Extend, Insert, Set, TryInsert};
 pub(crate) use entry_events::LengthPrefix;
 
 /// The field `ADD_AND_GET` writes and deletes, Redisson's `temp_val__redisson`.
@@ -51,157 +51,6 @@ impl EvictionMode {
             EvictionMode::Lru => "LRU",
             EvictionMode::Lfu => "LFU",
         }
-    }
-}
-
-/// A pending [`HashMapCache::insert`]. Await it, optionally after setting [`Insert::ttl`] or [`Insert::max_idle`].
-#[must_use = "an insert does nothing until it is awaited"]
-pub struct Insert<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
-    cache: &'a HashMapCache<K, V, C>,
-    k: &'a Q,
-    v: &'a W,
-    ttl: Option<Duration>,
-    max_idle: Option<Duration>,
-}
-
-impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> Insert<'a, K, V, C, Q, W> {
-    /// Makes the entry expire after `ttl`, whether it is read or not. Zero means no time to live.
-    pub fn ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = Some(ttl);
-        self
-    }
-
-    /// Makes the entry expire when nobody has read it for `max_idle`. Every read starts the time again. Zero means no idle limit.
-    pub fn max_idle(mut self, max_idle: Duration) -> Self {
-        self.max_idle = Some(max_idle);
-        self
-    }
-}
-
-impl<'a, K, V, C, Q, W> IntoFuture for Insert<'a, K, V, C, Q, W>
-where
-    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
-    V: Serialize + DeserializeOwned + Send + Sync + Borrow<W> + 'a,
-    C: Codec,
-    Q: Serialize + ?Sized + Sync + 'a,
-    W: Serialize + ?Sized + Sync + 'a,
-{
-    type Output = Result<Option<V>>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            let cache = self.cache;
-            let limits = limits(self.ttl, self.max_idle)?;
-            let key = cache.codec.encode(self.k)?;
-            let value = cache.codec.encode(self.v)?;
-            let previous: Option<Bytes> = if limits.any() {
-                cache
-                    .key
-                    .core
-                    .eval(
-                        &PUT_WITH_LIMITS,
-                        cache.redis_keys(&[
-                            Name::Main,
-                            Name::Timeout,
-                            Name::Idle,
-                            Name::Created,
-                            Name::Updated,
-                            Name::LastAccess,
-                            Name::Removed,
-                            Name::Options,
-                        ]),
-                        limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
-                    )
-                    .await?
-            } else {
-                cache
-                    .key
-                    .core
-                    .eval(
-                        &PUT,
-                        cache.redis_keys(&[
-                            Name::Main,
-                            Name::Timeout,
-                            Name::Idle,
-                            Name::Created,
-                            Name::Updated,
-                            Name::LastAccess,
-                            Name::Removed,
-                            Name::Options,
-                            Name::Lease,
-                        ]),
-                        vec![limits.now(), key, value, Bytes::from(PUBLISH)],
-                    )
-                    .await?
-            };
-            cache.decode_value(previous)
-        })
-    }
-}
-
-/// A pending [`HashMapCache::try_insert`]. Await it, optionally after setting [`TryInsert::ttl`] or [`TryInsert::max_idle`].
-#[must_use = "an insert does nothing until it is awaited"]
-pub struct TryInsert<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
-    cache: &'a HashMapCache<K, V, C>,
-    k: &'a Q,
-    v: &'a W,
-    ttl: Option<Duration>,
-    max_idle: Option<Duration>,
-}
-
-impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> TryInsert<'a, K, V, C, Q, W> {
-    /// Makes the entry expire after `ttl`, whether it is read or not. Zero means no time to live.
-    pub fn ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = Some(ttl);
-        self
-    }
-
-    /// Makes the entry expire when nobody has read it for `max_idle`. Every read starts the time again. Zero means no idle limit.
-    pub fn max_idle(mut self, max_idle: Duration) -> Self {
-        self.max_idle = Some(max_idle);
-        self
-    }
-}
-
-impl<'a, K, V, C, Q, W> IntoFuture for TryInsert<'a, K, V, C, Q, W>
-where
-    K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
-    V: Serialize + DeserializeOwned + Send + Sync + Borrow<W> + 'a,
-    C: Codec,
-    Q: Serialize + ?Sized + Sync + 'a,
-    W: Serialize + ?Sized + Sync + 'a,
-{
-    type Output = Result<Option<V>>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            let cache = self.cache;
-            let limits = limits(self.ttl, self.max_idle)?;
-            let key = cache.codec.encode(self.k)?;
-            let value = cache.codec.encode(self.v)?;
-            // Always the script with limits, with zeros when there are none: Redisson's script without limits leaves the old deadline of an expired entry in place.
-            let live: Option<Bytes> = cache
-                .key
-                .core
-                .eval(
-                    &PUT_IF_ABSENT_WITH_LIMITS,
-                    cache.redis_keys(&[
-                        Name::Main,
-                        Name::Timeout,
-                        Name::Idle,
-                        Name::Created,
-                        Name::LastAccess,
-                        Name::Removed,
-                        Name::Options,
-                        Name::Lease,
-                    ]),
-                    limits.arguments(vec![key, value, Bytes::from(PUBLISH)]),
-                )
-                .await?;
-            cache.decode_value(live)
-        })
     }
 }
 
@@ -450,13 +299,7 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        Insert {
-            cache: self,
-            k,
-            v,
-            ttl: None,
-            max_idle: None,
-        }
+        Insert::new(self, k, v)
     }
 
     /// Inserts the entry only when there is no live entry for the key, like [`HashMap::try_insert`](std::collections::HashMap::try_insert). Resolves to `None` when it stored the entry, or to `Some` with the live value it left alone. It takes `.ttl(..)` and `.max_idle(..)` too.
@@ -468,13 +311,235 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        TryInsert {
-            cache: self,
-            k,
-            v,
-            ttl: None,
-            max_idle: None,
+        TryInsert::new(self, k, v)
+    }
+
+    /// Inserts an entry like [`HashMapCache::insert`] and returns whether there was no live entry for the key: `true` exactly when `insert` would return `None`. The old value is not decoded.
+    ///
+    /// It replaces the entry and clears its limits like `insert`, unlike Redisson's `fastPut`, which keeps a live entry's time to live. It takes `.ttl(..)` and `.max_idle(..)` too.
+    #[doc(alias = "fastPut", alias = "putWithLease")]
+    pub fn set<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> Set<'a, K, V, C, Q, W>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        Set::new(self, k, v)
+    }
+
+    /// Replaces the value of a live entry and returns the old one; a missing or expired entry is left alone and `None` is returned. The entry keeps its time to live and its idle time.
+    #[doc(
+        alias = "putIfExists",
+        alias = "fastPutIfExists",
+        alias = "fastReplace"
+    )]
+    pub async fn replace<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        let raw: Option<Bytes> = self
+            .key
+            .core
+            .eval(
+                &REPLACE,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Updated,
+                    Name::Options,
+                ]),
+                vec![
+                    now(),
+                    self.codec.encode(k)?,
+                    self.codec.encode(v)?,
+                    Bytes::from(PUBLISH),
+                ],
+            )
+            .await?;
+        self.decode_value(raw)
+    }
+
+    /// Sets the value to `new` only when the live entry holds `old`, and returns whether it did. The entry keeps its limits. Values are compared by their encoded bytes.
+    #[doc(alias = "replace")]
+    pub async fn compare_and_set<Q, W>(&self, k: &Q, old: &W, new: &W) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        let replaced: i64 = self
+            .key
+            .core
+            .eval(
+                &REPLACE_IF,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Updated,
+                    Name::Options,
+                ]),
+                vec![
+                    now(),
+                    self.codec.encode(k)?,
+                    self.codec.encode(old)?,
+                    self.codec.encode(new)?,
+                    Bytes::from(PUBLISH),
+                ],
+            )
+            .await?;
+        Ok(replaced == 1)
+    }
+
+    /// Removes the live entry only when it holds `v`, and returns whether it did. Values are compared by their encoded bytes.
+    #[doc(alias = "remove")]
+    pub async fn remove_if_eq<Q, W>(&self, k: &Q, v: &W) -> Result<bool>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync,
+        W: Serialize + ?Sized + Sync,
+    {
+        let removed: i64 = self
+            .key
+            .core
+            .eval(
+                &REMOVE_IF,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Removed,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                vec![
+                    now(),
+                    self.codec.encode(k)?,
+                    self.codec.encode(v)?,
+                    Bytes::from(PUBLISH),
+                ],
+            )
+            .await?;
+        Ok(removed == 1)
+    }
+
+    /// Removes several entries in one call and returns how many were in Redis. As in Redisson, an expired entry that the clean-up has not deleted yet counts too.
+    #[doc(alias = "fastRemove")]
+    pub async fn remove_many<Q>(&self, ks: &[&Q]) -> Result<usize>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if ks.is_empty() {
+            return Ok(0);
         }
+        let mut args = std::vec::Vec::with_capacity(ks.len() + 1);
+        args.push(Bytes::from(PUBLISH));
+        for k in ks {
+            args.push(self.codec.encode(*k)?);
+        }
+        let removed: usize = self
+            .key
+            .core
+            .eval(
+                &FAST_REMOVE,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Removed,
+                    Name::LastAccess,
+                    Name::Options,
+                ]),
+                args,
+            )
+            .await?;
+        Ok(removed)
+    }
+
+    /// Adds `delta` to the number stored under the key, creating it at `delta`, and returns the result. The entry keeps its limits.
+    #[doc(alias = "addAndGet")]
+    pub async fn incr_by<Q>(&self, k: &Q, delta: i64) -> Result<i64>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        let result = self.add_and_get(k, delta.to_string()).await?;
+        result
+            .parse()
+            .map_err(|_| Error::Codec(format!("not an integer: {result}")))
+    }
+
+    /// Adds `delta` to the number stored under the key, creating it at `delta`, and returns the result. A `delta` that is not finite is [`Error::Config`].
+    #[doc(alias = "addAndGet")]
+    pub async fn incr_by_float<Q>(&self, k: &Q, delta: f64) -> Result<f64>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        if !delta.is_finite() {
+            return Err(Error::Config(format!("cannot add {delta}")));
+        }
+        // `Display` of an `f64` never uses an exponent, like Java's `BigDecimal.toPlainString`.
+        let result = self.add_and_get(k, delta.to_string()).await?;
+        result
+            .parse()
+            .map_err(|_| Error::Codec(format!("not a number: {result}")))
+    }
+
+    async fn add_and_get<Q>(&self, k: &Q, delta: String) -> Result<String>
+    where
+        K: Borrow<Q>,
+        Q: Serialize + ?Sized + Sync,
+    {
+        self.key
+            .core
+            .eval(
+                &ADD_AND_GET,
+                self.redis_keys(&[
+                    Name::Main,
+                    Name::Timeout,
+                    Name::Idle,
+                    Name::Created,
+                    Name::Updated,
+                    Name::LastAccess,
+                    Name::Removed,
+                    Name::Options,
+                ]),
+                vec![
+                    now(),
+                    self.codec.encode(k)?,
+                    Bytes::from(delta),
+                    Bytes::from(PUBLISH),
+                ],
+            )
+            .await
+    }
+
+    /// Inserts all entries, as [`HashMapCache::insert`] would one by one: each replaces its entry and clears its limits unless [`Extend::ttl`] or [`Extend::max_idle`] sets new ones (Redisson's `putAll(map)` keeps them). Entries are `(&key, &value)` pairs and are encoded at once; nothing is sent for none.
+    #[doc(alias = "putAll")]
+    pub fn extend<'a, Q, W>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, &'a W)>,
+    ) -> Extend<'_, K, V, C>
+    where
+        K: Borrow<Q>,
+        V: Borrow<W>,
+        Q: Serialize + ?Sized + Sync + 'a,
+        W: Serialize + ?Sized + Sync + 'a,
+    {
+        let encoded = entries
+            .into_iter()
+            .map(|(k, v)| Ok((self.codec.encode(k)?, self.codec.encode(v)?)))
+            .collect::<Result<std::vec::Vec<(Bytes, Bytes)>>>();
+        Extend::new(self, encoded)
     }
 
     /// Limits the cache to `max` entries. When it is full, an insert drops the least recently (`Lru`) or least often (`Lfu`) used entry. `0` removes the limit. The limit is stored in Redis and applies to every client. Only entries written or read while a limit is set are tracked, so older entries are never dropped for space.
