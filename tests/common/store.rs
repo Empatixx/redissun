@@ -93,12 +93,7 @@ impl MemoryStore {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let failed = self.0.fail_always.load(Ordering::SeqCst)
-            || self
-                .0
-                .fail_next
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok();
+        let failed = self.0.fail_always.load(Ordering::SeqCst) || take_one(&self.0.fail_next);
         let result = if failed {
             Err("injected".into())
         } else {
@@ -161,4 +156,16 @@ where
         })
         .await
     }
+}
+
+/// Takes one from `n` unless it is zero; returns whether it did.
+fn take_one(n: &std::sync::atomic::AtomicUsize) -> bool {
+    let mut current = n.load(Ordering::SeqCst);
+    while current > 0 {
+        match n.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
 }
