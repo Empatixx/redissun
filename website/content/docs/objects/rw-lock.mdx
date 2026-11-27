@@ -19,9 +19,13 @@ write.unlock().await?;
 
 | Method | Notes |
 |---|---|
-| `read()`, `write()` | wait until the lock is free. Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `read()`, `write()` | wait until the lock is free. Add `.timeout(wait)` to get `None` when `wait` runs out, or `.lease(time)` to set a lease instead of using the watchdog. |
 | `try_read()`, `try_write()` | return `None` at once when the lock is busy |
-| `is_write_locked()` | |
+| `is_read_locked()`, `is_write_locked()` | whether any owner holds a read lock, or the write lock |
+| `is_read_held_by_current()`, `is_write_held_by_current()` | whether the current task holds it |
+| `read_hold_count()`, `write_hold_count()` | how many times the current task took it |
+| `force_unlock_read()` | releases every read hold of every owner, when the lock is in read mode |
+| `force_unlock_write()` | releases the write lock and its owner's read holds, when the lock is in write mode |
 | `force_unlock()` | releases every read and write hold of every owner |
 
 Guards have `unlock()`, and they release the lock in the background when dropped.

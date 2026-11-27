@@ -613,9 +613,9 @@ where
     }
 }
 
-/// A pending [`HashMapCache::insert_nx`]. Await it, optionally after setting [`InsertNx::ttl`] or [`InsertNx::max_idle`].
+/// A pending [`HashMapCache::try_insert`]. Await it, optionally after setting [`TryInsert::ttl`] or [`TryInsert::max_idle`].
 #[must_use = "an insert does nothing until it is awaited"]
-pub struct InsertNx<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
+pub struct TryInsert<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
     cache: &'a HashMapCache<K, V, C>,
     k: &'a Q,
     v: &'a W,
@@ -623,7 +623,7 @@ pub struct InsertNx<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> {
     max_idle: Option<Duration>,
 }
 
-impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> InsertNx<'a, K, V, C, Q, W> {
+impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> TryInsert<'a, K, V, C, Q, W> {
     /// Makes the entry expire after `ttl`, whether it is read or not. Zero means no time to live.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
@@ -637,7 +637,7 @@ impl<'a, K, V, C: Codec, Q: ?Sized, W: ?Sized> InsertNx<'a, K, V, C, Q, W> {
     }
 }
 
-impl<'a, K, V, C, Q, W> IntoFuture for InsertNx<'a, K, V, C, Q, W>
+impl<'a, K, V, C, Q, W> IntoFuture for TryInsert<'a, K, V, C, Q, W>
 where
     K: Serialize + DeserializeOwned + Send + Sync + Borrow<Q> + 'a,
     V: Serialize + DeserializeOwned + Send + Sync + Borrow<W> + 'a,
@@ -917,14 +917,17 @@ where
     }
 
     /// Inserts the entry only when there is no live entry for the key, like Redisson's `fastPutIfAbsent`. Resolves to whether it was inserted. It takes `.ttl(..)` and `.max_idle(..)` too.
-    pub fn insert_nx<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> InsertNx<'a, K, V, C, Q, W>
+    ///
+    /// Unlike [`HashMap::try_insert`](crate::HashMap::try_insert), which gives back the existing value, this resolves to a `bool`: the cache's `putIfAbsent` script only reports whether it stored the entry.
+    #[doc(alias = "fastPutIfAbsent", alias = "putIfAbsent")]
+    pub fn try_insert<'a, Q, W>(&'a self, k: &'a Q, v: &'a W) -> TryInsert<'a, K, V, C, Q, W>
     where
         K: Borrow<Q>,
         V: Borrow<W>,
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        InsertNx {
+        TryInsert {
             cache: self,
             k,
             v,
@@ -944,8 +947,9 @@ where
         Ok(())
     }
 
-    /// Sets the size limit only when none was set before; returns whether it did.
-    pub async fn try_set_max_size(&self, max: usize, mode: EvictionMode) -> Result<bool> {
+    /// Sets the size limit only when none was set before, like `OnceLock::set`; returns whether it did. Redisson's `trySetMaxSize`.
+    #[doc(alias = "trySetMaxSize")]
+    pub async fn init_max_size(&self, max: usize, mode: EvictionMode) -> Result<bool> {
         let set: i64 = self
             .key
             .core

@@ -8,10 +8,10 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 
 #[tokio::test]
-async fn try_set_count_only_works_while_the_latch_does_not_exist() {
+async fn init_count_only_works_while_the_latch_does_not_exist() {
     let latch = client().await.count_down_latch(unique("latch"));
-    assert!(latch.try_set_count(3).await.unwrap());
-    assert!(!latch.try_set_count(9).await.unwrap());
+    assert!(latch.init_count(3).await.unwrap());
+    assert!(!latch.init_count(9).await.unwrap());
     assert_eq!(latch.count().await.unwrap(), 3);
 }
 
@@ -34,7 +34,7 @@ async fn a_missing_latch_is_already_open() {
 #[tokio::test]
 async fn count_down_reaches_zero_and_removes_the_key() {
     let latch = client().await.count_down_latch(unique("latch"));
-    latch.try_set_count(2).await.unwrap();
+    latch.init_count(2).await.unwrap();
     latch.count_down().await.unwrap();
     assert_eq!(latch.count().await.unwrap(), 1);
     assert!(latch.exists().await.unwrap());
@@ -56,7 +56,7 @@ async fn counting_down_an_open_latch_does_not_recreate_it() {
 async fn the_last_count_down_releases_every_waiter_quickly() {
     let name = unique("latch");
     let latch = client().await.count_down_latch(name.clone());
-    latch.try_set_count(2).await.unwrap();
+    latch.init_count(2).await.unwrap();
 
     let started = Instant::now();
     let mut waiters = Vec::new();
@@ -84,7 +84,7 @@ async fn the_last_count_down_releases_every_waiter_quickly() {
 #[tokio::test]
 async fn wait_for_gives_up_while_the_count_is_positive() {
     let latch = client().await.count_down_latch(unique("latch"));
-    latch.try_set_count(1).await.unwrap();
+    latch.init_count(1).await.unwrap();
     let started = Instant::now();
     assert!(latch
         .wait()
@@ -102,7 +102,7 @@ async fn concurrent_count_downs_open_the_latch_exactly_once() {
     let client = client().await;
     client
         .count_down_latch(name.clone())
-        .try_set_count(40)
+        .init_count(40)
         .await
         .unwrap();
     let waiting = client.count_down_latch(name.clone());
@@ -131,9 +131,9 @@ async fn concurrent_count_downs_open_the_latch_exactly_once() {
 #[tokio::test]
 async fn a_finished_latch_can_be_set_again() {
     let latch = client().await.count_down_latch(unique("latch"));
-    latch.try_set_count(1).await.unwrap();
+    latch.init_count(1).await.unwrap();
     latch.count_down().await.unwrap();
-    assert!(latch.try_set_count(2).await.unwrap());
+    assert!(latch.init_count(2).await.unwrap());
     assert_eq!(latch.count().await.unwrap(), 2);
 }
 
@@ -141,7 +141,7 @@ async fn a_finished_latch_can_be_set_again() {
 async fn deleting_the_latch_opens_it_for_waiters() {
     let name = unique("latch");
     let latch = client().await.count_down_latch(name.clone());
-    latch.try_set_count(5).await.unwrap();
+    latch.init_count(5).await.unwrap();
     let waiting = client().await.count_down_latch(name);
     let waiter = tokio::spawn(async move { waiting.wait().await.unwrap() });
     sleep(Duration::from_millis(300)).await;
@@ -157,7 +157,7 @@ async fn the_subscription_is_released_after_waiting() {
     let name = unique("latch");
     let pattern = format!("redissun_countdownlatch__channel__{{{name}}}");
     let latch = client().await.count_down_latch(name);
-    latch.try_set_count(1).await.unwrap();
+    latch.init_count(1).await.unwrap();
 
     let waiting = latch.clone();
     let wait =
@@ -183,7 +183,7 @@ async fn debug_shows_the_name() {
 #[tokio::test]
 async fn a_zero_count_creates_an_open_latch() {
     let latch = client().await.count_down_latch(unique("latch"));
-    assert!(latch.try_set_count(0).await.unwrap());
+    assert!(latch.init_count(0).await.unwrap());
     assert!(latch.exists().await.unwrap());
     assert_eq!(latch.count().await.unwrap(), 0);
     timeout(Duration::from_secs(2), latch.wait())
@@ -200,7 +200,7 @@ async fn wait_with_a_timeout_returns_when_the_latch_opens() {
     let client = client().await;
     let name = unique("latch1");
     let latch = client.count_down_latch(name.clone());
-    assert!(latch.try_set_count(1).await.unwrap());
+    assert!(latch.init_count(1).await.unwrap());
     let counting = client.count_down_latch(name);
     let counter = tokio::spawn(async move {
         sleep(Duration::from_millis(500)).await;
@@ -222,7 +222,7 @@ async fn wait_with_a_timeout_gives_up_before_the_count_down() {
     let client = client().await;
     let name = unique("latch1");
     let latch = client.count_down_latch(name.clone());
-    assert!(latch.try_set_count(1).await.unwrap());
+    assert!(latch.init_count(1).await.unwrap());
     let counting = client.count_down_latch(name);
     let counter = tokio::spawn(async move {
         sleep(Duration::from_millis(1000)).await;
@@ -244,7 +244,7 @@ async fn every_waiter_wakes_once_the_count_reaches_zero() {
     let client = client().await;
     let name = unique("latch");
     let latch = client.count_down_latch(name.clone());
-    latch.try_set_count(5).await.unwrap();
+    latch.init_count(5).await.unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let mut waiters = Vec::new();
     for _ in 0..5 {
@@ -288,7 +288,7 @@ async fn every_waiter_wakes_once_the_count_reaches_zero() {
 async fn count_down_stops_at_zero_and_wait_returns_at_once() {
     let client = client().await;
     let latch = client.count_down_latch(unique("latch"));
-    latch.try_set_count(2).await.unwrap();
+    latch.init_count(2).await.unwrap();
     assert_eq!(latch.count().await.unwrap(), 2);
     latch.count_down().await.unwrap();
     assert_eq!(latch.count().await.unwrap(), 1);
@@ -303,7 +303,7 @@ async fn count_down_stops_at_zero_and_wait_returns_at_once() {
     latch.wait().await.unwrap();
 
     let latch1 = client.count_down_latch(unique("latch1"));
-    latch1.try_set_count(1).await.unwrap();
+    latch1.init_count(1).await.unwrap();
     latch1.count_down().await.unwrap();
     assert_eq!(latch1.count().await.unwrap(), 0);
     latch1.count_down().await.unwrap();
@@ -311,7 +311,7 @@ async fn count_down_stops_at_zero_and_wait_returns_at_once() {
     latch1.wait().await.unwrap();
 
     let latch2 = client.count_down_latch(unique("latch2"));
-    latch2.try_set_count(1).await.unwrap();
+    latch2.init_count(1).await.unwrap();
     latch2.count_down().await.unwrap();
     latch2.wait().await.unwrap();
     latch2.wait().await.unwrap();
@@ -331,7 +331,7 @@ async fn count_down_stops_at_zero_and_wait_returns_at_once() {
 #[tokio::test]
 async fn del_removes_a_set_latch() {
     let latch = client().await.count_down_latch(unique("latch"));
-    latch.try_set_count(1).await.unwrap();
+    latch.init_count(1).await.unwrap();
     assert!(latch.del().await.unwrap());
 }
 
@@ -344,10 +344,10 @@ async fn del_of_a_missing_latch_returns_false() {
 
 // Redisson: testTrySetCount
 #[tokio::test]
-async fn try_set_count_fails_while_the_latch_is_set() {
+async fn init_count_fails_while_the_latch_is_set() {
     let latch = client().await.count_down_latch(unique("latch"));
-    assert!(latch.try_set_count(1).await.unwrap());
-    assert!(!latch.try_set_count(2).await.unwrap());
+    assert!(latch.init_count(1).await.unwrap());
+    assert!(!latch.init_count(2).await.unwrap());
 }
 
 // Redisson: testCount
@@ -364,7 +364,7 @@ async fn concurrent_count_downs_release_every_waiter_on_one_client() {
     let client = client().await;
     let name = unique("latch");
     let latch = client.count_down_latch(name.clone());
-    latch.try_set_count(iterations as u64).await.unwrap();
+    latch.init_count(iterations as u64).await.unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
 
     let mut waiters = Vec::new();

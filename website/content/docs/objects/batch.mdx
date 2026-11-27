@@ -41,16 +41,16 @@ As in Redisson, a command that Redis rejects fails its own handle and makes `exe
 | `.sync(slaves, timeout)` | after the commands, wait on every node the batch wrote to until `slaves` replicas have them (`WAIT`). `BatchResult::synced_slaves` is the sum over the nodes. |
 | `.sync_aof(local, slaves, timeout)` | the same with `WAITAOF`, which also waits for fsync. Needs Redis 7.2. |
 
-`execute()` returns a `BatchResult` with the number of `commands` and `synced_slaves`. `discard()` throws the queued commands away, and their handles resolve to `Error::Config`. If you drop a batch without executing it, the handles do the same. If you do not need a reply, `drop` the handle.
+`len()` and `is_empty()` tell how many commands are queued. `execute()` returns a `BatchResult` with the number of `commands` and `synced_slaves`. `discard()` throws the queued commands away, and their handles resolve to `Error::Config`. If you drop a batch without executing it, the handles do the same. If you do not need a reply, `drop` the handle.
 
 ## What can be queued
 
 | Object | Methods |
 |---|---|
 | `hash_map` | `insert`, `get`, `remove`, `contains_key`, `len` |
-| `bucket` | `set`, `set_ex`, `get` |
+| `bucket` | `set`, `set_with_ttl`, `get` |
 | `hash_set` | `insert`, `remove`, `contains`, `len` |
-| `atomic_i64` | `get`, `set`, `incr`, `decr`, `add_and_get` |
+| `atomic_i64` | `get`, `set`, `incr`, `decr`, `add` |
 | `vec` | `push`, `get`, `len` |
 | `vec_deque` | `push_back`, `push_front`, `pop_front`, `pop_back`, `len` |
 | `sorted_set` | `insert`, `add_score`, `score`, `remove`, `len` |

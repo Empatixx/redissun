@@ -19,12 +19,12 @@ let job = jobs.pop_front_wait().await?;
 | Method | Notes |
 |---|---|
 | `push(&v, delay)` | the value reaches the destination after `delay`, like Redisson's `offer`. It is sent once and not retried. |
-| `remove(&v)`, `remove_all(&[..])`, `retain_all(&[..])` | take waiting values out |
+| `remove(&v)`, `remove_values(&[..])`, `retain_values(&[..])` | take waiting values out |
 | `contains(&v)`, `contains_all(&[..])` | look at the waiting values |
-| `peek()`, `poll()`, `poll_many(n)` | read or take the waiting values in push order, before their delay ends |
-| `poll_last_and_offer_first_to(&deque)` | moves the last waiting value to the front of another `VecDeque` |
+| `front()`, `pop_front()`, `pop_front_many(n)` | read or take the waiting values in push order, before their delay ends |
+| `pop_back_push_front(&deque)` | moves the last waiting value to the front of another `VecDeque` |
 | `len()`, `is_empty()` | waiting values only |
-| `values()` | the waiting values in push order |
+| `to_vec()` | the waiting values in push order |
 | `clear()` | drops the waiting values |
 
 Equal values are kept as separate entries. `DelayedQueue` also has the `Object` methods, which apply to the waiting values.

@@ -22,8 +22,8 @@ The message is borrowed when you publish, and you get an owned value back. Messa
 | `publish(&m)` | `PUBLISH` | returns how many Redis connections got the message |
 | `subscribe()` | `SUBSCRIBE` | returns a `Subscriber` |
 | `subscriber_count()` | `PUBSUB NUMSUB` | counts connections of all programs |
-| `listener_count()` | | counts the subscribers of this client |
-| `remove_all_listeners()` | `UNSUBSCRIBE` | ends every subscriber of this client |
+| `local_subscriber_count()` | | counts the subscribers of this client |
+| `unsubscribe_all()` | `UNSUBSCRIBE` | ends every subscriber of this client |
 
 A `Subscriber` has `recv()` and `into_stream()`. The stream never ends. Dropping a subscriber removes it.
 

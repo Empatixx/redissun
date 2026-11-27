@@ -123,7 +123,7 @@ async fn many_kinds_of_objects_share_one_batch() {
     let set_len = set.len();
     let removed = set.remove("a");
     let c1 = counter.incr();
-    let c2 = counter.add_and_get(10);
+    let c2 = counter.add(10);
     let c3 = counter.get();
     let pushed = list.push(&7);
     let list_len = list.len();
@@ -201,7 +201,7 @@ async fn skip_result_applies_the_commands_but_hides_the_replies() {
     let client = client().await;
     let name = unique("batch");
     let batch = client.batch().skip_result();
-    let handle = batch.atomic_i64(name.clone()).add_and_get(5);
+    let handle = batch.atomic_i64(name.clone()).add(5);
     batch.execute().await.unwrap();
     assert!(matches!(handle.await, Err(Error::Config(_))));
     assert_eq!(client.atomic_i64(name).get().await.unwrap(), 5);
@@ -227,7 +227,7 @@ async fn key_commands_work_in_a_batch() {
     let client = client().await;
     let name = unique("batch");
     let batch = client.batch();
-    drop(batch.atomic_i64(name.clone()).add_and_get(1));
+    drop(batch.atomic_i64(name.clone()).add(1));
     let ttl = batch.expire(name.clone(), Duration::from_secs(60));
     let gone = batch.del(unique("batch"));
     batch.execute().await.unwrap();
@@ -257,7 +257,7 @@ async fn stored_in_redis_commands_wait_in_a_transaction_until_execute() {
     let batch = client.batch().stored_in_redis();
     let counter = batch.atomic_i64(name.clone());
     let first = counter.incr();
-    let second = counter.add_and_get(10);
+    let second = counter.add(10);
     let map = batch.hash_map::<String, String>(unique("batch"));
     let inserted = map.insert("k", "v");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -587,11 +587,7 @@ async fn batches_with_dropped_handles_do_not_disturb_concurrent_commands() {
                     drop(batch.bucket::<String>(unique("batch")).set("test"));
                     batch.execute().await.unwrap();
                 } else {
-                    client
-                        .atomic_i64(shared.clone())
-                        .add_and_get(2)
-                        .await
-                        .unwrap();
+                    client.atomic_i64(shared.clone()).add(2).await.unwrap();
                 }
             }
         }));
@@ -752,9 +748,9 @@ async fn an_atomic_batch_returns_every_reply_in_order() {
     let client = client().await;
     let batch = client.batch().atomic();
     let (a1, a2, a3) = (unique("A1"), unique("A2"), unique("A3"));
-    let f1 = batch.atomic_i64(a1.clone()).add_and_get(1);
-    let f2 = batch.atomic_i64(a2.clone()).add_and_get(2);
-    let f3 = batch.atomic_i64(a3).add_and_get(3);
+    let f1 = batch.atomic_i64(a1.clone()).add(1);
+    let f2 = batch.atomic_i64(a2.clone()).add(2);
+    let f3 = batch.atomic_i64(a3).add(3);
     let d1 = batch.del(a1);
     let d2 = batch.del(a2);
     assert_eq!(batch.execute().await.unwrap().commands, 5);
@@ -881,7 +877,7 @@ async fn handles_queued_from_many_tasks_resolve_in_queue_order() {
             tasks.push(tokio::spawn(async move {
                 let mut queued = queued.lock().await;
                 let key = j % 3;
-                let handle = batch.atomic_i64(format!("{prefix}{key}")).add_and_get(j);
+                let handle = batch.atomic_i64(format!("{prefix}{key}")).add(j);
                 queued.push((key, j, handle));
             }));
         }
@@ -1118,7 +1114,7 @@ async fn batches_use_the_password_and_the_database_of_the_client() {
         client.batch().stored_in_redis(),
     ] {
         let name = unique("batch");
-        let written = batch.atomic_i64(name.clone()).add_and_get(7);
+        let written = batch.atomic_i64(name.clone()).add(7);
         assert_eq!(batch.execute().await.unwrap().commands, 1);
         assert_eq!(written.await.unwrap(), 7);
         assert_eq!(client.atomic_i64(name).get().await.unwrap(), 7);
@@ -1283,7 +1279,7 @@ mod cluster {
         let batch = client.batch().atomic().sync(1, Duration::from_secs(1));
         let prefix = unique("{test}");
         let handles: Vec<_> = (0..10)
-            .map(|i| batch.atomic_i64(format!("{prefix}{i}")).add_and_get(i))
+            .map(|i| batch.atomic_i64(format!("{prefix}{i}")).add(i))
             .collect();
         let result = batch.execute().await.unwrap();
         assert_eq!(result.synced_slaves, 1);
@@ -1304,7 +1300,7 @@ mod cluster {
                 .collect();
             let handles: Vec<_> = names
                 .iter()
-                .map(|name| batch.atomic_i64(name.clone()).add_and_get(7))
+                .map(|name| batch.atomic_i64(name.clone()).add(7))
                 .collect();
             let result = batch.execute().await.unwrap();
             assert_eq!(result.commands, 30);
@@ -1450,7 +1446,7 @@ mod cluster {
             let name = unique("batch");
             let counter = batch.atomic_i64(name.clone());
             let first = counter.incr();
-            let second = counter.add_and_get(10);
+            let second = counter.add(10);
             assert_eq!(batch.execute().await.unwrap().commands, 2);
             assert_eq!(first.await.unwrap(), 1);
             assert_eq!(second.await.unwrap(), 11);
@@ -1486,7 +1482,7 @@ mod cluster {
         for (mode, batch) in modes {
             let counter = batch.atomic_i64(format!("{{ask}}{mode}"));
             let first = counter.incr();
-            let second = counter.add_and_get(10);
+            let second = counter.add(10);
             let read = counter.get();
             let result = batch.execute().await;
             assert_eq!(result.unwrap().commands, 3, "{mode}");

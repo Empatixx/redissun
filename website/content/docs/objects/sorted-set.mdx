@@ -21,17 +21,38 @@ Values with the same score are ordered by their encoded bytes. Values are equal 
 | Method | Notes |
 |---|---|
 | `insert(&v, score)` | returns `true` when the value is new. An old value gets the new score. |
+| `try_insert(&v, score)`, `update(&v, score)` | only add a new value (`NX`), or only change the score of an existing one (`XX`). Both return whether anything changed. |
+| `insert_if_greater(&v, score)`, `insert_if_less(&v, score)` | add the value, or change its score only when the new one is greater (`GT`) or less (`LT`); return whether anything changed |
+| `extend(entries)` | adds many `(&v, score)` pairs and returns how many were new. `.if_absent()`, `.if_exists()`, `.if_greater()` or `.if_less()` adds a condition and then counts the values added or changed. |
+| `insert_and_rank(&v, score)`, `insert_and_rev_rank(&v, score)` | add or change the value, then return its rank |
 | `add_score(&v, delta)` | returns the new score. A missing value starts from 0. |
+| `add_score_and_rank(&v, delta)`, `add_score_and_rev_rank(&v, delta)` | add to the score, then return the rank |
 | `score(&v)`, `rank(&v)`, `rev_rank(&v)` | rank 0 is the lowest score, or the highest for `rev_rank` |
+| `scores(&[&v])`, `rev_rank_many(&[&v])` | for several values, in the order given |
+| `rank_with_score(&v)` | the rank and the score together (`ZRANK WITHSCORE`, Redis 7.2 or newer) |
 | `remove(&v)`, `contains(&v)` | |
+| `remove_many(&[&v])` | how many were there |
+| `retain(&[&v])` | keeps only the given values; returns whether the set changed |
+| `replace(&old, &new)` | puts `new` in place of `old` with its score; returns whether `old` was there |
+| `contains_all(&[&v])` | `true` if every value is there; an empty list gives `true` |
 | `len()`, `is_empty()`, `clear()` | |
 | `first()`, `last()` | read without removing |
+| `first_score()`, `last_score()` | the lowest and the highest score |
 | `pop_first()`, `pop_last()` | remove and return, one owner gets each value |
-| `pop_first_wait()`, `pop_last_wait()` | wait for a value. Add `.timeout(wait)` to get `None` when `wait` runs out. |
-| `range(a..b)`, `rev_range(a..b)` | by position. The end is exclusive, like a slice. |
-| `range_by_score(a..=b)` | any `f64` range: `1.0..`, `..=3.0`, `..`, or `(Bound::Excluded(a), Bound::Included(b))` |
+| `pop_first_many(n)`, `pop_last_many(n)` | up to `n` values with the lowest or highest scores, both ordered from the lowest score |
+| `pop_first_wait()`, `pop_last_wait()` | wait for a value (`BZPOPMIN`, `BZPOPMAX`). Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `pop_first_many_wait(n)`, `pop_last_many_wait(n)` | wait until there is at least one value, then take up to `n` (`BZMPOP`, Redis 7.0 or newer). `pop_last_many_wait` returns the highest score first. |
+| `random()`, `random_many(n)`, `random_entries(n)` | random values, the last one with scores, without removing them |
+| `range(a..b)`, `rev_range(a..b)`, `remove_range(a..b)` | by position. Any range works, like a slice: `a..b`, `a..=b`, `a..`, `..`. |
+| `range_by_score(a..=b)`, `rev_range_by_score(a..=b)` | any `f64` range: `1.0..`, `..=3.0`, `..`, or `(Bound::Excluded(a), Bound::Included(b))` |
+| `range_by_score_limit(range, offset, count)`, `rev_range_by_score_limit(..)` | the same, skipping `offset` values and returning at most `count` |
 | `count_by_score(range)`, `remove_by_score(range)` | |
+| `union(&[&other])`, `intersection(&[&other])`, `difference(&[&other])` | `ZUNION`, `ZINTER`, `ZDIFF` of this set and the others, with scores. Scores are summed. |
+| `union_with(&others, &weights, aggregate)`, `intersection_with(..)` | with a weight per set (this one first; empty for all 1) and `Aggregate::Sum`, `Min` or `Max` |
+| `store_union(&sources)`, `store_intersection(&sources)`, `store_difference(&sources)` | replace this set with the result of the sources and return its new size. `store_union_with` and `store_intersection_with` take weights and an `Aggregate`. |
 | `iter()` | a stream of `(value, score)` read with `ZSCAN`; the order is not guaranteed |
+
+The methods that use more than one set need all sets in one hash slot in Redis Cluster.
 
 Values come back with their score as `(V, f64)`. `SortedSet` also has the `Object` methods.
 

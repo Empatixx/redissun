@@ -60,10 +60,10 @@ async fn a_dropped_listener_stops_listening() {
     let client = client().await;
     let events = client.keys().listen(KeyEvent::Set).await.unwrap();
     let topic = client.pattern_topic::<String>("__keyevent@*:set");
-    assert_eq!(topic.listener_count().await, 1);
+    assert_eq!(topic.local_subscriber_count().await, 1);
     drop(events);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while topic.listener_count().await != 0 {
+        while topic.local_subscriber_count().await != 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -400,7 +400,8 @@ async fn expire_many_and_expire_at_many_count_the_keys_that_exist() {
     for name in [&first, &second] {
         client
             .bucket::<i32>(&**name)
-            .set_ex(&23, Duration::from_secs(3600))
+            .set(&23)
+            .ttl(Duration::from_secs(3600))
             .await
             .unwrap();
     }
@@ -439,10 +440,10 @@ async fn one_key_expires_persists_and_is_renamed_by_name() {
         .expire_at(&name, SystemTime::now() + Duration::from_secs(60))
         .await
         .unwrap());
-    assert!(!keys.rename_nx(&name, &taken).await.unwrap());
+    assert!(!keys.try_rename(&name, &taken).await.unwrap());
     keys.rename(&name, &other).await.unwrap();
     assert_eq!(client.bucket::<i32>(&*other).get().await.unwrap(), Some(1));
-    assert!(keys.rename_nx(&other, &name).await.unwrap());
+    assert!(keys.try_rename(&other, &name).await.unwrap());
     assert!(!keys
         .expire(&unique("missing"), Duration::from_secs(1))
         .await

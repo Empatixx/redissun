@@ -6,13 +6,13 @@ description: Members with a position, and searches around a point.
 A `Geo` keeps members with a position on Earth. You can ask for the distance between members and for the members near a point.
 
 ```rust
-use redissun::{GeoPoint, GeoUnit};
+use redissun::{GeoOrder, GeoPoint, GeoSearch, GeoUnit};
 
 let shops = client.geo::<String>("shops");
-shops.add("prague", GeoPoint { longitude: 14.4378, latitude: 50.0755 }).await?;
+shops.insert("prague", GeoPoint { longitude: 14.4378, latitude: 50.0755 }).await?;
 
 let near = shops
-    .radius(GeoPoint { longitude: 14.4, latitude: 50.1 }, 5.0, GeoUnit::Kilometers, None)
+    .search(GeoPoint { longitude: 14.4, latitude: 50.1 }, &GeoSearch::radius(5.0, GeoUnit::Kilometers).order(GeoOrder::Asc))
     .await?;
 for found in near {
     println!("{} is {:.1} km away", found.value, found.distance);
@@ -23,15 +23,20 @@ for found in near {
 
 | Method | Notes |
 |---|---|
-| `add(&v, point)` | returns `true` for a new member. An old member moves. |
-| `remove(&v)`, `pos(&v)`, `hash(&v)` | `hash` is the 11 character geohash |
-| `dist(&a, &b, unit)` | `None` when a member is missing |
-| `radius(point, radius, unit, count)` | members nearest first, each as a `GeoMatch` with `value`, `distance` and `point` |
-| `radius_of(&v, radius, unit, count)` | around another member. The member itself is included. |
-| `within_box(point, width, height, unit, count)` | members inside a rectangle |
+| `insert(&v, point)` | returns `true` for a new member. An old member moves. |
+| `try_insert(&v, point)` | adds only a missing member (`GEOADD NX`) |
+| `update(&v, point)` | moves only an existing member; returns whether it was there |
+| `extend(entries)` | adds or moves many members; returns how many were new |
+| `remove(&v)`, `position(&v)`, `positions(&[&v])` | positions are `Option<GeoPoint>` |
+| `geohash(&v)`, `geohash_many(&[&v])` | the 11 character geohash |
+| `distance(&a, &b, unit)` | `None` when a member is missing |
+| `search(point, &args)` | members found around a point, each as a `GeoMatch` with `value`, `distance` and `point` |
+| `search_from(&v, &args)` | around another member. The member itself is included. |
+| `store_search(dest, point, &args)`, `store_search_from(dest, &v, &args)` | store the found members in another geo set (`GEOSEARCHSTORE`) |
+| `to_vec()` | all members in geohash order |
 | `len()`, `is_empty()`, `clear()` | |
 
-`count` is `Option<usize>` and limits how many members a search returns. Units are `GeoUnit::{Meters, Kilometers, Miles, Feet}`.
+`args` is a `GeoSearch`: `GeoSearch::radius(r, unit)` or `GeoSearch::rect(width, height, unit)`, then `.order(GeoOrder::Asc)`, `.count(n)` to limit how many members a search returns, `.count_any(n)` to stop as soon as `n` are found (`COUNT ANY`), and `.store_dist()` for stores. Units are `GeoUnit::{Meters, Kilometers, Miles, Feet}`.
 
 Longitude must be within 180 and latitude within 85.05112878 degrees, otherwise the call is `Error::Config`. Positions are stored with a precision of about 0.6 millimeters, so a position you read back can differ in the last digits. Searches need Redis 6.2 or newer.
 

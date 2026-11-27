@@ -158,7 +158,11 @@ async fn a_zero_ttl_means_no_time_limit() {
         .await
         .unwrap();
     assert_eq!(cache.entry_ttl("a").await.unwrap(), None);
-    assert!(cache.insert_nx("b", "y").ttl(Duration::ZERO).await.unwrap());
+    assert!(cache
+        .try_insert("b", "y")
+        .ttl(Duration::ZERO)
+        .await
+        .unwrap());
     assert_eq!(cache.entry_ttl("b").await.unwrap(), None);
 }
 
@@ -178,12 +182,12 @@ async fn insert_does_not_return_an_expired_previous_value() {
 }
 
 #[tokio::test]
-async fn insert_nx_only_inserts_over_a_missing_or_expired_entry() {
+async fn try_insert_only_inserts_over_a_missing_or_expired_entry() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("cache"));
-    assert!(cache.insert_nx("a", "1").await.unwrap());
-    assert!(!cache.insert_nx("a", "2").await.unwrap());
+    assert!(cache.try_insert("a", "1").await.unwrap());
+    assert!(!cache.try_insert("a", "2").await.unwrap());
     assert_eq!(cache.get("a").await.unwrap(), Some("1".to_string()));
     cache
         .insert("b", "x")
@@ -191,19 +195,19 @@ async fn insert_nx_only_inserts_over_a_missing_or_expired_entry() {
         .await
         .unwrap();
     sleep(Duration::from_millis(400)).await;
-    assert!(cache.insert_nx("b", "y").await.unwrap());
+    assert!(cache.try_insert("b", "y").await.unwrap());
     assert_eq!(cache.get("b").await.unwrap(), Some("y".to_string()));
 }
 
 #[tokio::test]
-async fn only_one_of_many_concurrent_insert_nx_wins() {
+async fn only_one_of_many_concurrent_try_insert_wins() {
     let cache = client()
         .await
         .hash_map_cache::<String, u32>(unique("cache"));
     let tasks: Vec<_> = (0..20u32)
         .map(|i| {
             let cache = cache.clone();
-            tokio::spawn(async move { cache.insert_nx("k", &i).await.unwrap() })
+            tokio::spawn(async move { cache.try_insert("k", &i).await.unwrap() })
         })
         .collect();
     let mut winners = 0;
@@ -347,17 +351,17 @@ async fn debug_shows_the_name() {
 }
 
 #[tokio::test]
-async fn insert_nx_takes_a_time_limit() {
+async fn try_insert_takes_a_time_limit() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("cache"));
     assert!(cache
-        .insert_nx("a", "x")
+        .try_insert("a", "x")
         .ttl(Duration::from_millis(200))
         .await
         .unwrap());
     assert!(!cache
-        .insert_nx("a", "y")
+        .try_insert("a", "y")
         .ttl(Duration::from_millis(200))
         .await
         .unwrap());
@@ -604,12 +608,12 @@ async fn the_size_limit_is_shared_by_every_handle_and_zero_removes_it() {
 }
 
 #[tokio::test]
-async fn try_set_max_size_only_sets_it_once() {
+async fn init_max_size_only_sets_it_once() {
     let cache = client()
         .await
         .hash_map_cache::<String, u32>(unique("cache"));
-    assert!(cache.try_set_max_size(2, EvictionMode::Lru).await.unwrap());
-    assert!(!cache.try_set_max_size(5, EvictionMode::Lfu).await.unwrap());
+    assert!(cache.init_max_size(2, EvictionMode::Lru).await.unwrap());
+    assert!(!cache.init_max_size(5, EvictionMode::Lfu).await.unwrap());
     for i in 0..4u32 {
         cache.insert(&format!("k{i}"), &i).await.unwrap();
         pause().await;
@@ -808,13 +812,13 @@ async fn changing_the_mode_keeps_the_old_scores() {
 }
 
 #[tokio::test]
-async fn racing_try_set_max_size_calls_agree_on_one_winner() {
+async fn racing_init_max_size_calls_agree_on_one_winner() {
     let client = client().await;
     let name = unique("cache");
     let tasks: Vec<_> = (1..=10usize)
         .map(|n| {
             let cache = client.hash_map_cache::<String, u32>(name.clone());
-            tokio::spawn(async move { cache.try_set_max_size(n, EvictionMode::Lru).await.unwrap() })
+            tokio::spawn(async move { cache.init_max_size(n, EvictionMode::Lru).await.unwrap() })
         })
         .collect();
     let mut winners = 0;
@@ -859,7 +863,7 @@ async fn an_insert_after_expiry_stores_the_new_value() {
 #[tokio::test]
 async fn a_size_eviction_sends_a_removed_event() {
     let cache = client().await.hash_map_cache::<i64, String>(unique("test"));
-    cache.try_set_max_size(5, EvictionMode::Lru).await.unwrap();
+    cache.init_max_size(5, EvictionMode::Lru).await.unwrap();
     let mut removed = cache.events_of(&[EventKind::Removed]).await.unwrap();
     for i in 1..=5i64 {
         cache.insert(&i, &i.to_string()).await.unwrap();
@@ -899,7 +903,7 @@ async fn an_entry_with_a_ttl_expires_in_a_size_limited_cache() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("getAll"));
-    cache.try_set_max_size(1, EvictionMode::Lru).await.unwrap();
+    cache.init_max_size(1, EvictionMode::Lru).await.unwrap();
     cache
         .insert("1", "3")
         .ttl(Duration::from_millis(500))
@@ -923,7 +927,7 @@ async fn the_eviction_task_removes_expired_entries_and_their_access_set() {
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(200))).await;
     let name = unique("test");
     let cache = client.hash_map_cache::<String, String>(name.clone());
-    assert!(cache.try_set_max_size(2, EvictionMode::Lru).await.unwrap());
+    assert!(cache.init_max_size(2, EvictionMode::Lru).await.unwrap());
     cache
         .insert("1", "1")
         .ttl(Duration::from_millis(500))
@@ -985,14 +989,14 @@ async fn the_size_limit_keeps_the_most_recent_entries_for_every_insert_kind() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("test"));
-    assert!(cache.try_set_max_size(2, EvictionMode::Lru).await.unwrap());
-    assert!(!cache.try_set_max_size(1, EvictionMode::Lru).await.unwrap());
+    assert!(cache.init_max_size(2, EvictionMode::Lru).await.unwrap());
+    assert!(!cache.init_max_size(1, EvictionMode::Lru).await.unwrap());
 
     let minute = Duration::from_secs(60);
-    assert!(cache.insert_nx("01", "00").await.unwrap());
-    assert!(cache.insert_nx("02", "00").await.unwrap());
+    assert!(cache.try_insert("01", "00").await.unwrap());
+    assert!(cache.try_insert("02", "00").await.unwrap());
     assert_eq!(cache.insert("03", "00").await.unwrap(), None);
-    assert!(cache.insert_nx("04", "00").ttl(minute).await.unwrap());
+    assert!(cache.try_insert("04", "00").ttl(minute).await.unwrap());
     assert_eq!(cache.insert("1", "11").ttl(minute).await.unwrap(), None);
     assert_eq!(cache.len().await.unwrap(), 2);
     assert_eq!(cache.insert("2", "22").ttl(minute).await.unwrap(), None);
@@ -1001,9 +1005,9 @@ async fn the_size_limit_keeps_the_most_recent_entries_for_every_insert_kind() {
 
     assert_eq!(cache.get("2").await.unwrap().as_deref(), Some("22"));
     assert_eq!(cache.get("0").await.unwrap(), None);
-    assert!(!cache.insert_nx("2", "3").await.unwrap());
+    assert!(!cache.try_insert("2", "3").await.unwrap());
     assert!(!cache
-        .insert_nx("3", "4")
+        .try_insert("3", "4")
         .ttl(minute)
         .max_idle(minute)
         .await
@@ -1034,7 +1038,7 @@ async fn the_size_limit_keeps_the_most_recent_entries_for_every_insert_kind() {
 
     for key in names(15..=21) {
         cache
-            .insert_nx(&key, "00")
+            .try_insert(&key, "00")
             .ttl(Duration::from_secs(1))
             .await
             .unwrap();
@@ -1044,7 +1048,7 @@ async fn the_size_limit_keeps_the_most_recent_entries_for_every_insert_kind() {
     assert_eq!(keys(&cache).await, names(16..=21));
 
     for key in names(22..=28) {
-        cache.insert_nx(&key, "00").await.unwrap();
+        cache.try_insert(&key, "00").await.unwrap();
         pause().await;
     }
     assert_eq!(cache.len().await.unwrap(), 6);
@@ -1280,19 +1284,19 @@ async fn get_returns_an_entry_until_its_ttl_passes() {
 
 // Redisson: testPutIfAbsentTtl
 #[tokio::test]
-async fn insert_nx_with_a_ttl_inserts_only_over_missing_or_expired_keys() {
+async fn try_insert_with_a_ttl_inserts_only_over_missing_or_expired_keys() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
     cache.insert("1", "2").await.unwrap();
     assert!(!cache
-        .insert_nx("1", "3")
+        .try_insert("1", "3")
         .ttl(Duration::from_millis(300))
         .await
         .unwrap());
     assert_eq!(cache.get("1").await.unwrap().as_deref(), Some("2"));
     cache
-        .insert_nx("4", "4")
+        .try_insert("4", "4")
         .ttl(Duration::from_millis(300))
         .await
         .unwrap();
@@ -1300,13 +1304,13 @@ async fn insert_nx_with_a_ttl_inserts_only_over_missing_or_expired_keys() {
     sleep(Duration::from_millis(300)).await;
     assert_eq!(cache.get("4").await.unwrap(), None);
     assert!(cache
-        .insert_nx("4", "4")
+        .try_insert("4", "4")
         .ttl(Duration::from_millis(300))
         .await
         .unwrap());
     assert_eq!(cache.get("4").await.unwrap().as_deref(), Some("4"));
     assert!(cache
-        .insert_nx("2", "4")
+        .try_insert("2", "4")
         .ttl(Duration::from_secs(2))
         .await
         .unwrap());
@@ -1315,40 +1319,40 @@ async fn insert_nx_with_a_ttl_inserts_only_over_missing_or_expired_keys() {
 
 // Redisson: testPutIfAbsentTtlKeepsFirstValue
 #[tokio::test]
-async fn insert_nx_with_a_ttl_keeps_the_first_value_and_its_ttl() {
+async fn try_insert_with_a_ttl_keeps_the_first_value_and_its_ttl() {
     let client =
         connect_with(|builder| builder.eviction_interval(Duration::from_millis(200))).await;
     let cache =
         client.hash_map_cache::<String, String>(unique("testPutIfAbsentTTLKeepsFirstValue"));
     let ttl = Duration::from_secs(300);
-    assert!(cache.insert_nx("key", "value-1").ttl(ttl).await.unwrap());
-    assert!(!cache.insert_nx("key", "value-2").ttl(ttl).await.unwrap());
+    assert!(cache.try_insert("key", "value-1").ttl(ttl).await.unwrap());
+    assert!(!cache.try_insert("key", "value-2").ttl(ttl).await.unwrap());
     sleep(Duration::from_millis(1000)).await;
     assert_eq!(cache.get("key").await.unwrap().as_deref(), Some("value-1"));
-    assert!(!cache.insert_nx("key", "value-3").ttl(ttl).await.unwrap());
+    assert!(!cache.try_insert("key", "value-3").ttl(ttl).await.unwrap());
     let left = cache.entry_ttl("key").await.unwrap().unwrap();
     assert!(left >= Duration::from_secs(290) && left <= ttl);
 }
 
 // Redisson: testFastPutIfAbsentTtl
 #[tokio::test]
-async fn insert_nx_succeeds_once_the_existing_entry_expired() {
+async fn try_insert_succeeds_once_the_existing_entry_expired() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
     cache.insert("1", "2").await.unwrap();
-    assert!(!cache.insert_nx("1", "3").await.unwrap());
+    assert!(!cache.try_insert("1", "3").await.unwrap());
     assert_eq!(cache.get("1").await.unwrap().as_deref(), Some("2"));
-    assert!(cache.insert_nx("2", "4").await.unwrap());
+    assert!(cache.try_insert("2", "4").await.unwrap());
     assert_eq!(cache.get("2").await.unwrap().as_deref(), Some("4"));
     cache
         .insert("3", "31")
         .ttl(Duration::from_millis(500))
         .await
         .unwrap();
-    assert!(!cache.insert_nx("3", "32").await.unwrap());
+    assert!(!cache.try_insert("3", "32").await.unwrap());
     sleep(Duration::from_millis(550)).await;
-    assert!(cache.insert_nx("3", "32").await.unwrap());
+    assert!(cache.try_insert("3", "32").await.unwrap());
     assert_eq!(cache.get("3").await.unwrap().as_deref(), Some("32"));
 }
 
@@ -1368,12 +1372,12 @@ async fn created_events_arrive_for_every_kind_of_new_insert() {
         next(&mut created).await,
         Event::Created { key: 10, value: 2 }
     );
-    cache.insert_nx(&4, &1).await.unwrap();
+    cache.try_insert(&4, &1).await.unwrap();
     assert_eq!(
         next(&mut created).await,
         Event::Created { key: 4, value: 1 }
     );
-    cache.insert_nx(&15, &2).ttl(ttl).await.unwrap();
+    cache.try_insert(&15, &2).ttl(ttl).await.unwrap();
     assert_eq!(
         next(&mut created).await,
         Event::Created { key: 15, value: 2 }
@@ -1426,7 +1430,7 @@ async fn expired_events_arrive_for_entries_whose_ttl_passed() {
         next(&mut expired).await,
         Event::Expired { key: 10, value: 2 }
     );
-    cache.insert_nx(&15, &2).ttl(ttl).await.unwrap();
+    cache.try_insert(&15, &2).ttl(ttl).await.unwrap();
     assert_eq!(
         next(&mut expired).await,
         Event::Expired { key: 15, value: 2 }
@@ -1502,17 +1506,17 @@ async fn entries_expire_after_their_own_max_idle_time() {
 
     let cache = client.hash_map_cache::<String, i32>(unique("simple"));
     cache
-        .insert_nx("12", &1)
+        .try_insert("12", &1)
         .max_idle(Duration::from_millis(200))
         .await
         .unwrap();
     cache
-        .insert_nx("14", &2)
+        .try_insert("14", &2)
         .max_idle(Duration::from_millis(800))
         .await
         .unwrap();
     cache
-        .insert_nx("15", &3)
+        .try_insert("15", &3)
         .max_idle(Duration::from_millis(1500))
         .await
         .unwrap();
@@ -1546,9 +1550,9 @@ async fn entries_expire_after_their_own_ttl() {
 
     let cache = client.hash_map_cache::<String, i32>(unique("simple"));
     let started = Instant::now();
-    cache.insert_nx("12", &1).ttl(ttl(1)).await.unwrap();
-    cache.insert_nx("14", &2).ttl(ttl(2)).await.unwrap();
-    cache.insert_nx("15", &3).ttl(ttl(3)).await.unwrap();
+    cache.try_insert("12", &1).ttl(ttl(1)).await.unwrap();
+    cache.try_insert("14", &2).ttl(ttl(2)).await.unwrap();
+    cache.try_insert("15", &3).ttl(ttl(3)).await.unwrap();
     check_ttl_expiration(&cache, started).await;
 }
 
@@ -1647,14 +1651,14 @@ async fn remove_returns_the_old_value_or_none_for_a_missing_key() {
 
 // Redisson: testFastPutIfAbsent
 #[tokio::test]
-async fn insert_nx_keeps_an_existing_value_and_adds_a_new_key() {
+async fn try_insert_keeps_an_existing_value_and_adds_a_new_key() {
     let cache = client()
         .await
         .hash_map_cache::<String, String>(unique("simple"));
     cache.insert("1", "2").await.unwrap();
-    assert!(!cache.insert_nx("1", "3").await.unwrap());
+    assert!(!cache.try_insert("1", "3").await.unwrap());
     assert_eq!(cache.get("1").await.unwrap().as_deref(), Some("2"));
-    assert!(cache.insert_nx("2", "4").await.unwrap());
+    assert!(cache.try_insert("2", "4").await.unwrap());
     assert_eq!(cache.get("2").await.unwrap().as_deref(), Some("4"));
 }
 
@@ -1695,7 +1699,7 @@ fn simple_value(value: &str) -> SimpleValue {
 }
 
 #[tokio::test]
-async fn insert_nx_with_a_time_limit_wins_again_only_after_the_entry_expired() {
+async fn try_insert_with_a_time_limit_wins_again_only_after_the_entry_expired() {
     let cache = client()
         .await
         .hash_map_cache::<SimpleKey, SimpleValue>(unique("simpleTTL"));
@@ -1703,9 +1707,9 @@ async fn insert_nx_with_a_time_limit_wins_again_only_after_the_entry_expired() {
     let value = simple_value("2");
     let second = Duration::from_secs(1);
     let idle = Duration::from_millis(500);
-    cache.insert_nx(&key, &value).ttl(second).await.unwrap();
+    cache.try_insert(&key, &value).ttl(second).await.unwrap();
     assert!(!cache
-        .insert_nx(&key, &simple_value("3"))
+        .try_insert(&key, &simple_value("3"))
         .ttl(second)
         .await
         .unwrap());
@@ -1714,14 +1718,14 @@ async fn insert_nx_with_a_time_limit_wins_again_only_after_the_entry_expired() {
     sleep(Duration::from_millis(1100)).await;
 
     assert!(cache
-        .insert_nx(&key, &simple_value("3"))
+        .try_insert(&key, &simple_value("3"))
         .ttl(second)
         .await
         .unwrap());
     assert_eq!(cache.get(&key).await.unwrap(), Some(simple_value("3")));
 
     assert!(!cache
-        .insert_nx(&key, &simple_value("4"))
+        .try_insert(&key, &simple_value("4"))
         .ttl(second)
         .await
         .unwrap());
@@ -1729,7 +1733,7 @@ async fn insert_nx_with_a_time_limit_wins_again_only_after_the_entry_expired() {
 
     sleep(Duration::from_millis(1100)).await;
     assert!(cache
-        .insert_nx(&key, &simple_value("4"))
+        .try_insert(&key, &simple_value("4"))
         .ttl(second)
         .max_idle(idle)
         .await
@@ -1737,7 +1741,7 @@ async fn insert_nx_with_a_time_limit_wins_again_only_after_the_entry_expired() {
 
     sleep(Duration::from_millis(550)).await;
     assert!(cache
-        .insert_nx(&key, &simple_value("5"))
+        .try_insert(&key, &simple_value("5"))
         .ttl(second)
         .max_idle(idle)
         .await

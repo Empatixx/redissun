@@ -154,7 +154,8 @@ impl AtomicI64 {
     }
 
     /// Sets the value and returns the previous one (0 when there was none).
-    pub async fn get_and_set(&self, value: i64) -> Result<i64> {
+    #[doc(alias = "getAndSet")]
+    pub async fn swap(&self, value: i64) -> Result<i64> {
         let previous: Option<i64> = self
             .key
             .query({
@@ -167,7 +168,8 @@ impl AtomicI64 {
     }
 
     /// Returns the value and deletes the counter (0 when there was none).
-    pub async fn get_and_delete(&self) -> Result<i64> {
+    #[doc(alias = "getAndDelete")]
+    pub async fn take(&self) -> Result<i64> {
         let previous: Option<i64> = self
             .key
             .core
@@ -225,7 +227,8 @@ impl AtomicI64 {
     }
 
     /// Adds `delta` and returns the new value.
-    pub async fn add_and_get(&self, delta: i64) -> Result<i64> {
+    #[doc(alias = "addAndGet")]
+    pub async fn add(&self, delta: i64) -> Result<i64> {
         let value: i64 = self
             .key
             .query({
@@ -237,9 +240,14 @@ impl AtomicI64 {
         Ok(value)
     }
 
-    /// Adds `delta` and returns the value from before the addition.
-    pub async fn get_and_add(&self, delta: i64) -> Result<i64> {
-        Ok(self.add_and_get(delta).await?.wrapping_sub(delta))
+    /// Adds `delta` and returns the value from before the addition. Use `fetch_add(1)` and `fetch_add(-1)` for Redisson's `getAndIncrement` and `getAndDecrement`.
+    #[doc(
+        alias = "getAndAdd",
+        alias = "getAndIncrement",
+        alias = "getAndDecrement"
+    )]
+    pub async fn fetch_add(&self, delta: i64) -> Result<i64> {
+        Ok(self.add(delta).await?.wrapping_sub(delta))
     }
 
     /// Adds 1 and returns the new value.
@@ -252,15 +260,5 @@ impl AtomicI64 {
     pub async fn decr(&self) -> Result<i64> {
         let value: i64 = self.key.query(self.key.key_cmd("DECR")).await?;
         Ok(value)
-    }
-
-    /// Adds 1 and returns the value from before.
-    pub async fn get_and_incr(&self) -> Result<i64> {
-        self.get_and_add(1).await
-    }
-
-    /// Subtracts 1 and returns the value from before.
-    pub async fn get_and_decr(&self) -> Result<i64> {
-        self.get_and_add(-1).await
     }
 }

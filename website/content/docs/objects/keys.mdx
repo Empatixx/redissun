@@ -7,10 +7,11 @@ description: Find, count, expire and delete keys by name, on every master.
 
 ```rust
 use futures::TryStreamExt;
+use redissun::KeysScan;
 
 let keys = client.keys();
 
-let sessions: Vec<String> = keys.iter_matching("session:*").try_collect().await?;
+let sessions: Vec<String> = keys.iter_with(KeysScan::new().pattern("session:*")).try_collect().await?;
 let deleted = keys.delete_by_pattern("cache:*").await?;
 keys.expire_many(&["report:1", "report:2"], Duration::from_secs(3600)).await?;
 ```
@@ -20,8 +21,7 @@ keys.expire_many(&["report:1", "report:2"], Duration::from_secs(3600)).await?;
 | Method | Notes |
 |---|---|
 | `iter()` | every key, as a stream |
-| `iter_matching("user:*")` | the keys that match a glob-style pattern, 10 at a time from each master |
-| `iter_with(KeysScan::new().pattern(p).limit(n).chunk_size(c).key_type(t))` | with a pattern, a limit on the number of keys, the page size of each `SCAN` and the type of the value |
+| `iter_with(KeysScan::new().pattern(p).limit(n).chunk_size(c).key_type(t))` | with a glob-style pattern, a limit on the number of keys, the page size of each `SCAN` and the type of the value. With a pattern each `SCAN` asks for 10 keys, as in Redisson, unless you set `chunk_size`. |
 | `count()` | the number of keys on all masters (`DBSIZE`) |
 | `count_exists(&names)` | how many of the names exist |
 | `key_type(name)` | the `KeyType` of the value, `None` when the key is missing |
@@ -34,7 +34,7 @@ keys.expire_many(&["report:1", "report:2"], Duration::from_secs(3600)).await?;
 | `expire(name, ttl)`, `expire_at(name, time)` | returns whether the key exists |
 | `expire_many(&names, ttl)`, `expire_at_many(&names, time)` | returns how many keys exist |
 | `persist(name)` | removes the expiry |
-| `rename(name, new)`, `rename_nx(name, new)` | `rename_nx` only when `new` is free |
+| `rename(name, new)`, `try_rename(name, new)` | `try_rename` only when `new` is free |
 | `migrate(Migrate::new(keys, host, port, db, timeout))` | moves keys to another server; `.copy()`, `.replace()`, `.username()` and `.password()` |
 | `move_to_db(name, db)`, `swap_db(a, b)` | between the databases of one server |
 | `time()` | the clock of the server |

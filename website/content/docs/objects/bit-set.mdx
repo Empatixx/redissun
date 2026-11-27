@@ -10,18 +10,30 @@ let online = client.bit_set("online:2026-10-09");
 
 online.set(42, true).await?;
 let is_online = online.get(42).await?;
-let how_many = online.count().await?;
+let how_many = online.count_ones().await?;
 ```
 
 ## Methods
 
 | Method | Notes |
 |---|---|
-| `get(i)` | |
-| `set(i, value)` | returns the previous bit |
-| `count()` | how many bits are set |
+| `get(i)` | `GETBIT` |
+| `get_many(&indexes)` | the bits at several indexes, in order (`BITFIELD GET`) |
+| `set(i, value)` | returns the previous bit (`SETBIT`) |
+| `set_many(&indexes, value)` | sets several bits in one call (`BITFIELD SET`) |
+| `set_range(from..to, value)` | sets every bit in the range; the end is exclusive |
+| `count_ones()` | how many bits are set (Redisson's `cardinality`) |
 | `first_set()` | index of the lowest set bit, or `None` |
-| `size()` | size of the string in bits, a multiple of 8 |
-| `length()` | index of the highest set bit plus one |
+| `last_set()` | index of the highest set bit, or `None` (Redisson's `length` is this plus one) |
+| `len()` | size of the string in bits, a multiple of 8 |
+| `to_bytes()` | the raw bytes, empty when the key is missing (Redisson's `toByteArray`) |
+| `ones()` | the indexes of all set bits, in ascending order (Redisson's `asBitSet`) |
+| `replace(&indexes)` | replaces the whole set with one where exactly these bits are set |
+| `clear()` | deletes the set, so every bit reads as `false` |
+| `and(&others)`, `or(&others)`, `xor(&others)` | `BITOP` of this set and the sets named in `others`, stored in this set; returns the new size in bytes |
+| `not()` | flips every bit in place; returns the size in bytes |
+| `get_signed(size, offset)`, `set_signed(size, offset, v)` | read or write a signed `BITFIELD` integer of 1 to 64 bits; `set_signed` returns the previous one |
+| `get_unsigned(size, offset)`, `set_unsigned(size, offset, v)` | the same for an unsigned integer of 1 to 63 bits |
+| `add_signed(size, offset, n)`, `add_unsigned(size, offset, n)` | add to a `BITFIELD` integer, wrapping on overflow, and return the new value |
 
 The biggest index is 2^32 - 1, which is 512 MB. A bigger index is `Error::Config`. Setting a high index allocates the whole string up to it. `BitSet` also has the `Object` methods.

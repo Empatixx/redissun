@@ -35,13 +35,16 @@ async fn pop_takes_the_last_element() {
 }
 
 #[tokio::test]
-async fn set_replaces_an_element_and_rejects_a_missing_index() {
+async fn replace_swaps_an_element_and_rejects_a_missing_index() {
     let vec = vec_of(&["a", "b"]).await;
-    assert_eq!(vec.set(1, "z").await.unwrap(), "b");
+    assert_eq!(vec.replace(1, "z").await.unwrap(), "b");
     assert_eq!(contents(&vec).await, ["a", "z"]);
-    assert!(matches!(vec.set(2, "x").await, Err(Error::OutOfRange)));
+    assert!(matches!(vec.replace(2, "x").await, Err(Error::OutOfRange)));
     let empty = client().await.vec::<String>(unique("vec"));
-    assert!(matches!(empty.set(0, "x").await, Err(Error::OutOfRange)));
+    assert!(matches!(
+        empty.replace(0, "x").await,
+        Err(Error::OutOfRange)
+    ));
 }
 
 #[tokio::test]
@@ -113,11 +116,11 @@ async fn position_and_contains() {
 }
 
 #[tokio::test]
-async fn remove_value_removes_the_first_match_and_remove_all_every_match() {
+async fn remove_value_removes_the_first_match_and_remove_value_all_every_match() {
     let vec = vec_of(&["a", "b", "a", "a"]).await;
     assert!(vec.remove_value("a").await.unwrap());
     assert_eq!(contents(&vec).await, ["b", "a", "a"]);
-    assert_eq!(vec.remove_all("a").await.unwrap(), 2);
+    assert_eq!(vec.remove_value_all("a").await.unwrap(), 2);
     assert_eq!(contents(&vec).await, ["b"]);
     assert!(!vec.remove_value("z").await.unwrap());
 }
@@ -186,7 +189,7 @@ async fn huge_indexes_do_not_count_from_the_end() {
     let vec = vec_of(&["a", "b", "c"]).await;
     assert_eq!(vec.get(usize::MAX).await.unwrap(), None);
     assert!(matches!(
-        vec.set(usize::MAX, "x").await,
+        vec.replace(usize::MAX, "x").await,
         Err(Error::OutOfRange)
     ));
     assert!(matches!(
@@ -209,10 +212,6 @@ async fn remove_at_the_length_and_on_a_missing_list_is_out_of_range() {
     let missing = client().await.vec::<String>(unique("vec"));
     assert!(matches!(missing.remove(0).await, Err(Error::OutOfRange)));
     assert!(matches!(missing.remove(1).await, Err(Error::OutOfRange)));
-    assert!(matches!(
-        missing.fast_remove(1).await,
-        Err(Error::OutOfRange)
-    ));
 }
 
 #[tokio::test]
@@ -244,7 +243,7 @@ async fn a_key_of_another_type_is_a_redis_error() {
         .unwrap();
     let vec = client.vec::<String>(name);
     assert!(matches!(vec.insert(0, "a").await, Err(Error::Redis(_))));
-    assert!(matches!(vec.set(0, "a").await, Err(Error::Redis(_))));
+    assert!(matches!(vec.replace(0, "a").await, Err(Error::Redis(_))));
 }
 
 async fn ints(values: &[i32]) -> redissun::Vec<i32, redissun::JsonCodec> {
@@ -254,7 +253,7 @@ async fn ints(values: &[i32]) -> redissun::Vec<i32, redissun::JsonCodec> {
 }
 
 async fn all(vec: &redissun::Vec<i32, redissun::JsonCodec>) -> Vec<i32> {
-    vec.read_all().await.unwrap()
+    vec.to_vec().await.unwrap()
 }
 
 // Redisson: testRange
@@ -318,7 +317,7 @@ async fn i64_values_round_trip_in_push_order() {
     let vec = client().await.vec::<i64>(unique("vec"));
     vec.push(&1).await.unwrap();
     vec.push(&2).await.unwrap();
-    assert_eq!(vec.read_all().await.unwrap(), [1, 2]);
+    assert_eq!(vec.to_vec().await.unwrap(), [1, 2]);
 }
 
 // Redisson: testLastIndexOfNone
@@ -382,17 +381,17 @@ async fn remove_value_n_removes_up_to_n_matches() {
 
 // Redisson: testSet
 #[tokio::test]
-async fn set_returns_the_old_value_and_replaces_it() {
+async fn replace_returns_the_old_value_and_replaces_it() {
     let vec = ints(&[1, 2, 3, 4, 5]).await;
-    assert_eq!(vec.set(4, &6).await.unwrap(), 5);
+    assert_eq!(vec.replace(4, &6).await.unwrap(), 5);
     assert_eq!(all(&vec).await, [1, 2, 3, 4, 6]);
 }
 
 // Redisson: testSetFail
 #[tokio::test]
-async fn set_at_the_length_is_out_of_range() {
+async fn replace_at_the_length_is_out_of_range() {
     let vec = ints(&[1, 2, 3, 4, 5]).await;
-    assert!(matches!(vec.set(5, &6).await, Err(Error::OutOfRange)));
+    assert!(matches!(vec.replace(5, &6).await, Err(Error::OutOfRange)));
 }
 
 // Redisson: testRemoveAllEmpty
@@ -426,11 +425,11 @@ async fn retain_values_keeps_only_the_given_values() {
 
 // Redisson: testFastSet
 #[tokio::test]
-async fn fast_set_replaces_an_element_and_rejects_a_missing_index() {
+async fn set_replaces_an_element_and_rejects_a_missing_index() {
     let vec = ints(&[1, 2]).await;
-    vec.fast_set(0, &3).await.unwrap();
+    vec.set(0, &3).await.unwrap();
     assert_eq!(vec.get(0).await.unwrap(), Some(3));
-    assert!(matches!(vec.fast_set(2, &3).await, Err(Error::OutOfRange)));
+    assert!(matches!(vec.set(2, &3).await, Err(Error::OutOfRange)));
 }
 
 // Redisson: testRetainAllEmpty
@@ -451,27 +450,27 @@ async fn retain_values_of_every_element_reports_no_change() {
 
 // Redisson: testAddAllIndexError
 #[tokio::test]
-async fn insert_all_past_the_end_of_an_empty_vec_is_out_of_range() {
+async fn insert_many_past_the_end_of_an_empty_vec_is_out_of_range() {
     let vec = client().await.vec::<i32>(unique("vec"));
     assert!(matches!(
-        vec.insert_all(2, &[7, 8, 9]).await,
+        vec.insert_many(2, &[7, 8, 9]).await,
         Err(Error::OutOfRange)
     ));
 }
 
 // Redisson: testAddAllIndex
 #[tokio::test]
-async fn insert_all_puts_values_at_the_start_middle_and_end() {
+async fn insert_many_puts_values_at_the_start_middle_and_end() {
     let vec = ints(&[1, 2, 3, 4, 5]).await;
-    vec.insert_all(2, &[7, 8, 9]).await.unwrap();
+    vec.insert_many(2, &[7, 8, 9]).await.unwrap();
     assert_eq!(all(&vec).await, [1, 2, 7, 8, 9, 3, 4, 5]);
     let len = vec.len().await.unwrap();
-    vec.insert_all(len - 1, &[9, 1, 9]).await.unwrap();
+    vec.insert_many(len - 1, &[9, 1, 9]).await.unwrap();
     assert_eq!(all(&vec).await, [1, 2, 7, 8, 9, 3, 4, 9, 1, 9, 5]);
     let len = vec.len().await.unwrap();
-    vec.insert_all(len, &[0, 5]).await.unwrap();
+    vec.insert_many(len, &[0, 5]).await.unwrap();
     assert_eq!(all(&vec).await, [1, 2, 7, 8, 9, 3, 4, 9, 1, 9, 5, 0, 5]);
-    vec.insert_all(0, &[6, 7]).await.unwrap();
+    vec.insert_many(0, &[6, 7]).await.unwrap();
     assert_eq!(
         all(&vec).await,
         [6, 7, 1, 2, 7, 8, 9, 3, 4, 9, 1, 9, 5, 0, 5]
@@ -517,9 +516,9 @@ async fn contains_all_of_nothing_is_true() {
 
 // Redisson: testToArray
 #[tokio::test]
-async fn read_all_returns_elements_in_insertion_order() {
+async fn to_vec_returns_elements_in_insertion_order() {
     let vec = vec_of(&["1", "4", "2", "5", "3"]).await;
-    assert_eq!(vec.read_all().await.unwrap(), ["1", "4", "2", "5", "3"]);
+    assert_eq!(vec.to_vec().await.unwrap(), ["1", "4", "2", "5", "3"]);
 }
 
 // Redisson: testIteratorSequence
@@ -587,7 +586,7 @@ async fn json_values_of_mixed_types_round_trip() {
         serde_json::json!("e"),
     ];
     vec.extend(values.iter()).await.unwrap();
-    assert_eq!(vec.read_all().await.unwrap(), values);
+    assert_eq!(vec.to_vec().await.unwrap(), values);
 }
 
 #[tokio::test]

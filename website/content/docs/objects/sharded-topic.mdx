@@ -20,8 +20,8 @@ let id = subscriber.recv().await?;
 | `publish(&m)` | `SPUBLISH` | returns how many connections got the message |
 | `subscribe()` | `SSUBSCRIBE` | returns a `ShardedSubscriber` with `recv()` and `into_stream()` |
 | `subscriber_count()` | `PUBSUB SHARDNUMSUB` | counts connections of all programs |
-| `listener_count()` | | counts the subscribers of this client |
-| `remove_all_listeners()` | | ends every subscriber of this client |
+| `local_subscriber_count()` | | counts the subscribers of this client |
+| `unsubscribe_all()` | | ends every subscriber of this client |
 
 ## Good to know
 

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// How many keys `delete_by_pattern` reads with each `SCAN` and deletes with each command, as in Redisson.
 const ERASE_CHUNK: usize = 500;
 
-/// How many keys `iter_matching` asks each `SCAN` for, Redisson's default for `getKeysByPattern`.
+/// How many keys a [`KeysScan`] with a pattern asks each `SCAN` for, Redisson's default for `getKeysByPattern`.
 const PATTERN_CHUNK: usize = 10;
 
 /// The type of the value stored under a key, from `TYPE`: Redisson's `RType`.
@@ -78,7 +78,7 @@ impl KeyType {
 pub struct KeysScan {
     pattern: Option<String>,
     limit: usize,
-    chunk_size: usize,
+    chunk_size: Option<usize>,
     key_type: Option<KeyType>,
 }
 
@@ -88,7 +88,8 @@ impl KeysScan {
         Self::default()
     }
 
-    /// Only the keys that match the glob-style `pattern` (`SCAN … MATCH`).
+    /// Only the keys that match the glob-style `pattern` (`SCAN … MATCH`), Redisson's `getKeysByPattern`.
+    /// Unless [`chunk_size`](KeysScan::chunk_size) says otherwise, each `SCAN` then asks for 10 keys, Redisson's default for pattern scans.
     pub fn pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
@@ -100,9 +101,9 @@ impl KeysScan {
         self
     }
 
-    /// How many keys each `SCAN` asks a master for (`COUNT`); zero, the default, leaves it to the server.
+    /// How many keys each `SCAN` asks a master for (`COUNT`); zero leaves it to the server. The default is 10 with a [`pattern`](KeysScan::pattern) and the server's page size without one.
     pub fn chunk_size(mut self, chunk_size: usize) -> Self {
-        self.chunk_size = chunk_size;
+        self.chunk_size = Some(chunk_size);
         self
     }
 
@@ -290,9 +291,10 @@ fn epoch_millis(time: SystemTime) -> Result<i64> {
 /// ```no_run
 /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
 /// use futures::TryStreamExt;
+/// use redissun::KeysScan;
 ///
 /// let keys = client.keys();
-/// let sessions: Vec<String> = keys.iter_matching("session:*").try_collect().await?;
+/// let sessions: Vec<String> = keys.iter_with(KeysScan::new().pattern("session:*")).try_collect().await?;
 /// let deleted = keys.delete_by_pattern("cache:*").await?;
 /// println!("{} sessions, {deleted} cache entries deleted", sessions.len());
 /// # Ok(())
@@ -347,15 +349,9 @@ impl Keys {
         self.iter_with(KeysScan::new())
     }
 
-    /// Streams the keys that match the glob-style `pattern`, reading 10 at a time from each master, Redisson's `getKeysByPattern`.
-    pub fn iter_matching(
-        &self,
-        pattern: impl Into<String>,
-    ) -> impl Stream<Item = Result<String>> + Send + 'static {
-        self.iter_with(KeysScan::new().pattern(pattern).chunk_size(PATTERN_CHUNK))
-    }
-
     /// Streams the keys `scan` asks for, one master after the other, Redisson's `getKeys(KeysScanOptions)`.
+    /// For Redisson's `getKeysByPattern`, pass `KeysScan::new().pattern(p)`: it reads 10 keys at a time from each master, as Redisson does.
+    #[doc(alias = "getKeysByPattern")]
     pub fn iter_with(&self, scan: KeysScan) -> impl Stream<Item = Result<String>> + Send + 'static {
         let core = self.core.clone();
         let limit = scan.limit;
@@ -548,7 +544,8 @@ impl Keys {
     }
 
     /// Renames `name` to `new_name` only when no key has that name; returns whether it did (`RENAMENX`), Redisson's `renamenx`.
-    pub async fn rename_nx(&self, name: &str, new_name: &str) -> Result<bool> {
+    #[doc(alias = "renamenx")]
+    pub async fn try_rename(&self, name: &str, new_name: &str) -> Result<bool> {
         let mut cmd = Self::key_cmd("RENAMENX", name);
         cmd.arg(new_name);
         self.on_key(name, cmd).await
@@ -656,8 +653,13 @@ fn scan_master(
             if let Some(pattern) = &scan.pattern {
                 cmd.arg("MATCH").arg(pattern);
             }
-            if scan.chunk_size > 0 {
-                cmd.arg("COUNT").arg(scan.chunk_size);
+            let chunk_size = scan.chunk_size.unwrap_or(if scan.pattern.is_some() {
+                PATTERN_CHUNK
+            } else {
+                0
+            });
+            if chunk_size > 0 {
+                cmd.arg("COUNT").arg(chunk_size);
             }
             if let Some(key_type) = scan.key_type {
                 cmd.arg("TYPE").arg(key_type.as_str());

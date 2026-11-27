@@ -8,7 +8,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -123,15 +125,30 @@ where
         self.decode(raw)
     }
 
-    /// Stores the value, replacing any existing one and clearing its time to live.
-    pub async fn set<Q>(&self, value: &Q) -> Result<()>
+    /// Stores the value, replacing any existing one, Redisson's `set`. The time to live is cleared unless the builder says otherwise:
+    /// `.ttl(d)` stores it with a time to live (`SET PX`, Redisson's `set(v, ttl)` / `setex`) and `.keep_ttl()` keeps the current one (`SET KEEPTTL`, Redisson's `setAndKeepTTL`).
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// # use std::time::Duration;
+    /// let bucket = client.bucket::<String>("greeting");
+    /// bucket.set("hello").await?;
+    /// bucket.set("hello").ttl(Duration::from_secs(60)).await?;
+    /// bucket.set("hi").keep_ttl().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(alias = "setex", alias = "setAndKeepTTL")]
+    pub fn set<'a, Q>(&'a self, value: &Q) -> Set<'a, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let bytes = self.codec.encode(value)?;
-        let () = self.key.query(self.set_command(&bytes, Vec::new())).await?;
-        Ok(())
+        Set {
+            bucket: self,
+            value: self.codec.encode(value),
+            ttl: SetTtl::Clear,
+        }
     }
 
     /// Returns the value, or `None` when the key is missing.
@@ -142,111 +159,54 @@ where
         self.decode(raw)
     }
 
-    /// Stores the value with a time to live (`PSETEX`).
-    pub async fn set_ex<Q>(&self, value: &Q, ttl: Duration) -> Result<()>
+    /// Stores the value only when the key is missing; resolves to whether it was stored. Redisson's `setIfAbsent` and `trySet`.
+    /// `.ttl(d)` stores it with a time to live (`SET PX NX`); without it the command is `SETNX`.
+    #[doc(alias = "setIfAbsent", alias = "trySet")]
+    pub fn try_set<'a, Q>(&'a self, value: &Q) -> TrySet<'a, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let bytes = self.codec.encode(value)?;
-        let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?)];
-        let () = self.key.query(self.set_command(&bytes, options)).await?;
-        Ok(())
+        TrySet {
+            bucket: self,
+            value: self.codec.encode(value),
+            ttl: None,
+        }
     }
 
-    /// Stores the value and keeps the current time to live (`SET KEEPTTL`).
-    pub async fn set_keep_ttl<Q>(&self, value: &Q) -> Result<()>
+    /// Replaces the value only when the key exists (`SET XX`); resolves to whether it was stored. Redisson's `setIfExists`.
+    /// `.ttl(d)` also sets a time to live (`SET PX XX`); without it the time to live is cleared.
+    #[doc(alias = "setIfExists")]
+    pub fn update<'a, Q>(&'a self, value: &Q) -> Update<'a, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let bytes = self.codec.encode(value)?;
-        let options = vec![Arg::from("KEEPTTL")];
-        let () = self.key.query(self.set_command(&bytes, options)).await?;
-        Ok(())
+        Update {
+            bucket: self,
+            value: self.codec.encode(value),
+            ttl: None,
+        }
     }
 
-    /// Stores the value only when the key is missing; returns whether it was stored. Like Redisson `setIfAbsent`.
-    pub async fn set_nx<Q>(&self, value: &Q) -> Result<bool>
+    /// Stores the value and resolves to the previous one, like `Option::replace`. Redisson's `getAndSet`.
+    /// Without `.ttl(d)` it is `GETSET` and the time to live is cleared; with it the value is stored with that time to live.
+    #[doc(alias = "getAndSet", alias = "getset")]
+    pub fn replace<'a, Q>(&'a self, value: &Q) -> Replace<'a, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let bytes = self.codec.encode(value)?;
-        let mut cmd = redis::cmd("SETNX");
-        cmd.arg(self.key.redis_key()).arg(&bytes[..]);
-        let stored: bool = self.key.query_once(cmd).await?;
-        Ok(stored)
+        Replace {
+            bucket: self,
+            value: self.codec.encode(value),
+            ttl: None,
+        }
     }
 
-    /// Stores the value with a time to live only when the key is missing; returns whether it was stored.
-    pub async fn set_nx_ex<Q>(&self, value: &Q, ttl: Duration) -> Result<bool>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let bytes = self.codec.encode(value)?;
-        let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?), Arg::from("NX")];
-        self.set_with(bytes, options).await
-    }
-
-    /// Replaces the value only when the key exists; returns whether it was stored. Like Redisson `setIfExists`.
-    pub async fn set_xx<Q>(&self, value: &Q) -> Result<bool>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let bytes = self.codec.encode(value)?;
-        self.set_with(bytes, vec![Arg::from("XX")]).await
-    }
-
-    /// Replaces the value and sets a time to live only when the key exists; returns whether it was stored.
-    pub async fn set_xx_ex<Q>(&self, value: &Q, ttl: Duration) -> Result<bool>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let bytes = self.codec.encode(value)?;
-        let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?), Arg::from("XX")];
-        self.set_with(bytes, options).await
-    }
-
-    /// Stores the value and returns the previous one (`GETSET`). The time to live is cleared.
-    pub async fn get_set<Q>(&self, value: &Q) -> Result<Option<V>>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let bytes = self.codec.encode(value)?;
-        let mut cmd = redis::cmd("GETSET");
-        cmd.arg(self.key.redis_key()).arg(&bytes[..]);
-        let previous: Option<Bytes> = self.key.query(cmd).await?;
-        self.decode(previous)
-    }
-
-    /// Stores the value with a time to live and returns the previous one.
-    pub async fn get_set_ex<Q>(&self, value: &Q, ttl: Duration) -> Result<Option<V>>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync,
-    {
-        let previous: Option<Bytes> = self
-            .key
-            .core
-            .eval(
-                &GET_AND_SET_EX,
-                vec![self.key.redis_key()],
-                vec![
-                    self.codec.encode(value)?,
-                    Bytes::from(millis(ttl)?.to_string()),
-                ],
-            )
-            .await?;
-        self.decode(previous)
-    }
-
-    /// Returns the value and deletes the key.
-    pub async fn get_del(&self) -> Result<Option<V>> {
+    /// Returns the value and deletes the key, like `Option::take`. Redisson's `getAndDelete`.
+    #[doc(alias = "getAndDelete", alias = "getdel")]
+    pub async fn take(&self) -> Result<Option<V>> {
         let previous: Option<Bytes> = self
             .key
             .core
@@ -255,19 +215,22 @@ where
         self.decode(previous)
     }
 
-    /// Returns the value and sets a time to live on the key (`GETEX PX`). Needs Redis 6.2 or newer.
-    pub async fn get_and_expire(&self, ttl: Duration) -> Result<Option<V>> {
+    /// Returns the value and sets a time to live on the key (`GETEX PX`), Redisson's `getAndExpire`. Needs Redis 6.2 or newer.
+    #[doc(alias = "getAndExpire")]
+    pub async fn get_expire(&self, ttl: Duration) -> Result<Option<V>> {
         self.get_ex(vec![Arg::from("PX"), Arg::from(millis(ttl)?)])
             .await
     }
 
-    /// Returns the value and clears the time to live of the key (`GETEX PERSIST`). Needs Redis 6.2 or newer.
-    pub async fn get_and_clear_expire(&self) -> Result<Option<V>> {
+    /// Returns the value and clears the time to live of the key (`GETEX PERSIST`), Redisson's `getAndClearExpire`. Needs Redis 6.2 or newer.
+    #[doc(alias = "getAndClearExpire")]
+    pub async fn get_persist(&self) -> Result<Option<V>> {
         self.get_ex(vec![Arg::from("PERSIST")]).await
     }
 
-    /// Length of the encoded value in bytes (`STRLEN`); 0 when the key is missing.
-    pub async fn size(&self) -> Result<usize> {
+    /// Length of the encoded value in bytes (`STRLEN`), like `String::len`; 0 when the key is missing. Redisson's `size`.
+    #[doc(alias = "size")]
+    pub async fn len(&self) -> Result<usize> {
         let mut cmd = redis::cmd("STRLEN");
         cmd.arg(self.key.redis_key());
         let size: usize = self.key.read(cmd).await?;
@@ -285,7 +248,7 @@ where
     {
         match (expected, new) {
             (None, None) => Ok(!self.key.exists().await?),
-            (None, Some(new)) => self.set_nx(new).await,
+            (None, Some(new)) => self.try_set(new).await,
             (Some(expected), None) => self.compare_and_delete(expected).await,
             (Some(expected), Some(new)) => {
                 let swapped: i64 = self
@@ -318,5 +281,228 @@ where
             )
             .await?;
         Ok(deleted == 1)
+    }
+}
+
+/// How [`Set`] treats the time to live of the key.
+#[derive(Clone, Copy, Debug)]
+enum SetTtl {
+    Clear,
+    After(Duration),
+    Keep,
+}
+
+/// A pending [`Bucket::set`]. Await it, optionally after [`Set::ttl`] or [`Set::keep_ttl`].
+#[must_use = "a set does nothing until it is awaited"]
+pub struct Set<'a, V, C: Codec> {
+    bucket: &'a Bucket<V, C>,
+    value: Result<Bytes>,
+    ttl: SetTtl,
+}
+
+impl<V, C: Codec> fmt::Debug for Set<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Set")
+            .field("bucket", self.bucket)
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> Set<'_, V, C> {
+    /// Stores the value with a time to live (`SET PX`), Redisson's `set(value, ttl)`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = SetTtl::After(ttl);
+        self
+    }
+
+    /// Keeps the current time to live of the key (`SET KEEPTTL`, Redis 6.0 or newer), Redisson's `setAndKeepTTL`.
+    pub fn keep_ttl(mut self) -> Self {
+        self.ttl = SetTtl::Keep;
+        self
+    }
+}
+
+impl<'a, V, C> IntoFuture for Set<'a, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<()>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let bytes = self.value?;
+            let options = match self.ttl {
+                SetTtl::Clear => Vec::new(),
+                SetTtl::After(ttl) => vec![Arg::from("PX"), Arg::from(millis(ttl)?)],
+                SetTtl::Keep => vec![Arg::from("KEEPTTL")],
+            };
+            let bucket = self.bucket;
+            let () = bucket
+                .key
+                .query(bucket.set_command(&bytes, options))
+                .await?;
+            Ok(())
+        })
+    }
+}
+
+/// A pending [`Bucket::try_set`]. Await it, optionally after [`TrySet::ttl`].
+#[must_use = "a set does nothing until it is awaited"]
+pub struct TrySet<'a, V, C: Codec> {
+    bucket: &'a Bucket<V, C>,
+    value: Result<Bytes>,
+    ttl: Option<Duration>,
+}
+
+impl<V, C: Codec> fmt::Debug for TrySet<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrySet")
+            .field("bucket", self.bucket)
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> TrySet<'_, V, C> {
+    /// Stores the value with a time to live (`SET PX NX`), Redisson's `setIfAbsent(value, ttl)`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, V, C> IntoFuture for TrySet<'a, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let bytes = self.value?;
+            let bucket = self.bucket;
+            match self.ttl {
+                None => {
+                    let mut cmd = redis::cmd("SETNX");
+                    cmd.arg(bucket.key.redis_key()).arg(&bytes[..]);
+                    let stored: bool = bucket.key.query_once(cmd).await?;
+                    Ok(stored)
+                }
+                Some(ttl) => {
+                    let options = vec![Arg::from("PX"), Arg::from(millis(ttl)?), Arg::from("NX")];
+                    bucket.set_with(bytes, options).await
+                }
+            }
+        })
+    }
+}
+
+/// A pending [`Bucket::update`]. Await it, optionally after [`Update::ttl`].
+#[must_use = "an update does nothing until it is awaited"]
+pub struct Update<'a, V, C: Codec> {
+    bucket: &'a Bucket<V, C>,
+    value: Result<Bytes>,
+    ttl: Option<Duration>,
+}
+
+impl<V, C: Codec> fmt::Debug for Update<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Update")
+            .field("bucket", self.bucket)
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> Update<'_, V, C> {
+    /// Also sets a time to live (`SET PX XX`), Redisson's `setIfExists(value, ttl)`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, V, C> IntoFuture for Update<'a, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let bytes = self.value?;
+            let options = match self.ttl {
+                None => vec![Arg::from("XX")],
+                Some(ttl) => vec![Arg::from("PX"), Arg::from(millis(ttl)?), Arg::from("XX")],
+            };
+            self.bucket.set_with(bytes, options).await
+        })
+    }
+}
+
+/// A pending [`Bucket::replace`]. Await it, optionally after [`Replace::ttl`].
+#[must_use = "a replace does nothing until it is awaited"]
+pub struct Replace<'a, V, C: Codec> {
+    bucket: &'a Bucket<V, C>,
+    value: Result<Bytes>,
+    ttl: Option<Duration>,
+}
+
+impl<V, C: Codec> fmt::Debug for Replace<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Replace")
+            .field("bucket", self.bucket)
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> Replace<'_, V, C> {
+    /// Stores the new value with a time to live, Redisson's `getAndSet(value, ttl)`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, V, C> IntoFuture for Replace<'a, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<Option<V>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let bytes = self.value?;
+            let bucket = self.bucket;
+            let previous: Option<Bytes> = match self.ttl {
+                None => {
+                    let mut cmd = redis::cmd("GETSET");
+                    cmd.arg(bucket.key.redis_key()).arg(&bytes[..]);
+                    bucket.key.query(cmd).await?
+                }
+                Some(ttl) => {
+                    bucket
+                        .key
+                        .core
+                        .eval(
+                            &GET_AND_SET_EX,
+                            vec![bucket.key.redis_key()],
+                            vec![bytes, Bytes::from(millis(ttl)?.to_string())],
+                        )
+                        .await?
+                }
+            };
+            bucket.decode(previous)
+        })
     }
 }

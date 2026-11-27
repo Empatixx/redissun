@@ -164,7 +164,7 @@ async fn deque() -> Deque {
 }
 
 async fn all(deque: &Deque) -> Vec<i32> {
-    deque.read_all().await.unwrap()
+    deque.to_vec().await.unwrap()
 }
 
 fn later(delay: Duration, work: impl std::future::Future<Output = ()> + Send + 'static) {

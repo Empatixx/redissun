@@ -13,10 +13,10 @@ async fn it_must_be_initialised_before_inserting_and_contains_nothing_before() {
 }
 
 #[tokio::test]
-async fn try_init_works_once() {
+async fn init_works_once() {
     let filter = client().await.bloom_filter::<String>(unique("bloom"));
-    assert!(filter.try_init(1000, 0.01).await.unwrap());
-    assert!(!filter.try_init(5000, 0.5).await.unwrap());
+    assert!(filter.init(1000, 0.01).await.unwrap());
+    assert!(!filter.init(5000, 0.5).await.unwrap());
     assert_eq!(filter.expected_insertions().await.unwrap(), 1000);
     assert!(filter.size_bits().await.unwrap() > 1000);
     assert!(filter.hash_iterations().await.unwrap() >= 1);
@@ -27,28 +27,22 @@ async fn invalid_parameters_are_config_errors() {
     assert!(client()
         .await
         .bloom_filter::<String>(unique("bloom"))
-        .try_init(10, 0.0)
+        .init(10, 0.0)
         .await
         .unwrap());
     let filter = client().await.bloom_filter::<String>(unique("bloom"));
+    assert!(matches!(filter.init(0, 0.01).await, Err(Error::Config(_))));
     assert!(matches!(
-        filter.try_init(0, 0.01).await,
+        filter.init(1_000_000_000, 0.0).await,
         Err(Error::Config(_))
     ));
-    assert!(matches!(
-        filter.try_init(1_000_000_000, 0.0).await,
-        Err(Error::Config(_))
-    ));
-    assert!(matches!(
-        filter.try_init(10, 1.0).await,
-        Err(Error::Config(_))
-    ));
+    assert!(matches!(filter.init(10, 1.0).await, Err(Error::Config(_))));
 }
 
 #[tokio::test]
 async fn inserted_values_are_always_found() {
     let filter = client().await.bloom_filter::<u32>(unique("bloom"));
-    filter.try_init(2000, 0.01).await.unwrap();
+    filter.init(2000, 0.01).await.unwrap();
     for value in 0..1000u32 {
         filter.insert(&value).await.unwrap();
     }
@@ -60,7 +54,7 @@ async fn inserted_values_are_always_found() {
 #[tokio::test]
 async fn insert_reports_whether_the_value_was_new() {
     let filter = client().await.bloom_filter::<String>(unique("bloom"));
-    filter.try_init(100, 0.001).await.unwrap();
+    filter.init(100, 0.001).await.unwrap();
     assert!(filter.insert("a").await.unwrap());
     assert!(!filter.insert("a").await.unwrap());
 }
@@ -68,7 +62,7 @@ async fn insert_reports_whether_the_value_was_new() {
 #[tokio::test]
 async fn false_positives_stay_near_the_requested_rate() {
     let filter = client().await.bloom_filter::<u32>(unique("bloom"));
-    filter.try_init(1000, 0.01).await.unwrap();
+    filter.init(1000, 0.01).await.unwrap();
     for value in 0..1000u32 {
         filter.insert(&value).await.unwrap();
     }
@@ -84,7 +78,7 @@ async fn false_positives_stay_near_the_requested_rate() {
 #[tokio::test]
 async fn count_estimates_the_number_of_values() {
     let filter = client().await.bloom_filter::<u32>(unique("bloom"));
-    filter.try_init(1000, 0.01).await.unwrap();
+    filter.init(1000, 0.01).await.unwrap();
     for value in 0..500u32 {
         filter.insert(&value).await.unwrap();
     }
@@ -99,7 +93,7 @@ async fn count_estimates_the_number_of_values() {
 async fn another_client_shares_the_filter_and_its_settings() {
     let name = unique("bloom");
     let first = client().await.bloom_filter::<String>(name.clone());
-    first.try_init(1000, 0.01).await.unwrap();
+    first.init(1000, 0.01).await.unwrap();
     first.insert("shared").await.unwrap();
     let second = client().await.bloom_filter::<String>(name);
     assert!(second.contains("shared").await.unwrap());
@@ -109,18 +103,18 @@ async fn another_client_shares_the_filter_and_its_settings() {
 #[tokio::test]
 async fn object_methods_cover_the_config() {
     let filter = client().await.bloom_filter::<String>(unique("bloom"));
-    filter.try_init(100, 0.01).await.unwrap();
+    filter.init(100, 0.01).await.unwrap();
     filter.insert("a").await.unwrap();
     assert!(filter.exists().await.unwrap());
     assert!(filter.del().await.unwrap());
-    assert!(filter.try_init(100, 0.01).await.unwrap());
+    assert!(filter.init(100, 0.01).await.unwrap());
 }
 
 #[tokio::test]
 async fn a_filter_set_up_again_with_the_same_size_but_other_hashes_is_detected() {
     let name = unique("bloom");
     let first = client().await.bloom_filter::<u32>(name.clone());
-    first.try_init(1000, 0.01).await.unwrap();
+    first.init(1000, 0.01).await.unwrap();
     first.insert(&1).await.unwrap();
     let k = first.hash_iterations().await.unwrap();
     let size = first.size_bits().await.unwrap();
@@ -146,7 +140,7 @@ async fn a_filter_set_up_again_with_the_same_size_but_other_hashes_is_detected()
 async fn keys_are_laid_out_as_in_redisson() {
     let name = unique("bloom");
     let filter = client().await.bloom_filter::<String>(name.clone());
-    filter.try_init(100, 0.03).await.unwrap();
+    filter.init(100, 0.03).await.unwrap();
     assert_eq!(remaining_keys(&name).await, 1);
     filter.insert("a").await.unwrap();
     let config = format!("{{{name}}}:config");
@@ -160,12 +154,12 @@ async fn contains_after_the_filter_was_set_up_again_is_false_then_follows_the_ne
     let name = unique("bloom");
     let client = client().await;
     let stale = client.bloom_filter::<String>(name.clone());
-    stale.try_init(100, 0.03).await.unwrap();
+    stale.init(100, 0.03).await.unwrap();
     stale.insert("1").await.unwrap();
     assert!(stale.contains("1").await.unwrap());
     let fresh = client.bloom_filter::<String>(name);
     fresh.del().await.unwrap();
-    fresh.try_init(200, 0.03).await.unwrap();
+    fresh.init(200, 0.03).await.unwrap();
     fresh.insert("1").await.unwrap();
     assert!(!stale.contains("1").await.unwrap());
     assert!(stale.contains("1").await.unwrap());
@@ -179,47 +173,47 @@ async fn remaining_keys(name: &str) -> usize {
 
 // Redisson: testContainsAll
 #[tokio::test]
-async fn contains_all_counts_how_many_values_are_present() {
+async fn count_contained_counts_how_many_values_are_present() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    filter.try_init(100, 0.03).await.unwrap();
+    filter.init(100, 0.03).await.unwrap();
     let list = ["1", "2", "3"];
-    assert_eq!(filter.contains_all(&list).await.unwrap(), 0);
-    assert_eq!(filter.insert_all(&list).await.unwrap(), 3);
-    assert_eq!(filter.contains_all(&list).await.unwrap(), 3);
-    assert_eq!(filter.contains_all(&["1", "5"]).await.unwrap(), 1);
+    assert_eq!(filter.count_contained(&list).await.unwrap(), 0);
+    assert_eq!(filter.extend(list).await.unwrap(), 3);
+    assert_eq!(filter.count_contained(&list).await.unwrap(), 3);
+    assert_eq!(filter.count_contained(&["1", "5"]).await.unwrap(), 1);
 }
 
 // Redisson: testExistsAll
 #[tokio::test]
-async fn contains_each_reports_presence_per_value() {
+async fn contains_many_reports_presence_per_value() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    filter.try_init(100, 0.03).await.unwrap();
+    filter.init(100, 0.03).await.unwrap();
     let list = ["1", "2", "3"];
     assert_eq!(
-        filter.contains_each(&list).await.unwrap(),
+        filter.contains_many(&list).await.unwrap(),
         [false, false, false]
     );
-    assert_eq!(filter.insert_all(&list).await.unwrap(), 3);
+    assert_eq!(filter.extend(list).await.unwrap(), 3);
     assert_eq!(
-        filter.contains_each(&list).await.unwrap(),
+        filter.contains_many(&list).await.unwrap(),
         [true, true, true]
     );
     assert_eq!(
-        filter.contains_each(&["1", "5"]).await.unwrap(),
+        filter.contains_many(&["1", "5"]).await.unwrap(),
         [true, false]
     );
 }
 
 // Redisson: testAddAll
 #[tokio::test]
-async fn insert_all_counts_only_the_new_values() {
+async fn extend_counts_only_the_new_values() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    filter.try_init(100, 0.03).await.unwrap();
+    filter.init(100, 0.03).await.unwrap();
     let list = ["1", "2", "3"];
-    assert_eq!(filter.insert_all(&list).await.unwrap(), 3);
-    assert_eq!(filter.insert_all(&list).await.unwrap(), 0);
+    assert_eq!(filter.extend(list).await.unwrap(), 3);
+    assert_eq!(filter.extend(list).await.unwrap(), 0);
     assert_eq!(filter.count().await.unwrap(), 3);
-    assert_eq!(filter.insert_all(&["1", "5"]).await.unwrap(), 1);
+    assert_eq!(filter.extend(["1", "5"]).await.unwrap(), 1);
     assert_eq!(filter.count().await.unwrap(), 4);
     for value in list {
         assert!(filter.contains(value).await.unwrap());
@@ -230,37 +224,28 @@ async fn insert_all_counts_only_the_new_values() {
 #[tokio::test]
 async fn a_negative_false_probability_is_a_config_error() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    assert!(matches!(
-        filter.try_init(1, -1.0).await,
-        Err(Error::Config(_))
-    ));
+    assert!(matches!(filter.init(1, -1.0).await, Err(Error::Config(_))));
 }
 
 // Redisson: testFalseProbability2
 #[tokio::test]
 async fn a_false_probability_above_one_is_a_config_error() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    assert!(matches!(
-        filter.try_init(1, 2.0).await,
-        Err(Error::Config(_))
-    ));
+    assert!(matches!(filter.init(1, 2.0).await, Err(Error::Config(_))));
 }
 
 // Redisson: testSizeZero
 #[tokio::test]
 async fn a_false_probability_of_one_is_a_config_error() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    assert!(matches!(
-        filter.try_init(1, 1.0).await,
-        Err(Error::Config(_))
-    ));
+    assert!(matches!(filter.init(1, 1.0).await, Err(Error::Config(_))));
 }
 
 // Redisson: testConfig
 #[tokio::test]
 async fn the_config_getters_return_the_computed_settings() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    filter.try_init(100, 0.03).await.unwrap();
+    filter.init(100, 0.03).await.unwrap();
     assert_eq!(filter.expected_insertions().await.unwrap(), 100);
     assert_eq!(filter.false_probability().await.unwrap(), 0.03);
     assert_eq!(filter.hash_iterations().await.unwrap(), 5);
@@ -269,14 +254,14 @@ async fn the_config_getters_return_the_computed_settings() {
 
 // Redisson: testInit
 #[tokio::test]
-async fn try_init_succeeds_again_after_del_removes_every_key() {
+async fn init_succeeds_again_after_del_removes_every_key() {
     let name = unique("filter");
     let filter = client().await.bloom_filter::<String>(name.clone());
-    assert!(filter.try_init(55_000_000, 0.03).await.unwrap());
-    assert!(!filter.try_init(55_000_001, 0.03).await.unwrap());
+    assert!(filter.init(55_000_000, 0.03).await.unwrap());
+    assert!(!filter.init(55_000_001, 0.03).await.unwrap());
     filter.del().await.unwrap();
     assert_eq!(remaining_keys(&name).await, 0);
-    assert!(filter.try_init(55_000_001, 0.03).await.unwrap());
+    assert!(filter.init(55_000_001, 0.03).await.unwrap());
 }
 
 // Redisson: testNotInitializedOnExpectedInsertions
@@ -291,7 +276,7 @@ async fn expected_insertions_of_an_uninitialised_filter_is_an_error() {
 async fn expire_removes_every_key_of_the_filter() {
     let name = unique("filter");
     let filter = client().await.bloom_filter::<String>(name.clone());
-    filter.try_init(55_000_000, 0.03).await.unwrap();
+    filter.init(55_000_000, 0.03).await.unwrap();
     filter.insert("test").await.unwrap();
     assert!(filter.expire(Duration::from_secs(2)).await.unwrap());
     tokio::time::sleep(Duration::from_millis(2100)).await;
@@ -312,7 +297,7 @@ async fn rename_moves_an_empty_filter_to_the_new_name() {
     let name = unique("test");
     let renamed = unique("test1");
     let filter = client.bloom_filter::<String>(name.clone());
-    filter.try_init(1000, 0.01).await.unwrap();
+    filter.init(1000, 0.01).await.unwrap();
     filter.rename(&renamed).await.unwrap();
     assert!(client
         .bloom_filter::<String>(renamed)
@@ -325,10 +310,10 @@ async fn rename_moves_an_empty_filter_to_the_new_name() {
 #[tokio::test]
 async fn insert_and_contains_work_on_a_huge_filter() {
     let filter = client().await.bloom_filter::<String>(unique("filter"));
-    filter.try_init(550_000_000, 0.5).await.unwrap();
+    filter.init(550_000_000, 0.5).await.unwrap();
     check(&filter).await;
     filter.del().await.unwrap();
-    assert!(filter.try_init(550_000_000, 0.03).await.unwrap());
+    assert!(filter.init(550_000_000, 0.03).await.unwrap());
     check(&filter).await;
     filter.del().await.unwrap();
 }
@@ -354,7 +339,7 @@ async fn rename_keeps_the_inserted_values_under_the_new_name() {
     let name = unique("filter");
     let renamed = unique("new_filter");
     let filter = client.bloom_filter::<String>(name.clone());
-    filter.try_init(550_000_000, 0.03).await.unwrap();
+    filter.init(550_000_000, 0.03).await.unwrap();
     assert!(filter.insert("123").await.unwrap());
     filter.rename(&renamed).await.unwrap();
 
@@ -372,11 +357,11 @@ async fn contains_on_a_stale_handle_after_reinit_is_false() {
     let name = unique("filter");
     let f1 = client.bloom_filter::<String>(name.clone());
     assert!(!f1.contains("1").await.unwrap());
-    f1.try_init(100, 0.03).await.unwrap();
+    f1.init(100, 0.03).await.unwrap();
 
     let f2 = client.bloom_filter::<String>(name);
     f2.del().await.unwrap();
-    f2.try_init(200, 0.03).await.unwrap();
+    f2.init(200, 0.03).await.unwrap();
 
     assert!(!f1.contains("1").await.unwrap());
 }
@@ -397,7 +382,7 @@ async fn a_filter_laid_out_by_redisson_is_read_and_extended() {
         raw_command(&["SETBIT", &name, bit, "1"]).await;
     }
     let filter = client().await.bloom_filter::<String>(name.clone());
-    assert!(!filter.try_init(100, 0.01).await.unwrap());
+    assert!(!filter.init(100, 0.01).await.unwrap());
     assert_eq!(filter.size_bits().await.unwrap(), 958);
     assert_eq!(filter.hash_iterations().await.unwrap(), 7);
     assert_eq!(filter.expected_insertions().await.unwrap(), 100);

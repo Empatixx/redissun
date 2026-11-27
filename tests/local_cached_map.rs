@@ -373,7 +373,7 @@ async fn an_lfu_cache_keeps_the_entries_read_most() {
     map.get("a").await.unwrap();
     map.insert("c", "3").await.unwrap();
     let cached: HashSet<String> = map
-        .cached_entries()
+        .local_entries()
         .unwrap()
         .into_iter()
         .map(|(key, _)| key)
@@ -597,7 +597,7 @@ async fn without_sync_an_update_keeps_the_other_cache_intact() {
 
 // Redisson: testLocalCacheState
 #[tokio::test]
-async fn cached_entries_returns_the_locally_cached_entries() {
+async fn local_entries_returns_the_locally_cached_entries() {
     let _gate = shared().await;
     let map = client()
         .await
@@ -609,7 +609,7 @@ async fn cached_entries_returns_the_locally_cached_entries() {
         .unwrap();
     map.insert("1", "11").await.unwrap();
     map.insert("2", "22").await.unwrap();
-    let cached: HashMap<String, String> = map.cached_entries().unwrap().into_iter().collect();
+    let cached: HashMap<String, String> = map.local_entries().unwrap().into_iter().collect();
     assert_eq!(
         cached,
         HashMap::from([("1".into(), "11".into()), ("2".into(), "22".into())])
@@ -782,7 +782,7 @@ async fn inserted_values_are_cached_and_readable_from_another_instance() {
     map.insert("14", &2).await.unwrap();
     map.insert("15", &3).await.unwrap();
     let cached: HashSet<i32> = map
-        .cached_entries()
+        .local_entries()
         .unwrap()
         .into_iter()
         .map(|(_, v)| v)
@@ -815,7 +815,7 @@ async fn a_stored_cache_miss_counts_locally_but_is_not_an_entry() {
     assert_eq!(map.get("19").await.unwrap(), None);
     assert_eq!(map.local_len(), 1);
     assert!(!map.contains_key("19").await.unwrap());
-    assert!(map.cached_entries().unwrap().is_empty());
+    assert!(map.local_entries().unwrap().is_empty());
 }
 
 // Redisson: testGetNotStoringCacheMiss
@@ -1012,10 +1012,10 @@ async fn an_expired_map_drops_its_cached_entries() {
     common::raw_command(&["CONFIG", "SET", "notify-keyspace-events", "EKx"]).await;
     let map = cached(&client().await, &unique("test")).await;
     map.insert("12", "32").await.unwrap();
-    assert_eq!(map.cached_entries().unwrap().len(), 1);
+    assert_eq!(map.local_entries().unwrap().len(), 1);
     assert!(map.expire(Duration::from_secs(1)).await.unwrap());
     sleep(Duration::from_millis(1500)).await;
-    assert_eq!(map.cached_entries().unwrap().len(), 0);
+    assert_eq!(map.local_entries().unwrap().len(), 0);
     assert_eq!(map.get("12").await.unwrap(), None);
 }
 

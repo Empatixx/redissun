@@ -12,8 +12,8 @@ type Run<'a, T> = Box<
 /// A call that waits until it succeeds. Await it to wait without a limit, or call [`Pending::timeout`] first to wait at most that long.
 ///
 /// ```ignore
-/// let permits = semaphore.acquire(2).await?;
-/// let maybe = semaphore.acquire(2).timeout(Duration::from_secs(1)).await?;
+/// let permits = semaphore.acquire_many(2).await?;
+/// let maybe = semaphore.acquire_many(2).timeout(Duration::from_secs(1)).await?;
 /// ```
 #[must_use = "a pending call does nothing until it is awaited"]
 pub struct Pending<'a, T> {

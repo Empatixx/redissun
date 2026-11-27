@@ -349,7 +349,7 @@ async fn try_release_many(key: &Key, ids: &[String]) -> Result<usize> {
 /// use std::time::Duration;
 ///
 /// let slots = client.permit_expirable_semaphore("render-slots");
-/// slots.try_set_permits(4).await?;
+/// slots.init_permits(4).await?;
 /// let id = slots.acquire().lease(Duration::from_secs(30)).await?;
 /// // … render …
 /// slots.release(&id).await?;
@@ -650,7 +650,8 @@ impl PermitExpirableSemaphore {
     }
 
     /// Sets the number of permits only when the semaphore does not exist yet; returns whether it did, Redisson's `trySetPermits`.
-    pub async fn try_set_permits(&self, permits: i64) -> Result<bool> {
+    #[doc(alias = "trySetPermits")]
+    pub async fn init_permits(&self, permits: i64) -> Result<bool> {
         let args = vec![
             Bytes::from(permits.to_string()),
             Bytes::from_static(PUBLISH.as_bytes()),

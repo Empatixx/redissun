@@ -9,7 +9,7 @@ An `AtomicI64` is a number in a Redis string. A missing counter reads as 0.
 let visits = client.atomic_i64("visits");
 
 let total = visits.incr().await?;
-visits.add_and_get(10).await?;
+visits.add(10).await?;
 ```
 
 ## Methods
@@ -20,15 +20,15 @@ Every method is `async` and returns `redissun::Result<T>`. The **Returns** colum
 |---|---|---|
 | `get()` | `GET` | the value, 0 if missing |
 | `set(v)` | `SET` | `()` |
-| `get_and_set(v)` | `SET GET` | the old value |
-| `get_and_delete()` | `GETDEL` | the old value |
+| `swap(v)` | `GETSET` | the old value |
+| `take()` | Lua script | the old value |
 | `compare_and_set(expected, update)` | Lua script | `true` if the value was changed |
-| `add_and_get(delta)` | `INCRBY` | the new value |
-| `get_and_add(delta)` | `INCRBY` | the value before |
+| `compare_and_delete(comparison, threshold)` | Lua script | `true` if the counter was deleted |
+| `set_if_less(less, v)` and `set_if_greater(greater, v)` | Lua script | `true` if the value was changed |
+| `add(delta)` | `INCRBY` | the new value |
+| `fetch_add(delta)` | `INCRBY` | the value before; `fetch_add(1)` is Redisson's `getAndIncrement` |
 | `incr()` and `decr()` | `INCR`, `DECR` | the new value |
 
-`compare_and_set` treats a missing counter as 0, like Redisson. `get_and_set` and `get_and_delete` need Redis 6.2 or newer.
-
-`set`, `get_and_set` and `compare_and_set` replace the value the way Redis `SET` does, so they also remove a time limit set with `expire`. `incr`, `decr`, `add_and_get` and `get_and_add` keep it.
+`compare_and_set`, `set_if_less` and `set_if_greater` treat a missing counter as 0, like Redisson. `compare_and_delete` takes a `Comparison` (`Less`, `LessOrEqual`, `Greater`, `GreaterOrEqual`, `Equal` or `NotEqual`) and never deletes a missing counter. `set`, `swap` and `compare_and_set` replace the value the way Redis `SET` does, so they also remove a time limit set with `expire`. `incr`, `decr`, `add` and `fetch_add` keep it.
 
 The value is stored as a plain integer, not through the codec. Other tools can read it. If the key holds something that is not an integer, the call returns an error.

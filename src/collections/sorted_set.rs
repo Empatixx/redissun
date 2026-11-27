@@ -1,5 +1,6 @@
 use crate::client::request::Arg;
 use crate::codec::Codec;
+use crate::collections::list::bounds;
 use crate::error::Result;
 use crate::lua::Lua;
 use crate::object::{block_seconds, HasKey, Key};
@@ -12,8 +13,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Bound, RangeBounds};
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -89,10 +92,6 @@ static RETAIN: LazyLock<Lua> = LazyLock::new(|| {
 
 fn redis_index(index: usize) -> i64 {
     i64::try_from(index).unwrap_or(i64::MAX)
-}
-
-fn redis_end(end: usize) -> i64 {
-    i64::try_from(end).unwrap_or(i64::MAX) - 1
 }
 
 fn score_text(score: f64) -> String {
@@ -189,6 +188,84 @@ enum Side {
     Max,
 }
 
+/// The condition of an [`Extend`].
+#[derive(Clone, Copy, Debug)]
+enum Condition {
+    Always,
+    Absent,
+    Exists,
+    Greater,
+    Less,
+}
+
+/// A pending [`SortedSet::extend`]. Await it, optionally after one of [`Extend::if_absent`], [`Extend::if_exists`], [`Extend::if_greater`] or [`Extend::if_less`]; the last one set wins.
+#[must_use = "an extend does nothing until it is awaited"]
+pub struct Extend<'a, V, C: Codec> {
+    set: &'a SortedSet<V, C>,
+    encoded: Result<Vec<(f64, Bytes)>>,
+    condition: Condition,
+}
+
+impl<V, C: Codec> fmt::Debug for Extend<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extend")
+            .field("set", self.set)
+            .field("condition", &self.condition)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> Extend<'_, V, C> {
+    /// Adds only the values not in the set yet (`ZADD NX`), Redisson's `addAllIfAbsent`; resolves to how many were added.
+    pub fn if_absent(mut self) -> Self {
+        self.condition = Condition::Absent;
+        self
+    }
+
+    /// Changes the scores of the values already in the set and adds none (`ZADD XX CH`), Redisson's `addAllIfExist`; resolves to how many changed.
+    pub fn if_exists(mut self) -> Self {
+        self.condition = Condition::Exists;
+        self
+    }
+
+    /// Adds new values and raises scores that are lower (`ZADD GT CH`), Redisson's `addAllIfGreater`; resolves to how many were added or changed.
+    pub fn if_greater(mut self) -> Self {
+        self.condition = Condition::Greater;
+        self
+    }
+
+    /// Adds new values and lowers scores that are higher (`ZADD LT CH`), Redisson's `addAllIfLess`; resolves to how many were added or changed.
+    pub fn if_less(mut self) -> Self {
+        self.condition = Condition::Less;
+        self
+    }
+}
+
+impl<'a, V, C> IntoFuture for Extend<'a, V, C>
+where
+    V: Serialize + DeserializeOwned + Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<usize>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let encoded = self.encoded?;
+            let (condition, ordering, changed) = match self.condition {
+                Condition::Always => (None, None, false),
+                Condition::Absent => (Some("NX"), None, false),
+                Condition::Exists => (Some("XX"), None, true),
+                Condition::Greater => (None, Some("GT"), true),
+                Condition::Less => (None, Some("LT"), true),
+            };
+            self.set
+                .zadd_encoded(encoded, condition, ordering, changed)
+                .await
+        })
+    }
+}
+
 /// A distributed set whose values are ordered by a score, stored in a Redis sorted set. Values with the same score are ordered by their encoded bytes. Values are equal when their encoded bytes are equal.
 pub struct SortedSet<V, C: Codec> {
     key: Key,
@@ -252,6 +329,19 @@ where
         values.iter().map(|v| self.codec.encode(*v)).collect()
     }
 
+    fn encode_entries<'a, Q>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a Q, f64)>,
+    ) -> Result<Vec<(f64, Bytes)>>
+    where
+        Q: Serialize + ?Sized + Sync + 'a,
+    {
+        entries
+            .into_iter()
+            .map(|(v, score)| Ok((score, self.codec.encode(v)?)))
+            .collect()
+    }
+
     async fn zadd<Q>(
         &self,
         entries: Vec<(&Q, f64)>,
@@ -262,13 +352,21 @@ where
     where
         Q: Serialize + ?Sized + Sync,
     {
-        if entries.is_empty() {
+        let encoded = self.encode_entries(entries)?;
+        self.zadd_encoded(encoded, condition, ordering, changed)
+            .await
+    }
+
+    async fn zadd_encoded(
+        &self,
+        encoded: Vec<(f64, Bytes)>,
+        condition: Option<&'static str>,
+        ordering: Option<&'static str>,
+        changed: bool,
+    ) -> Result<usize> {
+        if encoded.is_empty() {
             return Ok(0);
         }
-        let encoded = entries
-            .into_iter()
-            .map(|(v, score)| Ok((score, self.codec.encode(v)?)))
-            .collect::<Result<Vec<(f64, Bytes)>>>()?;
         let mut cmd = self.key.key_cmd("ZADD");
         cmd.arg(condition).arg(ordering);
         if changed {
@@ -299,8 +397,9 @@ where
         Ok(self.zadd(vec![(v, score)], Some("NX"), None, false).await? > 0)
     }
 
-    /// Changes the score only when the value is already in the set (`ZADD XX CH`); returns whether the score changed.
-    pub async fn insert_if_exists<Q>(&self, v: &Q, score: f64) -> Result<bool>
+    /// Changes the score only when the value is already in the set (`ZADD XX CH`); returns whether the score changed. Redisson's `addIfExists`.
+    #[doc(alias = "addIfExists")]
+    pub async fn update<Q>(&self, v: &Q, score: f64) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -326,69 +425,37 @@ where
         Ok(self.zadd(vec![(v, score)], None, Some("LT"), true).await? > 0)
     }
 
-    /// Adds many values with scores in one round trip; returns how many were new.
-    pub async fn extend<'a, Q>(
-        &self,
-        entries: impl IntoIterator<Item = (&'a Q, f64)>,
-    ) -> Result<usize>
+    /// Adds many values with scores in one round trip (`ZADD`) and resolves to how many were new. Redisson's `addAll`.
+    ///
+    /// A condition turns it into Redisson's conditional `addAll*`, and the count becomes how many values were added or changed (`ZADD .. CH`):
+    /// `.if_absent()` adds only new values (`NX`, Redisson's `addAllIfAbsent`, which counts the added ones), `.if_exists()` only changes existing ones (`XX`, `addAllIfExist`),
+    /// `.if_greater()` adds new values and raises lower scores (`GT`, `addAllIfGreater`) and `.if_less()` adds new values and lowers higher scores (`LT`, `addAllIfLess`).
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// let set = client.sorted_set::<String>("scores");
+    /// let added = set.extend([("ann", 1.0), ("bob", 2.0)]).await?;
+    /// let raised = set.extend([("ann", 5.0), ("bob", 0.5)]).if_greater().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(
+        alias = "addAll",
+        alias = "addAllIfAbsent",
+        alias = "addAllIfExist",
+        alias = "addAllIfGreater",
+        alias = "addAllIfLess"
+    )]
+    pub fn extend<'a, Q>(&self, entries: impl IntoIterator<Item = (&'a Q, f64)>) -> Extend<'_, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.zadd(entries.into_iter().collect(), None, None, false)
-            .await
-    }
-
-    /// Adds only the values not in the set yet (`ZADD NX`); returns how many were added.
-    pub async fn extend_if_absent<'a, Q>(
-        &self,
-        entries: impl IntoIterator<Item = (&'a Q, f64)>,
-    ) -> Result<usize>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync + 'a,
-    {
-        self.zadd(entries.into_iter().collect(), Some("NX"), None, false)
-            .await
-    }
-
-    /// Changes the scores of the values already in the set (`ZADD XX CH`); returns how many changed.
-    pub async fn extend_if_exists<'a, Q>(
-        &self,
-        entries: impl IntoIterator<Item = (&'a Q, f64)>,
-    ) -> Result<usize>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync + 'a,
-    {
-        self.zadd(entries.into_iter().collect(), Some("XX"), None, true)
-            .await
-    }
-
-    /// Adds new values and raises scores that are lower (`ZADD GT CH`); returns how many were added or changed.
-    pub async fn extend_if_greater<'a, Q>(
-        &self,
-        entries: impl IntoIterator<Item = (&'a Q, f64)>,
-    ) -> Result<usize>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync + 'a,
-    {
-        self.zadd(entries.into_iter().collect(), None, Some("GT"), true)
-            .await
-    }
-
-    /// Adds new values and lowers scores that are higher (`ZADD LT CH`); returns how many were added or changed.
-    pub async fn extend_if_less<'a, Q>(
-        &self,
-        entries: impl IntoIterator<Item = (&'a Q, f64)>,
-    ) -> Result<usize>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync + 'a,
-    {
-        self.zadd(entries.into_iter().collect(), None, Some("LT"), true)
-            .await
+        Extend {
+            set: self,
+            encoded: self.encode_entries(entries),
+            condition: Condition::Always,
+        }
     }
 
     async fn ranked_script<Q>(&self, script: &Lua, v: &Q, score: f64, rank: &str) -> Result<usize>
@@ -902,12 +969,12 @@ where
         self.decode_all(scored(&reply)?)
     }
 
-    async fn ranked(&self, range: Range<usize>, rev: bool) -> Result<Vec<(V, f64)>> {
-        if range.start >= range.end {
+    async fn ranked(&self, range: impl RangeBounds<usize>, rev: bool) -> Result<Vec<(V, f64)>> {
+        let Some((start, stop)) = bounds(range) else {
             return Ok(Vec::new());
-        }
+        };
         let mut cmd = self.key.key_cmd("ZRANGE");
-        cmd.arg(redis_index(range.start)).arg(redis_end(range.end));
+        cmd.arg(start).arg(stop);
         if rev {
             cmd.arg("REV");
         }
@@ -916,28 +983,28 @@ where
         self.decode_all(raw)
     }
 
-    /// Returns the values at these positions, sorted from the lowest score. The end is exclusive, like a slice range.
-    pub async fn range(&self, range: Range<usize>) -> Result<Vec<(V, f64)>> {
+    /// Returns the values at these positions, sorted from the lowest score, like a slice range: `set.range(0..3)`, `set.range(2..)` or, for Redisson's inclusive `entryRange(0, 3)`, `set.range(0..=3)`.
+    pub async fn range(&self, range: impl RangeBounds<usize>) -> Result<Vec<(V, f64)>> {
         self.ranked(range, false).await
     }
 
-    /// Returns the values at these positions, sorted from the highest score. The end is exclusive.
-    pub async fn rev_range(&self, range: Range<usize>) -> Result<Vec<(V, f64)>> {
+    /// Returns the values at these positions, sorted from the highest score, like a slice range.
+    pub async fn rev_range(&self, range: impl RangeBounds<usize>) -> Result<Vec<(V, f64)>> {
         self.ranked(range, true).await
     }
 
-    /// Removes the values at these positions, counted from the lowest score; returns how many. The end is exclusive.
-    pub async fn remove_range(&self, range: Range<usize>) -> Result<usize> {
-        if range.start >= range.end {
+    /// Removes the values at these positions, counted from the lowest score, like a slice range; returns how many.
+    pub async fn remove_range(&self, range: impl RangeBounds<usize>) -> Result<usize> {
+        let Some((start, stop)) = bounds(range) else {
             return Ok(0);
-        }
+        };
         let removed: usize = self
             .key
             .query({
                 let mut cmd = redis::cmd("ZREMRANGEBYRANK");
                 cmd.arg(self.key.redis_key());
-                cmd.arg(redis_index(range.start));
-                cmd.arg(redis_end(range.end));
+                cmd.arg(start);
+                cmd.arg(stop);
                 cmd
             })
             .await?;

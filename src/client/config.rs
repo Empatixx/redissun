@@ -230,18 +230,19 @@ impl<C: Codec> ClientBuilder<C> {
     }
 
     /// Turns on TCP keep-alive for every connection, like Redisson's `keepAlive`. Defaults to `false`.
-    pub fn keep_alive(mut self, keep_alive: bool) -> Self {
+    #[doc(alias = "keepAlive")]
+    pub fn tcp_keep_alive(mut self, keep_alive: bool) -> Self {
         self.settings.keep_alive = keep_alive;
         self
     }
 
-    /// How long a connection is idle before the first keep-alive probe, like Redisson's `tcpKeepAliveIdle`. Used with [`keep_alive`](ClientBuilder::keep_alive). Defaults to the system setting.
+    /// How long a connection is idle before the first keep-alive probe, like Redisson's `tcpKeepAliveIdle`. Used with [`tcp_keep_alive`](ClientBuilder::tcp_keep_alive). Defaults to the system setting.
     pub fn tcp_keep_alive_idle(mut self, idle: Duration) -> Self {
         self.settings.tcp_keep_alive_idle = Some(idle);
         self
     }
 
-    /// The pause between two keep-alive probes, like Redisson's `tcpKeepAliveInterval`. Used with [`keep_alive`](ClientBuilder::keep_alive) on Linux, macOS, Windows, Android, iOS and FreeBSD. Defaults to the system setting.
+    /// The pause between two keep-alive probes, like Redisson's `tcpKeepAliveInterval`. Used with [`tcp_keep_alive`](ClientBuilder::tcp_keep_alive) on Linux, macOS, Windows, Android, iOS and FreeBSD. Defaults to the system setting.
     pub fn tcp_keep_alive_interval(mut self, interval: Duration) -> Self {
         self.settings.tcp_keep_alive_interval = Some(interval);
         self
@@ -612,7 +613,7 @@ mod tests {
                 .connect_timeout(Duration::from_secs(2))
                 .reconnection_delay(DelayStrategy::Constant(Duration::from_millis(250)))
                 .tcp_no_delay(false)
-                .keep_alive(true)
+                .tcp_keep_alive(true)
                 .tcp_keep_alive_idle(Duration::from_secs(60))
                 .client_name("worker")
                 .database(5),

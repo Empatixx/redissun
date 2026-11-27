@@ -25,12 +25,12 @@ async fn nothing_more<M: serde::de::DeserializeOwned + Send + std::fmt::Debug>(
     assert!(more.is_err(), "got {more:?}");
 }
 
-async fn eventually_size<M, C: redissun::Codec>(
+async fn eventually_len<M, C: redissun::Codec>(
     topic: &redissun::ReliableTopic<M, C>,
     expected: u64,
 ) {
     let deadline = Instant::now() + WAIT;
-    while topic.size().await.unwrap() != expected {
+    while topic.len().await.unwrap() != expected {
         assert!(
             Instant::now() < deadline,
             "the stream never had {expected} messages"
@@ -40,11 +40,11 @@ async fn eventually_size<M, C: redissun::Codec>(
 }
 
 #[tokio::test]
-async fn remove_all_listeners_without_a_subscriber_does_nothing() {
+async fn unsubscribe_all_without_a_subscriber_does_nothing() {
     let topic = client()
         .await
         .reliable_topic::<String>(unique("testRemoveAllFresh"));
-    topic.remove_all_listeners().await.unwrap();
+    topic.unsubscribe_all().await;
     assert_eq!(topic.subscriber_count().await.unwrap(), 0);
 }
 
@@ -73,7 +73,7 @@ async fn every_message_published_concurrently_arrives() {
         received.insert(next(&mut subscriber).await);
     }
     nothing_more(&mut subscriber).await;
-    topic.remove_all_listeners().await.unwrap();
+    topic.unsubscribe_all().await;
 }
 
 #[tokio::test]
@@ -111,7 +111,7 @@ async fn an_expired_subscriber_is_removed_with_its_unread_messages() {
         assert!(Instant::now() < deadline);
         sleep(Duration::from_millis(20)).await;
     }
-    eventually_size(&topic, 0).await;
+    eventually_len(&topic, 0).await;
 }
 
 #[tokio::test]
@@ -153,7 +153,7 @@ async fn messages_are_trimmed_once_every_subscriber_read_them() {
         assert_eq!(next(&mut a).await, i);
         assert_eq!(next(&mut b).await, i);
     }
-    eventually_size(&first, 0).await;
+    eventually_len(&first, 0).await;
 }
 
 #[tokio::test]
@@ -166,7 +166,7 @@ async fn a_new_subscriber_reads_the_messages_still_in_the_stream() {
     topic.publish("2").await.unwrap();
     assert_eq!(next(&mut subscriber).await, "2");
     drop(subscriber);
-    eventually_size(&topic, 0).await;
+    eventually_len(&topic, 0).await;
     let mut again = topic.subscribe().await.unwrap();
     nothing_more(&mut again).await;
 }
@@ -176,11 +176,11 @@ async fn a_subscriber_that_comes_back_reads_what_was_published_meanwhile() {
     // Redisson's testReattach and testListener.
     let topic = client().await.reliable_topic::<String>(unique("test2"));
     let mut subscriber = topic.subscribe().await.unwrap();
-    assert_eq!(topic.listener_count(), 1);
+    assert_eq!(topic.local_subscriber_count().await, 1);
     topic.publish("1").await.unwrap();
     assert_eq!(next(&mut subscriber).await, "1");
     drop(subscriber);
-    assert_eq!(topic.listener_count(), 0);
+    assert_eq!(topic.local_subscriber_count().await, 0);
     let deadline = Instant::now() + WAIT;
     while topic.subscriber_count().await.unwrap() != 0 {
         assert!(Instant::now() < deadline);
@@ -201,25 +201,25 @@ async fn each_handle_is_a_subscriber_and_its_listeners_share_it() {
     let topic = client.reliable_topic::<String>(&*name);
     let mut first = topic.subscribe().await.unwrap();
     let mut first_again = topic.clone().subscribe().await.unwrap();
-    assert_eq!(topic.listener_count(), 2);
+    assert_eq!(topic.local_subscriber_count().await, 2);
     assert_eq!(topic.publish("m1").await.unwrap(), 1);
     assert_eq!(next(&mut first).await, "m1");
     assert_eq!(next(&mut first_again).await, "m1");
-    eventually_size(&topic, 0).await;
+    eventually_len(&topic, 0).await;
     let other = client.reliable_topic::<String>(&*name);
     let mut second = other.subscribe().await.unwrap();
     assert_eq!(topic.publish("m2").await.unwrap(), 2);
     assert_eq!(next(&mut first).await, "m2");
     assert_eq!(next(&mut second).await, "m2");
     nothing_more(&mut second).await;
-    eventually_size(&topic, 0).await;
+    eventually_len(&topic, 0).await;
 }
 
 #[tokio::test]
-async fn remove_all_listeners_ends_the_subscribers() {
+async fn unsubscribe_all_ends_the_subscribers() {
     let topic = client().await.reliable_topic::<String>(unique("ended"));
     let subscriber = topic.subscribe().await.unwrap();
-    topic.remove_all_listeners().await.unwrap();
+    topic.unsubscribe_all().await;
     assert_eq!(topic.subscriber_count().await.unwrap(), 0);
     let rest: Vec<_> = timeout(WAIT, subscriber.into_stream().collect::<Vec<_>>())
         .await

@@ -52,10 +52,10 @@ async fn plain_collections_work_on_a_cluster() {
 
     let bits = client.bit_set(unique("bits"));
     bits.set(7, true).await.unwrap();
-    assert_eq!(bits.count().await.unwrap(), 1);
+    assert_eq!(bits.count_ones().await.unwrap(), 1);
 
     let geo = client.geo::<String>(unique("geo"));
-    geo.add(
+    geo.insert(
         "prague",
         GeoPoint {
             longitude: 14.43,
@@ -92,7 +92,7 @@ async fn objects_with_several_keys_work_on_a_cluster() {
     assert!(seen.contains("a").await.unwrap());
 
     let filter = client.bloom_filter::<String>(unique("bloom"));
-    assert!(filter.try_init(1000, 0.01).await.unwrap());
+    assert!(filter.init(1000, 0.01).await.unwrap());
     filter.insert("a").await.unwrap();
     assert!(filter.contains("a").await.unwrap());
 
@@ -112,7 +112,7 @@ async fn objects_with_several_keys_work_on_a_cluster() {
 
     let limiter = client.rate_limiter(unique("limiter"));
     limiter
-        .try_set_rate(RateType::Overall, 2, Duration::from_secs(10))
+        .init_rate(RateType::Overall, 2, Duration::from_secs(10))
         .await
         .unwrap();
     assert!(limiter.try_acquire(1).await.unwrap());
@@ -120,7 +120,7 @@ async fn objects_with_several_keys_work_on_a_cluster() {
     assert!(!limiter.try_acquire(1).await.unwrap());
 
     let latch = client.count_down_latch(unique("latch"));
-    latch.try_set_count(1).await.unwrap();
+    latch.init_count(1).await.unwrap();
     latch.count_down().await.unwrap();
     latch
         .wait()
@@ -130,9 +130,9 @@ async fn objects_with_several_keys_work_on_a_cluster() {
         .expect("latch never opened on a cluster");
 
     let semaphore = client.semaphore(unique("semaphore"));
-    semaphore.try_set_permits(1).await.unwrap();
-    let permits = semaphore.acquire(1).await.unwrap();
-    assert!(semaphore.try_acquire(1).await.unwrap().is_none());
+    semaphore.init_permits(1).await.unwrap();
+    let permits = semaphore.acquire().await.unwrap();
+    assert!(semaphore.try_acquire().await.unwrap().is_none());
     permits.release().await.unwrap();
 }
 
@@ -286,8 +286,8 @@ async fn scripts_and_functions_work_on_a_cluster() {
     let client = connect(&topology).await.with_codec(redissun::StringCodec);
     let script = client.script();
     let lua = redissun::LuaScript::new("return redis.call('INCRBY', KEYS[1], ARGV[1])");
-    let sha = script.script_load(lua.source()).await.unwrap();
-    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [true]);
+    let sha = script.load(lua.source()).await.unwrap();
+    assert_eq!(script.exists(&[&sha]).await.unwrap(), [true]);
 
     let mut masters = std::collections::HashSet::new();
     for n in 0..20 {
@@ -305,8 +305,8 @@ async fn scripts_and_functions_work_on_a_cluster() {
     }
     assert!(masters.len() > 1);
 
-    script.script_flush().await.unwrap();
-    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [false]);
+    script.flush().await.unwrap();
+    assert_eq!(script.exists(&[&sha]).await.unwrap(), [false]);
 
     let functions = client.function();
     let code = "#!lua name=clusterlib\nredis.register_function('cluster_incr', function(keys, args) return redis.call('INCRBY', keys[1], args[1]) end)";
@@ -457,11 +457,12 @@ async fn sharded_topics_and_permits_work_on_a_cluster() {
     for i in 0..10 {
         client
             .sharded_topic::<i32>(format!("test{i}"))
-            .remove_all_listeners();
+            .unsubscribe_all()
+            .await;
     }
 
     let semaphore = client.permit_expirable_semaphore("semaphore");
-    semaphore.try_set_permits(1).await.unwrap();
+    semaphore.init_permits(1).await.unwrap();
     let id = semaphore.acquire().await.unwrap();
     semaphore.release(&id).await.unwrap();
 

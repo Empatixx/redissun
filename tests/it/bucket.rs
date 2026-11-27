@@ -27,10 +27,11 @@ async fn get_on_missing_key_is_none() {
 }
 
 #[tokio::test]
-async fn set_ex_applies_a_ttl() {
+async fn set_with_ttl_applies_a_ttl() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket
-        .set_ex(&"v".to_string(), Duration::from_secs(60))
+        .set(&"v".to_string())
+        .ttl(Duration::from_secs(60))
         .await
         .unwrap();
     let ttl = bucket.ttl().await.unwrap().unwrap();
@@ -38,28 +39,28 @@ async fn set_ex_applies_a_ttl() {
 }
 
 #[tokio::test]
-async fn set_nx_only_stores_the_first_value() {
+async fn try_set_only_stores_the_first_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
-    assert!(bucket.set_nx(&"first".to_string()).await.unwrap());
-    assert!(!bucket.set_nx(&"second".to_string()).await.unwrap());
+    assert!(bucket.try_set(&"first".to_string()).await.unwrap());
+    assert!(!bucket.try_set(&"second".to_string()).await.unwrap());
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("first"));
 }
 
 #[tokio::test]
-async fn get_set_returns_the_previous_value() {
+async fn replace_returns_the_previous_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
-    assert_eq!(bucket.get_set(&"a".to_string()).await.unwrap(), None);
+    assert_eq!(bucket.replace(&"a".to_string()).await.unwrap(), None);
     assert_eq!(
-        bucket.get_set(&"b".to_string()).await.unwrap().as_deref(),
+        bucket.replace(&"b".to_string()).await.unwrap().as_deref(),
         Some("a")
     );
 }
 
 #[tokio::test]
-async fn get_del_removes_the_key() {
+async fn take_removes_the_key() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket.set(&"v".to_string()).await.unwrap();
-    assert_eq!(bucket.get_del().await.unwrap().as_deref(), Some("v"));
+    assert_eq!(bucket.take().await.unwrap().as_deref(), Some("v"));
     assert!(!bucket.exists().await.unwrap());
 }
 
@@ -122,12 +123,13 @@ async fn unicode_and_empty_values_round_trip() {
 }
 
 #[tokio::test]
-async fn set_ex_rejects_a_zero_ttl_and_accepts_a_sub_millisecond_ttl() {
+async fn set_ttl_rejects_zero_and_accepts_a_sub_millisecond_ttl() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
-    let zero = bucket.set_ex(&"v".to_string(), Duration::ZERO).await;
+    let zero = bucket.set(&"v".to_string()).ttl(Duration::ZERO).await;
     assert!(matches!(zero, Err(Error::Config(_))));
     bucket
-        .set_ex(&"v".to_string(), Duration::from_micros(500))
+        .set(&"v".to_string())
+        .ttl(Duration::from_micros(500))
         .await
         .unwrap();
 }
@@ -148,9 +150,9 @@ async fn a_string_bucket_accepts_str_references() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket.set("hello").await.unwrap();
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("hello"));
-    assert!(!bucket.set_nx("other").await.unwrap());
+    assert!(!bucket.try_set("other").await.unwrap());
     assert_eq!(
-        bucket.get_set("world").await.unwrap().as_deref(),
+        bucket.replace("world").await.unwrap().as_deref(),
         Some("hello")
     );
     assert!(bucket
@@ -158,7 +160,8 @@ async fn a_string_bucket_accepts_str_references() {
         .await
         .unwrap());
     bucket
-        .set_ex("short", Duration::from_secs(30))
+        .set("short")
+        .ttl(Duration::from_secs(30))
         .await
         .unwrap();
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("short"));
@@ -170,21 +173,21 @@ async fn a_string_bucket_accepts_str_references() {
 
 // Redisson: testGetAndClearExpire
 #[tokio::test]
-async fn get_and_clear_expire_returns_the_value_without_a_ttl() {
+async fn get_persist_returns_the_value_without_a_ttl() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
-    bucket.set_ex(&1, Duration::from_secs(1)).await.unwrap();
-    assert_eq!(bucket.get_and_clear_expire().await.unwrap(), Some(1));
+    bucket.set(&1).ttl(Duration::from_secs(1)).await.unwrap();
+    assert_eq!(bucket.get_persist().await.unwrap(), Some(1));
     assert_eq!(bucket.ttl().await.unwrap(), None);
     assert!(bucket.exists().await.unwrap());
 }
 
 // Redisson: testGetAndExpire
 #[tokio::test]
-async fn get_and_expire_returns_the_value_and_sets_a_ttl() {
+async fn get_expire_returns_the_value_and_sets_a_ttl() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
     bucket.set(&1).await.unwrap();
     assert_eq!(
-        bucket.get_and_expire(Duration::from_secs(1)).await.unwrap(),
+        bucket.get_expire(Duration::from_secs(1)).await.unwrap(),
         Some(1)
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -195,31 +198,35 @@ async fn get_and_expire_returns_the_value_and_sets_a_ttl() {
 
 // Redisson: testKeepTtl
 #[tokio::test]
-async fn set_keep_ttl_replaces_the_value_but_keeps_the_ttl() {
+async fn keep_ttl_replaces_the_value_but_keeps_the_ttl() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
-    bucket.set_ex(&1234, Duration::from_secs(10)).await.unwrap();
-    bucket.set_keep_ttl(&222).await.unwrap();
+    bucket
+        .set(&1234)
+        .ttl(Duration::from_secs(10))
+        .await
+        .unwrap();
+    bucket.set(&222).keep_ttl().await.unwrap();
     assert!(bucket.ttl().await.unwrap().unwrap() > Duration::from_millis(9900));
     assert_eq!(bucket.get().await.unwrap(), Some(222));
 }
 
 // Redisson: testGetAndDelete
 #[tokio::test]
-async fn get_del_returns_the_value_once_and_then_none() {
+async fn take_returns_the_value_once_and_then_none() {
     let bucket = client().await.bucket::<i32>(unique("bucket"));
     bucket.set(&10).await.unwrap();
-    assert_eq!(bucket.get_del().await.unwrap(), Some(10));
+    assert_eq!(bucket.take().await.unwrap(), Some(10));
     assert!(!bucket.exists().await.unwrap());
-    assert_eq!(bucket.get_del().await.unwrap(), None);
+    assert_eq!(bucket.take().await.unwrap(), None);
 }
 
 // Redisson: testSize
 #[tokio::test]
-async fn size_is_the_length_of_the_encoded_value() {
+async fn len_is_the_length_of_the_encoded_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
-    assert_eq!(bucket.size().await.unwrap(), 0);
+    assert_eq!(bucket.len().await.unwrap(), 0);
     bucket.set("1234").await.unwrap();
-    assert_eq!(bucket.size().await.unwrap(), 6);
+    assert_eq!(bucket.len().await.unwrap(), 6);
 }
 
 // Redisson: testCompareAndSet
@@ -266,12 +273,13 @@ async fn compare_and_set_none_to_none_needs_a_missing_key() {
 
 // Redisson: testGetAndSetTtl
 #[tokio::test]
-async fn get_set_ex_swaps_the_value_and_sets_a_ttl() {
+async fn replace_with_ttl_swaps_the_value_and_sets_a_ttl() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket.set("value1").await.unwrap();
     assert_eq!(
         bucket
-            .get_set_ex("value2", Duration::from_millis(500))
+            .replace("value2")
+            .ttl(Duration::from_millis(500))
             .await
             .unwrap()
             .as_deref(),
@@ -284,40 +292,44 @@ async fn get_set_ex_swaps_the_value_and_sets_a_ttl() {
 
 // Redisson: testGetAndSet
 #[tokio::test]
-async fn get_set_returns_none_first_and_then_the_previous_value() {
+async fn replace_returns_none_first_and_then_the_previous_value() {
     let bucket = client().await.bucket::<Vec<String>>(unique("bucket"));
-    assert_eq!(bucket.get_set(&vec!["81".to_string()]).await.unwrap(), None);
+    assert_eq!(bucket.replace(&vec!["81".to_string()]).await.unwrap(), None);
     assert_eq!(
-        bucket.get_set(&vec!["1".to_string()]).await.unwrap(),
+        bucket.replace(&vec!["1".to_string()]).await.unwrap(),
         Some(vec!["81".to_string()])
     );
     assert_eq!(bucket.get().await.unwrap(), Some(vec!["1".to_string()]));
-    assert_eq!(bucket.get_del().await.unwrap(), Some(vec!["1".to_string()]));
+    assert_eq!(bucket.take().await.unwrap(), Some(vec!["1".to_string()]));
     assert!(!bucket.exists().await.unwrap());
 }
 
 #[tokio::test]
-async fn get_set_clears_the_ttl_like_getset() {
+async fn replace_clears_the_ttl_like_getset() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
-    bucket.set_ex("a", Duration::from_secs(60)).await.unwrap();
-    bucket.get_set("b").await.unwrap();
+    bucket.set("a").ttl(Duration::from_secs(60)).await.unwrap();
+    bucket.replace("b").await.unwrap();
     assert_eq!(bucket.ttl().await.unwrap(), None);
 }
 
 // Redisson: testSetIfExists
 #[tokio::test]
-async fn set_xx_only_overwrites_an_existing_value() {
+async fn update_only_overwrites_an_existing_value() {
     let client = client().await;
     let first = client.bucket::<String>(unique("bucket"));
-    assert!(!first.set_xx("0").await.unwrap());
+    assert!(!first.update("0").await.unwrap());
     assert!(!first.exists().await.unwrap());
     first.set("1").await.unwrap();
-    assert!(first.set_xx("2").await.unwrap());
+    assert!(first.update("2").await.unwrap());
     assert_eq!(first.get().await.unwrap().as_deref(), Some("2"));
 
     let second = client.bucket::<String>(unique("bucket"));
     second.set("1").await.unwrap();
-    assert!(second.set_xx_ex("2", Duration::from_secs(1)).await.unwrap());
+    assert!(second
+        .update("2")
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap());
     assert_eq!(second.get().await.unwrap().as_deref(), Some("2"));
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert!(gone(&second).await);
@@ -325,23 +337,25 @@ async fn set_xx_only_overwrites_an_existing_value() {
 
 // Redisson: testTrySet
 #[tokio::test]
-async fn set_nx_keeps_the_first_value() {
+async fn try_set_keeps_the_first_value() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
-    assert!(bucket.set_nx("3").await.unwrap());
-    assert!(!bucket.set_nx("4").await.unwrap());
+    assert!(bucket.try_set("3").await.unwrap());
+    assert!(!bucket.try_set("4").await.unwrap());
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("3"));
 }
 
 // Redisson: testTrySetTtl
 #[tokio::test]
-async fn set_nx_ex_keeps_the_first_value_until_it_expires() {
+async fn try_set_with_ttl_keeps_the_first_value_until_it_expires() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     assert!(bucket
-        .set_nx_ex("3", Duration::from_millis(500))
+        .try_set("3")
+        .ttl(Duration::from_millis(500))
         .await
         .unwrap());
     assert!(!bucket
-        .set_nx_ex("4", Duration::from_millis(500))
+        .try_set("4")
+        .ttl(Duration::from_millis(500))
         .await
         .unwrap());
     assert_eq!(bucket.get().await.unwrap().as_deref(), Some("3"));
@@ -354,7 +368,8 @@ async fn set_nx_ex_keeps_the_first_value_until_it_expires() {
 async fn a_value_set_with_a_ttl_is_gone_after_it() {
     let bucket = client().await.bucket::<String>(unique("bucket"));
     bucket
-        .set_ex("someValue", Duration::from_secs(1))
+        .set("someValue")
+        .ttl(Duration::from_secs(1))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -446,7 +461,11 @@ async fn expire_extends_the_ttl_and_skips_a_missing_key() {
     let second = client.bucket::<i32>(unique("expire-test2"));
     let day = Duration::from_secs(24 * 3600);
     for bucket in [&first, &second] {
-        bucket.set_ex(&23, Duration::from_secs(3600)).await.unwrap();
+        bucket
+            .set(&23)
+            .ttl(Duration::from_secs(3600))
+            .await
+            .unwrap();
         assert!(bucket.expire(day).await.unwrap());
         assert!(bucket.ttl().await.unwrap().unwrap() > Duration::from_secs(23 * 3600));
     }

@@ -6,6 +6,8 @@ use crate::shield::shielded;
 use crate::wait::wait_on;
 use bytes::Bytes;
 use std::fmt;
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -137,14 +139,25 @@ impl Semaphore {
         Ok(set == 1)
     }
 
-    /// Sets the number of permits, but only when the semaphore does not exist yet. Returns whether it was set.
-    pub async fn try_set_permits(&self, permits: i64) -> Result<bool> {
-        self.set_permits(permits, None).await
-    }
-
-    /// Like [`Semaphore::try_set_permits`], and the semaphore is removed after `ttl`.
-    pub async fn try_set_permits_with_ttl(&self, permits: i64, ttl: Duration) -> Result<bool> {
-        self.set_permits(permits, Some(ttl)).await
+    /// Sets the number of permits, but only when the semaphore does not exist yet; resolves to whether it was set. Redisson's `trySetPermits`.
+    /// Add `.ttl(d)` to remove the semaphore after `d`.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// # use std::time::Duration;
+    /// let semaphore = client.semaphore("workers");
+    /// semaphore.init_permits(4).await?;
+    /// semaphore.init_permits(4).ttl(Duration::from_secs(60)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(alias = "trySetPermits")]
+    pub fn init_permits(&self, permits: i64) -> InitPermits<'_> {
+        InitPermits {
+            semaphore: self,
+            permits,
+            ttl: None,
+        }
     }
 
     /// Adds permits, creating the semaphore when needed, and wakes waiters. A negative number takes permits away, possibly below zero.
@@ -194,13 +207,26 @@ impl Semaphore {
         Ok(released == 1)
     }
 
+    /// Waits until one permit is available and takes it. Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out.
+    pub fn acquire(&self) -> Pending<'_, Permits> {
+        self.acquire_many(1)
+    }
+
     /// Waits until `permits` are available and takes them. Add `.timeout(duration)` to wait at most that long; it then resolves to `None` when the time runs out. Acquiring 0 permits succeeds at once.
-    pub fn acquire(&self, permits: u64) -> Pending<'_, Permits> {
+    #[doc(alias = "acquire")]
+    pub fn acquire_many(&self, permits: u64) -> Pending<'_, Permits> {
         Pending::new(move |wait| self.acquire_inner(permits, wait))
     }
 
+    /// Takes one permit if it is available right now; returns `None` otherwise.
+    #[doc(alias = "tryAcquire")]
+    pub async fn try_acquire(&self) -> Result<Option<Permits>> {
+        self.try_acquire_many(1).await
+    }
+
     /// Takes `permits` if they are available right now; returns `None` otherwise. Taking 0 permits always succeeds.
-    pub async fn try_acquire(&self, permits: u64) -> Result<Option<Permits>> {
+    #[doc(alias = "tryAcquire")]
+    pub async fn try_acquire_many(&self, permits: u64) -> Result<Option<Permits>> {
         self.acquire_inner(permits, Some(Duration::ZERO)).await
     }
 
@@ -236,6 +262,41 @@ impl Semaphore {
             self.try_take(permits)
         })
         .await
+    }
+}
+
+/// A pending [`Semaphore::init_permits`]. Await it, optionally after [`InitPermits::ttl`].
+#[must_use = "init_permits does nothing until it is awaited"]
+pub struct InitPermits<'a> {
+    semaphore: &'a Semaphore,
+    permits: i64,
+    ttl: Option<Duration>,
+}
+
+impl fmt::Debug for InitPermits<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InitPermits")
+            .field("semaphore", self.semaphore)
+            .field("permits", &self.permits)
+            .field("ttl", &self.ttl)
+            .finish()
+    }
+}
+
+impl InitPermits<'_> {
+    /// Removes the semaphore after `ttl`, Redisson's `trySetPermits(permits, ttl)`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a> IntoFuture for InitPermits<'a> {
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.semaphore.set_permits(self.permits, self.ttl))
     }
 }
 

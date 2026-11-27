@@ -19,13 +19,14 @@ guard.unlock().await?;
 
 | Method | Notes |
 |---|---|
-| `lock()` | waits until all locks are taken. Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `lock()` | waits until all locks are taken. Add `.timeout(wait)` to get `None` when `wait` runs out, or `.lease(time)` to set a lease instead of using the watchdog. |
 | `try_lock()` | returns `None` at once unless all locks are free |
+| `is_held_by_current()` | whether the current task holds every lock |
 
 When a call returns `None`, it holds nothing. The guard has `unlock()` and releases all locks in the background when dropped. `guards()` gives the single guards, for example to read a fencing token.
 
 ## How it avoids deadlocks
 
-The locks are tried in the given order. If one cannot be taken in time, all locks taken so far are released and the round starts again. `lock()` uses a round of 1.5 seconds for each lock and a short random pause between rounds. Two owners that take the same locks in opposite order may wait up to one round, but never forever. This is the scheme of Redisson's `RedissonMultiLock`.
+The locks are tried in the given order. If one cannot be taken in time, all locks taken so far are released and the round starts again. `lock()` uses a round of 1.5 seconds for each lock, or a random part of the lease when one is set, and a short random pause between rounds. Two owners that take the same locks in opposite order may wait up to one round, but never forever. This is the scheme of Redisson's `RedissonMultiLock`.
 
-The watchdog keeps every lock alive while the guard exists. A custom lease is not supported yet.
+The watchdog keeps every lock alive while the guard exists, unless you set a lease. With a lease and a timeout, every lock is first taken with a lease of twice the timeout, and the lease is cut to the one you asked for once all locks are held.

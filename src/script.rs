@@ -458,7 +458,8 @@ impl<C: Codec> Script<C> {
     }
 
     /// Loads the script into the script cache and returns its SHA-1 digest (`SCRIPT LOAD`), like Redisson's `scriptLoad`. In Redis Cluster it loads it on every master.
-    pub async fn script_load(&self, source: &str) -> Result<String> {
+    #[doc(alias = "scriptLoad")]
+    pub async fn load(&self, source: &str) -> Result<String> {
         let mut cmd = redis::cmd("SCRIPT");
         cmd.arg("LOAD").arg(source);
         let replies = on_every_master(&self.core, &cmd).await?;
@@ -469,7 +470,8 @@ impl<C: Codec> Script<C> {
     }
 
     /// For each digest, whether Redis has the script (`SCRIPT EXISTS`), like Redisson's `scriptExists`. In Redis Cluster a script counts only when every master has it.
-    pub async fn script_exists(&self, sha1s: &[&str]) -> Result<Vec<bool>> {
+    #[doc(alias = "scriptExists")]
+    pub async fn exists(&self, sha1s: &[&str]) -> Result<Vec<bool>> {
         if sha1s.is_empty() {
             return Ok(Vec::new());
         }
@@ -487,14 +489,16 @@ impl<C: Codec> Script<C> {
     }
 
     /// Removes every script from the script cache (`SCRIPT FLUSH`), like Redisson's `scriptFlush`. In Redis Cluster on every master.
-    pub async fn script_flush(&self) -> Result<()> {
+    #[doc(alias = "scriptFlush")]
+    pub async fn flush(&self) -> Result<()> {
         let mut cmd = redis::cmd("SCRIPT");
         cmd.arg("FLUSH");
         on_every_master(&self.core, &cmd).await.map(drop)
     }
 
     /// Stops the script that is running now (`SCRIPT KILL`), like Redisson's `scriptKill`. Fails with a `NOTBUSY` error when no script runs, and with `UNKILLABLE` when the script already wrote. In Redis Cluster on every master.
-    pub async fn script_kill(&self) -> Result<()> {
+    #[doc(alias = "scriptKill")]
+    pub async fn kill(&self) -> Result<()> {
         let mut cmd = redis::cmd("SCRIPT");
         cmd.arg("KILL");
         on_every_master(&self.core, &cmd).await.map(drop)

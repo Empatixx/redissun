@@ -1,4 +1,4 @@
-// Ported from Redisson's RedissonBucketsTest. The `set_if_all_…` tests need `MSETEX`, so they run on Redis 8.
+// Ported from Redisson's RedissonBucketsTest. The `update` and `try_set(..).expiry(..)` tests need `MSETEX`, so they run on Redis 8.
 use crate::common::{client, redis8_client, unique};
 use redissun::{Expiry, Object, StringCodec};
 use std::collections::HashMap;
@@ -90,27 +90,27 @@ async fn nothing_to_write_writes_nothing() {
 }
 
 #[tokio::test]
-async fn set_if_all_exist_stores_only_when_every_key_exists() {
+async fn update_stores_only_when_every_key_exists() {
     let client = redis8_client().await;
     let (k12, k23, k41) = (unique("12"), unique("23"), unique("41"));
     client.bucket::<String>(&*k12).set("341").await.unwrap();
     client.bucket::<String>(&*k23).set("234").await.unwrap();
     let buckets = client.buckets::<i32>();
     assert!(!buckets
-        .set_if_all_exist([(&k12, &1), (&k41, &2)], Expiry::None)
+        .update([(&k12, &1), (&k41, &2)])
+        .expiry(Expiry::None)
         .await
         .unwrap());
     client.bucket::<String>(&*k41).set("123").await.unwrap();
     let at = SystemTime::now() + Duration::from_secs(10);
     assert!(buckets
-        .set_if_all_exist([(&k12, &1), (&k41, &2)], Expiry::At(at))
+        .update([(&k12, &1), (&k41, &2)])
+        .expiry(Expiry::At(at))
         .await
         .unwrap());
     assert!(buckets
-        .set_if_all_exist(
-            [(&k41, &3), (&k23, &4)],
-            Expiry::After(Duration::from_secs(2))
-        )
+        .update([(&k41, &3), (&k23, &4)])
+        .expiry(Expiry::After(Duration::from_secs(2)))
         .await
         .unwrap());
     assert!(client.keys().ttl(&k41).await.unwrap().unwrap() <= Duration::from_secs(2));
@@ -119,7 +119,8 @@ async fn set_if_all_exist_stores_only_when_every_key_exists() {
     assert_eq!(client.bucket::<i32>(&*k41).get().await.unwrap(), Some(3));
     assert_eq!(client.bucket::<i32>(&*k23).get().await.unwrap(), Some(4));
     assert!(buckets
-        .set_if_all_exist([(&k41, &3), (&k23, &4), (&k12, &5)], Expiry::KeepTtl)
+        .update([(&k41, &3), (&k23, &4), (&k12, &5)])
+        .expiry(Expiry::KeepTtl)
         .await
         .unwrap());
     assert_eq!(client.bucket::<i32>(&*k12).get().await.unwrap(), Some(5));
@@ -127,7 +128,7 @@ async fn set_if_all_exist_stores_only_when_every_key_exists() {
 }
 
 #[tokio::test]
-async fn set_if_all_absent_stores_only_when_no_key_exists() {
+async fn try_set_with_expiry_stores_only_when_no_key_exists() {
     let client = redis8_client().await;
     let (k12, k23, k34, k41, k45, k56) = (
         unique("12"),
@@ -140,19 +141,19 @@ async fn set_if_all_absent_stores_only_when_no_key_exists() {
     client.bucket::<String>(&*k12).set("341").await.unwrap();
     let buckets = client.buckets::<i32>();
     assert!(!buckets
-        .set_if_all_absent([(&k12, &1), (&k41, &2)], Expiry::None)
+        .try_set([(&k12, &1), (&k41, &2)])
+        .expiry(Expiry::None)
         .await
         .unwrap());
     assert!(buckets
-        .set_if_all_absent(
-            [(&k41, &3), (&k23, &4)],
-            Expiry::After(Duration::from_secs(2))
-        )
+        .try_set([(&k41, &3), (&k23, &4)])
+        .expiry(Expiry::After(Duration::from_secs(2)))
         .await
         .unwrap());
     let at = SystemTime::now() + Duration::from_secs(10);
     assert!(buckets
-        .set_if_all_absent([(&k34, &5), (&k45, &6)], Expiry::At(at))
+        .try_set([(&k34, &5), (&k45, &6)])
+        .expiry(Expiry::At(at))
         .await
         .unwrap());
     assert_eq!(client.bucket::<String>(&*k12).ttl().await.unwrap(), None);
@@ -162,7 +163,8 @@ async fn set_if_all_absent_stores_only_when_no_key_exists() {
     assert_eq!(client.bucket::<i32>(&*k41).get().await.unwrap(), Some(3));
     assert_eq!(client.bucket::<i32>(&*k34).get().await.unwrap(), Some(5));
     assert!(buckets
-        .set_if_all_absent([(&k56, &5)], Expiry::KeepTtl)
+        .try_set([(&k56, &5)])
+        .expiry(Expiry::KeepTtl)
         .await
         .unwrap());
     assert_eq!(client.bucket::<i32>(&*k56).get().await.unwrap(), Some(5));

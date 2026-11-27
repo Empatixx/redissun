@@ -19,16 +19,20 @@ for entry in log.read_group_wait("workers", "worker-1", Some(10)).await? {
 
 An entry has an id (`StreamId`) and fields in the order you gave them. Fields are borrowed like every other argument.
 
+`StreamId::new(millis, sequence)` makes an id, and `StreamId::auto_sequence(millis)` lets Redis pick the sequence for `.id(..)`. `id.exclusive()` turns an id into an open end of a range.
+
 ## Writing and reading
 
 | Method | Notes |
 |---|---|
-| `add(fields)` | returns the id. Add `.max_len(n)` to keep the stream at `n` entries. |
+| `add(fields)` | returns the id. Add `.id(id)` for your own id, `.max_len(n)` to keep the stream at `n` entries or `.min_id(id)` to drop older ids, and `.non_strict()` and `.limit(n)` for a cheaper trim. |
 | `len()`, `is_empty()` | |
 | `range(from, to, count)`, `rev_range(from, to, count)` | both ends included. `StreamId::min()` and `StreamId::max()` are the open ends. `count` is `Option<usize>`. |
 | `read(after, count)` | entries after an id, without waiting. `StreamId::zero()` returns everything. |
 | `read_wait(after, count)` | waits for new entries. Add `.timeout(wait)` to get `None` when `wait` runs out. |
-| `remove(ids)`, `trim(max_len)` | return how many were deleted |
+| `remove(ids)` | returns how many existed |
+| `trim(max_len)`, `trim_min_id(&id)` | keep the newest `max_len` entries, or drop the ids below `id`; return how many were dropped. Add `.non_strict()` (`~`) and `.limit(n)`. |
+| `info()` | length, radix tree size, group count, last generated id and the first and last entry (`XINFO STREAM`) |
 
 ## Consumer groups
 
@@ -36,12 +40,18 @@ An entry has an id (`StreamId`) and fields in the order you gave them. Fields ar
 |---|---|
 | `create_group(name, start)` | `StreamId::zero()` starts at the first entry, `StreamId::latest()` at new ones. Returns `false` when the group exists. It creates the stream if needed. |
 | `destroy_group(name)` | |
-| `read_group(group, consumer, count)` | takes entries nobody has received. They stay pending for the consumer. |
+| `create_consumer(group, consumer)` | returns `false` when it exists (`XGROUP CREATECONSUMER`) |
+| `remove_consumer(group, consumer)` | returns how many entries it still held; they are dropped |
+| `set_group_id(group, &id)` | moves the group's last delivered id (`XGROUP SETID`), Redisson's `updateGroupMessageId` |
+| `groups()`, `consumers(group)` | `XINFO GROUPS` and `XINFO CONSUMERS` |
+| `read_group(group, consumer, count)` | takes entries nobody has received. They stay pending for the consumer. Add `.no_ack()` to skip the pending list, or `.after(id)` to read this consumer's pending entries again. |
 | `read_group_wait(group, consumer, count)` | the same, waiting for new entries. Add `.timeout(wait)`. |
 | `ack(group, ids)` | removes entries from the pending list |
 | `pending(group)` | count, smallest and largest id, and the count for each consumer |
-| `pending_entries(group, count)` | id, consumer, idle time and delivery count |
+| `pending_entries(group, count)` | id, consumer, idle time and delivery count. Narrow it with `.range(from, to)`, `.consumer(name)` and `.min_idle(d)`; `.messages()` returns the entries themselves. |
 | `claim(group, consumer, min_idle, ids)` | takes over entries that were idle long enough |
+| `claim_ids(group, consumer, min_idle, ids)` | the same, but returns only the ids (`JUSTID`), Redisson's `fastClaim` |
 | `auto_claim(group, consumer, min_idle, start, count)` | the same without knowing the ids; returns an `AutoClaim` with `next`, `entries` and `deleted`. Needs Redis 6.2. |
+| `auto_claim_ids(..)` | the same with ids only: the next start and the claimed ids |
 
 A waiting call uses its own short-lived connection, like the blocking pops of `VecDeque`. Use `.timeout` for a time limit and not `tokio::time::timeout`, because dropping a pending call can lose entries that Redis has just handed over.

@@ -11,8 +11,67 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
+use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::time::Duration;
+
+/// A pending [`VecDeque::extend_back`] or [`VecDeque::extend_front`]. Await it, optionally after [`Extend::if_exists`]; it resolves to the new length.
+#[must_use = "an extend does nothing until it is awaited"]
+pub struct Extend<'a, V, C: Codec> {
+    deque: &'a VecDeque<V, C>,
+    encoded: Result<std::vec::Vec<Bytes>>,
+    front: bool,
+    if_exists: bool,
+}
+
+impl<V, C: Codec> fmt::Debug for Extend<'_, V, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extend")
+            .field("deque", self.deque)
+            .field("front", &self.front)
+            .field("if_exists", &self.if_exists)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, C: Codec> Extend<'_, V, C> {
+    /// Adds the values only when the deque exists (`RPUSHX` / `LPUSHX`), Redisson's `addLastIfExists` / `addFirstIfExists`. It then resolves to 0 when the deque does not exist.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+}
+
+impl<'a, V, C> IntoFuture for Extend<'a, V, C>
+where
+    V: Send + Sync + 'a,
+    C: Codec,
+{
+    type Output = Result<usize>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let encoded = self.encoded?;
+            let key = &self.deque.key;
+            if encoded.is_empty() {
+                // The length a push returns comes from the master, like the push's own reply.
+                return key.query(key.key_cmd("LLEN")).await;
+            }
+            let name = match (self.front, self.if_exists) {
+                (true, false) => "LPUSH",
+                (false, false) => "RPUSH",
+                (true, true) => "LPUSHX",
+                (false, true) => "RPUSHX",
+            };
+            let mut cmd = key.key_cmd(name);
+            cmd.arg(crate::client::request::binary(&encoded));
+            let length: usize = key.query_once(cmd).await?;
+            Ok(length)
+        })
+    }
+}
 
 /// A distributed double-ended queue stored in a Redis list.
 pub struct VecDeque<V, C: Codec> {
@@ -80,75 +139,42 @@ where
         self.extend_front(std::iter::once(v)).await.map(|_| ())
     }
 
-    /// Adds values at the back, in order, and returns the new length (`RPUSH`, sent once without retry).
-    pub async fn extend_back<'a, Q>(&self, values: impl IntoIterator<Item = &'a Q>) -> Result<usize>
+    /// Adds values at the back, in order, and resolves to the new length (`RPUSH`, sent once without retry). Redisson's `addAll`.
+    /// `.if_exists()` adds them only when the deque exists (`RPUSHX`, Redisson's `addLastIfExists`) and then resolves to 0 when it does not.
+    #[doc(alias = "addAll", alias = "addLastIfExists")]
+    pub fn extend_back<'a, Q>(&self, values: impl IntoIterator<Item = &'a Q>) -> Extend<'_, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.push_command(values, false, false).await
+        self.extend_at(values, false)
     }
 
-    /// Adds values at the front one after another, so the last one ends up first, and returns the new length (`LPUSH`, sent once without retry).
-    pub async fn extend_front<'a, Q>(
-        &self,
-        values: impl IntoIterator<Item = &'a Q>,
-    ) -> Result<usize>
+    /// Adds values at the front one after another, so the last one ends up first, and resolves to the new length (`LPUSH`, sent once without retry).
+    /// `.if_exists()` adds them only when the deque exists (`LPUSHX`, Redisson's `addFirstIfExists`) and then resolves to 0 when it does not.
+    #[doc(alias = "addFirstIfExists")]
+    pub fn extend_front<'a, Q>(&self, values: impl IntoIterator<Item = &'a Q>) -> Extend<'_, V, C>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        self.push_command(values, true, false).await
+        self.extend_at(values, true)
     }
 
-    /// Like [`extend_back`](Self::extend_back), but only when the deque exists (`RPUSHX`). Returns the new length, 0 when it does not exist.
-    pub async fn extend_back_if_exists<'a, Q>(
-        &self,
-        values: impl IntoIterator<Item = &'a Q>,
-    ) -> Result<usize>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync + 'a,
-    {
-        self.push_command(values, false, true).await
-    }
-
-    /// Like [`extend_front`](Self::extend_front), but only when the deque exists (`LPUSHX`). Returns the new length, 0 when it does not exist.
-    pub async fn extend_front_if_exists<'a, Q>(
-        &self,
-        values: impl IntoIterator<Item = &'a Q>,
-    ) -> Result<usize>
-    where
-        V: Borrow<Q>,
-        Q: Serialize + ?Sized + Sync + 'a,
-    {
-        self.push_command(values, true, true).await
-    }
-
-    async fn push_command<'a, Q>(
+    fn extend_at<'a, Q>(
         &self,
         values: impl IntoIterator<Item = &'a Q>,
         front: bool,
-        if_exists: bool,
-    ) -> Result<usize>
+    ) -> Extend<'_, V, C>
     where
         Q: Serialize + ?Sized + Sync + 'a,
     {
-        let encoded = list::encode_all(&self.codec, values)?;
-        if encoded.is_empty() {
-            // The length a push returns comes from the master, like the push's own reply.
-            return self.key.query(self.key.key_cmd("LLEN")).await;
+        Extend {
+            deque: self,
+            encoded: list::encode_all(&self.codec, values),
+            front,
+            if_exists: false,
         }
-        let name = match (front, if_exists) {
-            (true, false) => "LPUSH",
-            (false, false) => "RPUSH",
-            (true, true) => "LPUSHX",
-            (false, true) => "RPUSHX",
-        };
-        let mut cmd = self.key.key_cmd(name);
-        cmd.arg(crate::client::request::binary(&encoded));
-        let length: usize = self.key.query_once(cmd).await?;
-        Ok(length)
     }
 
     /// Removes and returns the value at the back (`RPOP`, sent once without retry).
@@ -177,7 +203,8 @@ where
         self.decode(raw)
     }
 
-    /// Removes and returns up to `limit` values from the front, atomically and sent once without retry.
+    /// Removes and returns up to `limit` values from the front, atomically and sent once without retry. Redisson's `poll(limit)` and `drainTo(collection, max)`.
+    #[doc(alias = "drainTo")]
     pub async fn pop_front_many(&self, limit: usize) -> Result<std::vec::Vec<V>> {
         list::pop_many(&self.key, &self.codec, true, limit).await
     }
@@ -187,14 +214,9 @@ where
         list::pop_many(&self.key, &self.codec, false, limit).await
     }
 
-    /// Removes every value and returns them in order, atomically.
+    /// Removes every value and returns them in order, atomically. Redisson's `drainTo(collection)`.
     pub async fn drain(&self) -> Result<std::vec::Vec<V>> {
-        list::drain(&self.key, &self.codec, None).await
-    }
-
-    /// Removes up to `max` values from the front and returns them in order, atomically.
-    pub async fn drain_up_to(&self, max: usize) -> Result<std::vec::Vec<V>> {
-        list::drain(&self.key, &self.codec, Some(max)).await
+        list::drain(&self.key, &self.codec).await
     }
 
     /// Moves the back value to the front of `to` and returns it (`RPOPLPUSH`, sent once without retry). `to` may be this deque.
@@ -390,8 +412,9 @@ where
         list::position(&self.key, &self.codec, v, false).await
     }
 
-    /// Removes the equal value nearest the front; returns whether one was removed.
-    pub async fn remove_first_occurrence<Q>(&self, v: &Q) -> Result<bool>
+    /// Removes the equal value nearest the front; returns whether one was removed. Redisson's `removeFirstOccurrence`.
+    #[doc(alias = "removeFirstOccurrence")]
+    pub async fn remove_value<Q>(&self, v: &Q) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -399,8 +422,9 @@ where
         Ok(list::remove_matching(&self.key, &self.codec, v, 1).await? > 0)
     }
 
-    /// Removes the equal value nearest the back; returns whether one was removed.
-    pub async fn remove_last_occurrence<Q>(&self, v: &Q) -> Result<bool>
+    /// Removes the equal value nearest the back; returns whether one was removed. Redisson's `removeLastOccurrence`.
+    #[doc(alias = "removeLastOccurrence")]
+    pub async fn remove_last_value<Q>(&self, v: &Q) -> Result<bool>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -408,8 +432,9 @@ where
         Ok(list::remove_matching(&self.key, &self.codec, v, -1).await? > 0)
     }
 
-    /// Returns all values from front to back (`LRANGE 0 -1`).
-    pub async fn read_all(&self) -> Result<std::vec::Vec<V>> {
+    /// Returns all values from front to back (`LRANGE 0 -1`). Redisson's `readAll`.
+    #[doc(alias = "readAll")]
+    pub async fn to_vec(&self) -> Result<std::vec::Vec<V>> {
         list::read_all(&self.key, &self.codec).await
     }
 

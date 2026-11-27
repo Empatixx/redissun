@@ -46,7 +46,7 @@ Each command goes over the client's connections to that node and is limited by `
 | `save()`, `bg_save()`, `schedule_bg_save()` | `save()`, `bgSave()`, `scheduleBgSave()` | `SAVE`, `BGSAVE`, `BGSAVE SCHEDULE` |
 | `last_save_time()` | `getLastSaveTime()` | `LASTSAVE` |
 | `bg_rewrite_aof()` | `bgRewriteAOF()` | `BGREWRITEAOF` |
-| `size()` | `size()` | `DBSIZE` |
+| `db_size()` | `size()` | `DBSIZE` |
 
 In a cluster, the same nodes also run the `CLUSTER` commands. Any other server answers them with an error.
 
@@ -66,7 +66,7 @@ A `SentinelNode` has the server commands above too, but a sentinel answers only 
 
 | redissun | Redisson | Command |
 |---|---|---|
-| `master_addr(name)` | `getMasterAddr(name)` | `SENTINEL GET-MASTER-ADDR-BY-NAME`: `Some("host:port")`, or `None` for an unknown name |
+| `master_address(name)` | `getMasterAddr(name)` | `SENTINEL GET-MASTER-ADDR-BY-NAME`: `Some("host:port")`, or `None` for an unknown name |
 | `master(name)`, `masters()` | `getMaster(name)`, `getMasters()` | `SENTINEL MASTER`, `SENTINEL MASTERS` |
 | `replicas(name)`, `sentinels(name)` | `getSlaves(name)`, `getSentinels(name)` | `SENTINEL REPLICAS`, `SENTINEL SENTINELS` |
 | `failover(name)` | `failover(name)` | `SENTINEL FAILOVER` |

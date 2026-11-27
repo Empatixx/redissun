@@ -94,7 +94,7 @@ async fn replica_mode_reads_from_replicas_but_keeps_coordination_on_the_master()
     assert_eq!((on_master, on_replicas), (0, READS));
 
     let semaphore = client.semaphore(unique("read-mode-semaphore"));
-    assert!(semaphore.try_set_permits(3).await.unwrap());
+    assert!(semaphore.init_permits(3).await.unwrap());
     let master = cluster_master(&topology, semaphore_name(&semaphore)).await;
     topology.wait_until_replicated(master).await;
     let before = get_calls(&topology, master).await;
@@ -202,4 +202,34 @@ async fn a_read_goes_to_the_master_while_its_replica_is_down() {
     }
     let after = calls(&topology, master, "get").await;
     assert_eq!(after - before, READS);
+}
+
+/// The value an entry changes must come from the master: a lagging replica would make them lose updates.
+#[tokio::test]
+async fn replica_mode_entries_read_the_master() {
+    let topology = Topology::cluster().await;
+    let client = cluster_client(&topology, ReadMode::Replica).await;
+    let map = client.hash_map::<String, i64>(unique("read-mode-map"));
+    let master = cluster_master(&topology, redissun::Object::name(&map)).await;
+    map.insert("k", &0).await.unwrap();
+    topology.wait_until_replicated(master).await;
+    let mut on_replicas_before = 0;
+    for replica in replicas_of(&topology, master).await {
+        on_replicas_before += calls(&topology, replica, "hget").await;
+    }
+    for _ in 0..READS {
+        map.entry("k")
+            .await
+            .unwrap()
+            .and_modify(|v| *v += 1)
+            .or_insert(1)
+            .await
+            .unwrap();
+    }
+    let mut on_replicas_after = 0;
+    for replica in replicas_of(&topology, master).await {
+        on_replicas_after += calls(&topology, replica, "hget").await;
+    }
+    assert_eq!(on_replicas_after - on_replicas_before, 0);
+    assert_eq!(map.get("k").await.unwrap(), Some(READS as i64));
 }

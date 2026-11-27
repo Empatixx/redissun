@@ -17,50 +17,50 @@ const OSTRAVA: GeoPoint = GeoPoint {
 
 async fn cities() -> Geo<String, JsonCodec> {
     let geo = client().await.geo::<String>(unique("geo"));
-    geo.add("prague", PRAGUE).await.unwrap();
-    geo.add("brno", BRNO).await.unwrap();
-    geo.add("ostrava", OSTRAVA).await.unwrap();
+    geo.insert("prague", PRAGUE).await.unwrap();
+    geo.insert("brno", BRNO).await.unwrap();
+    geo.insert("ostrava", OSTRAVA).await.unwrap();
     geo
 }
 
 #[tokio::test]
 async fn add_reports_new_members_and_moves_old_ones() {
     let geo = client().await.geo::<String>(unique("geo"));
-    assert!(geo.add("a", PRAGUE).await.unwrap());
-    assert!(!geo.add("a", BRNO).await.unwrap());
-    let moved = geo.pos("a").await.unwrap().unwrap();
+    assert!(geo.insert("a", PRAGUE).await.unwrap());
+    assert!(!geo.insert("a", BRNO).await.unwrap());
+    let moved = geo.position("a").await.unwrap().unwrap();
     assert!((moved.longitude - BRNO.longitude).abs() < 1e-4);
     assert_eq!(geo.len().await.unwrap(), 1);
 }
 
 #[tokio::test]
-async fn pos_and_remove() {
+async fn position_and_remove() {
     let geo = cities().await;
-    let prague = geo.pos("prague").await.unwrap().unwrap();
+    let prague = geo.position("prague").await.unwrap().unwrap();
     assert!((prague.latitude - PRAGUE.latitude).abs() < 1e-4);
-    assert_eq!(geo.pos("nowhere").await.unwrap(), None);
+    assert_eq!(geo.position("nowhere").await.unwrap(), None);
     assert!(geo.remove("prague").await.unwrap());
     assert!(!geo.remove("prague").await.unwrap());
-    assert_eq!(geo.pos("prague").await.unwrap(), None);
+    assert_eq!(geo.position("prague").await.unwrap(), None);
 }
 
 #[tokio::test]
-async fn dist_uses_the_unit() {
+async fn distance_uses_the_unit() {
     let geo = cities().await;
     let km = geo
-        .dist("prague", "brno", GeoUnit::Kilometers)
+        .distance("prague", "brno", GeoUnit::Kilometers)
         .await
         .unwrap()
         .unwrap();
     assert!((km - 184.0).abs() < 3.0, "{km}");
     let m = geo
-        .dist("prague", "brno", GeoUnit::Meters)
+        .distance("prague", "brno", GeoUnit::Meters)
         .await
         .unwrap()
         .unwrap();
     assert!((m - km * 1000.0).abs() < 50.0);
     assert_eq!(
-        geo.dist("prague", "nowhere", GeoUnit::Meters)
+        geo.distance("prague", "nowhere", GeoUnit::Meters)
             .await
             .unwrap(),
         None
@@ -68,18 +68,21 @@ async fn dist_uses_the_unit() {
 }
 
 #[tokio::test]
-async fn hash_is_a_geohash_string() {
+async fn geohash_is_a_geohash_string() {
     let geo = cities().await;
-    let hash = geo.hash("prague").await.unwrap().unwrap();
+    let hash = geo.geohash("prague").await.unwrap().unwrap();
     assert_eq!(hash.len(), 11);
-    assert_eq!(geo.hash("nowhere").await.unwrap(), None);
+    assert_eq!(geo.geohash("nowhere").await.unwrap(), None);
 }
 
 #[tokio::test]
-async fn radius_lists_members_nearest_first_with_distance() {
+async fn search_by_radius_lists_members_nearest_first_with_distance() {
     let geo = cities().await;
     let found = geo
-        .radius(BRNO, 300.0, GeoUnit::Kilometers, None)
+        .search(
+            BRNO,
+            &GeoSearch::radius(300.0, GeoUnit::Kilometers).order(GeoOrder::Asc),
+        )
         .await
         .unwrap();
     let names: Vec<&str> = found.iter().map(|m| m.value.as_str()).collect();
@@ -89,43 +92,63 @@ async fn radius_lists_members_nearest_first_with_distance() {
     assert!((found[0].point.latitude - BRNO.latitude).abs() < 1e-4);
 
     let close = geo
-        .radius(BRNO, 100.0, GeoUnit::Kilometers, None)
+        .search(
+            BRNO,
+            &GeoSearch::radius(100.0, GeoUnit::Kilometers).order(GeoOrder::Asc),
+        )
         .await
         .unwrap();
     assert_eq!(close.len(), 1);
     let limited = geo
-        .radius(BRNO, 300.0, GeoUnit::Kilometers, Some(2))
+        .search(
+            BRNO,
+            &GeoSearch::radius(300.0, GeoUnit::Kilometers)
+                .order(GeoOrder::Asc)
+                .count(2),
+        )
         .await
         .unwrap();
     assert_eq!(limited.len(), 2);
 }
 
 #[tokio::test]
-async fn radius_of_a_member_includes_the_member() {
+async fn search_from_a_member_includes_the_member() {
     let geo = cities().await;
     let found = geo
-        .radius_of("prague", 200.0, GeoUnit::Kilometers, None)
+        .search_from(
+            "prague",
+            &GeoSearch::radius(200.0, GeoUnit::Kilometers).order(GeoOrder::Asc),
+        )
         .await
         .unwrap();
     let names: Vec<&str> = found.iter().map(|m| m.value.as_str()).collect();
     assert_eq!(names, ["prague", "brno"]);
     assert!(geo
-        .radius_of("nowhere", 200.0, GeoUnit::Kilometers, None)
+        .search_from(
+            "nowhere",
+            &GeoSearch::radius(200.0, GeoUnit::Kilometers).order(GeoOrder::Asc)
+        )
         .await
         .unwrap()
         .is_empty());
 }
 
 #[tokio::test]
-async fn within_box_uses_width_and_height() {
+async fn search_by_rect_uses_width_and_height() {
     let geo = cities().await;
     let found = geo
-        .within_box(BRNO, 100.0, 100.0, GeoUnit::Kilometers, None)
+        .search(
+            BRNO,
+            &GeoSearch::rect(100.0, 100.0, GeoUnit::Kilometers).order(GeoOrder::Asc),
+        )
         .await
         .unwrap();
     assert_eq!(found.len(), 1);
     let wide = geo
-        .within_box(BRNO, 800.0, 400.0, GeoUnit::Kilometers, None)
+        .search(
+            BRNO,
+            &GeoSearch::rect(800.0, 400.0, GeoUnit::Kilometers).order(GeoOrder::Asc),
+        )
         .await
         .unwrap();
     assert_eq!(wide.len(), 3);
@@ -138,28 +161,36 @@ async fn invalid_coordinates_are_config_errors() {
         longitude: 181.0,
         latitude: 0.0,
     };
-    assert!(matches!(geo.add("x", bad).await, Err(Error::Config(_))));
+    assert!(matches!(geo.insert("x", bad).await, Err(Error::Config(_))));
     let pole = GeoPoint {
         longitude: 0.0,
         latitude: 89.0,
     };
-    assert!(matches!(geo.add("x", pole).await, Err(Error::Config(_))));
+    assert!(matches!(geo.insert("x", pole).await, Err(Error::Config(_))));
     assert!(matches!(
-        geo.radius(bad, 1.0, GeoUnit::Meters, None).await,
+        geo.search(
+            bad,
+            &GeoSearch::radius(1.0, GeoUnit::Meters).order(GeoOrder::Asc)
+        )
+        .await,
         Err(Error::Config(_))
     ));
     let nan = GeoPoint {
         longitude: f64::NAN,
         latitude: 0.0,
     };
-    assert!(matches!(geo.add("x", nan).await, Err(Error::Config(_))));
+    assert!(matches!(geo.insert("x", nan).await, Err(Error::Config(_))));
 }
 
 #[tokio::test]
 async fn a_negative_radius_is_a_config_error() {
     let geo = cities().await;
     assert!(matches!(
-        geo.radius(BRNO, -1.0, GeoUnit::Meters, None).await,
+        geo.search(
+            BRNO,
+            &GeoSearch::radius(-1.0, GeoUnit::Meters).order(GeoOrder::Asc)
+        )
+        .await,
         Err(Error::Config(_))
     ));
 }
@@ -170,7 +201,7 @@ async fn clear_and_object_methods() {
     assert!(geo.exists().await.unwrap());
     geo.clear().await.unwrap();
     assert!(geo.is_empty().await.unwrap());
-    geo.add("again", PRAGUE).await.unwrap();
+    geo.insert("again", PRAGUE).await.unwrap();
     assert!(geo.del().await.unwrap());
 }
 
@@ -178,7 +209,12 @@ async fn clear_and_object_methods() {
 async fn a_count_of_zero_returns_nothing() {
     let geo = cities().await;
     assert!(geo
-        .radius(BRNO, 300.0, GeoUnit::Kilometers, Some(0))
+        .search(
+            BRNO,
+            &GeoSearch::radius(300.0, GeoUnit::Kilometers)
+                .order(GeoOrder::Asc)
+                .count(0)
+        )
         .await
         .unwrap()
         .is_empty());
@@ -251,28 +287,28 @@ fn store_pair() -> (String, String) {
 #[tokio::test]
 async fn add_reports_a_new_member() {
     let geo = client().await.geo::<String>(unique("test"));
-    assert!(geo.add("city1", at(2.51, 3.12)).await.unwrap());
+    assert!(geo.insert("city1", at(2.51, 3.12)).await.unwrap());
 }
 
 // Redisson: testAddIfExists
 #[tokio::test]
-async fn add_if_exists_moves_only_an_existing_member() {
+async fn update_moves_only_an_existing_member() {
     let geo = client().await.geo::<String>(unique("test"));
-    assert!(geo.add("city1", at(2.51, 3.12)).await.unwrap());
-    assert!(geo.add_if_exists("city1", at(2.9, 3.9)).await.unwrap());
-    let pos = geo.pos("city1").await.unwrap().unwrap();
+    assert!(geo.insert("city1", at(2.51, 3.12)).await.unwrap());
+    assert!(geo.update("city1", at(2.9, 3.9)).await.unwrap());
+    let pos = geo.position("city1").await.unwrap().unwrap();
     assert!((3.8..=3.9).contains(&pos.latitude));
     assert!((2.8..=3.0).contains(&pos.longitude));
-    assert!(!geo.add_if_exists("city2", at(2.12, 3.5)).await.unwrap());
+    assert!(!geo.update("city2", at(2.12, 3.5)).await.unwrap());
 }
 
 // Redisson: testTryAdd
 #[tokio::test]
-async fn try_add_does_not_move_an_existing_member() {
+async fn try_insert_does_not_move_an_existing_member() {
     let geo = client().await.geo::<String>(unique("test"));
-    assert!(geo.add("city1", at(2.51, 3.12)).await.unwrap());
-    assert!(!geo.try_add("city1", at(2.5, 3.1)).await.unwrap());
-    assert!(geo.try_add("city2", at(2.12, 3.5)).await.unwrap());
+    assert!(geo.insert("city1", at(2.51, 3.12)).await.unwrap());
+    assert!(!geo.try_insert("city1", at(2.5, 3.1)).await.unwrap());
+    assert!(geo.try_insert("city2", at(2.12, 3.5)).await.unwrap());
 }
 
 // Redisson: testAddEntries
@@ -291,10 +327,10 @@ async fn extend_reports_how_many_members_were_added() {
 
 // Redisson: testDist
 #[tokio::test]
-async fn dist_returns_the_distance_between_two_members() {
+async fn distance_returns_the_distance_between_two_members() {
     let geo = sicily().await;
     assert_eq!(
-        geo.dist("Palermo", "Catania", GeoUnit::Meters)
+        geo.distance("Palermo", "Catania", GeoUnit::Meters)
             .await
             .unwrap(),
         Some(166274.1516)
@@ -303,10 +339,10 @@ async fn dist_returns_the_distance_between_two_members() {
 
 // Redisson: testDistEmpty
 #[tokio::test]
-async fn dist_between_missing_members_is_none() {
+async fn distance_between_missing_members_is_none() {
     let geo = client().await.geo::<String>(unique("test"));
     assert_eq!(
-        geo.dist("Palermo", "Catania", GeoUnit::Meters)
+        geo.distance("Palermo", "Catania", GeoUnit::Meters)
             .await
             .unwrap(),
         None
@@ -315,10 +351,10 @@ async fn dist_between_missing_members_is_none() {
 
 // Redisson: testHash
 #[tokio::test]
-async fn hash_many_returns_the_geohash_of_each_member() {
+async fn geohash_many_returns_the_geohash_of_each_member() {
     let geo = sicily().await;
     assert_eq!(
-        geo.hash_many(&["Palermo", "Catania"]).await.unwrap(),
+        geo.geohash_many(&["Palermo", "Catania"]).await.unwrap(),
         [
             Some("sqc8b49rny0".to_string()),
             Some("sqdtr74hyu0".to_string())
@@ -328,48 +364,50 @@ async fn hash_many_returns_the_geohash_of_each_member() {
 
 // Redisson: testHashEmpty
 #[tokio::test]
-async fn hash_many_returns_none_for_missing_members() {
+async fn geohash_many_returns_none_for_missing_members() {
     let geo = client().await.geo::<String>(unique("test"));
     assert_eq!(
-        geo.hash_many(&["Palermo", "Catania"]).await.unwrap(),
+        geo.geohash_many(&["Palermo", "Catania"]).await.unwrap(),
         [None, None]
     );
 }
 
 // Redisson: testPos4
 #[tokio::test]
-async fn pos_many_returns_the_stored_positions_of_members() {
+async fn positions_returns_the_stored_positions_of_members() {
     let geo = sicily().await;
-    let pos = geo.pos_many(&["Palermo", "Catania"]).await.unwrap();
+    let pos = geo.positions(&["Palermo", "Catania"]).await.unwrap();
     assert!(close(pos[0].unwrap(), PALERMO_POS));
     assert!(close(pos[1].unwrap(), CATANIA_POS));
 }
 
 // Redisson: testPos1
 #[tokio::test]
-async fn pos_returns_the_position_of_an_added_member() {
+async fn position_returns_the_position_of_an_added_member() {
     let geo = client().await.geo::<String>(unique("test"));
-    geo.add("hi", at(0.123, 0.893)).await.unwrap();
-    assert!(geo.pos("hi").await.unwrap().is_some());
+    geo.insert("hi", at(0.123, 0.893)).await.unwrap();
+    assert!(geo.position("hi").await.unwrap().is_some());
 }
 
 // Redisson: testPos3
 #[tokio::test]
-async fn pos_many_returns_none_for_unknown_members() {
+async fn positions_returns_none_for_unknown_members() {
     let geo = client().await.geo::<String>(unique("test"));
-    geo.add("hi", at(0.123, 0.893)).await.unwrap();
-    let pos = geo.pos_many(&["hi", "123f", "sdfdsf"]).await.unwrap();
+    geo.insert("hi", at(0.123, 0.893)).await.unwrap();
+    let pos = geo.positions(&["hi", "123f", "sdfdsf"]).await.unwrap();
     assert!(pos[0].is_some());
     assert_eq!(pos[1..], [None, None]);
 }
 
 // Redisson: testPos2
 #[tokio::test]
-async fn pos_many_finds_the_single_known_member_among_unknown_ones() {
+async fn positions_finds_the_single_known_member_among_unknown_ones() {
     let geo = client().await.geo::<String>(unique("test"));
-    geo.add("Palermo", at(13.361389, 38.115556)).await.unwrap();
+    geo.insert("Palermo", at(13.361389, 38.115556))
+        .await
+        .unwrap();
     let pos = geo
-        .pos_many(&["test2", "Palermo", "test3", "Catania", "test1"])
+        .positions(&["test2", "Palermo", "test3", "Catania", "test1"])
         .await
         .unwrap();
     assert!(close(pos[1].unwrap(), PALERMO_POS));
@@ -378,10 +416,10 @@ async fn pos_many_finds_the_single_known_member_among_unknown_ones() {
 
 // Redisson: testPos
 #[tokio::test]
-async fn pos_many_finds_known_members_among_unknown_ones() {
+async fn positions_finds_known_members_among_unknown_ones() {
     let geo = sicily().await;
     let pos = geo
-        .pos_many(&["test2", "Palermo", "test3", "Catania", "test1"])
+        .positions(&["test2", "Palermo", "test3", "Catania", "test1"])
         .await
         .unwrap();
     assert!(close(pos[1].unwrap(), PALERMO_POS));
@@ -391,10 +429,10 @@ async fn pos_many_finds_known_members_among_unknown_ones() {
 
 // Redisson: testPosEmpty
 #[tokio::test]
-async fn pos_many_on_an_empty_key_returns_only_none() {
+async fn positions_on_an_empty_key_returns_only_none() {
     let geo = client().await.geo::<String>(unique("test"));
     let pos = geo
-        .pos_many(&["test2", "Palermo", "test3", "Catania", "test1"])
+        .positions(&["test2", "Palermo", "test3", "Catania", "test1"])
         .await
         .unwrap();
     assert!(pos.iter().all(Option::is_none));
@@ -453,11 +491,11 @@ async fn rect_search_reports_the_position_of_each_member() {
 
 // Redisson: testBoxStoreSearch
 #[tokio::test]
-async fn store_search_to_saves_members_found_in_a_box() {
+async fn store_search_saves_members_found_in_a_box() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     let stored = geo_source
-        .store_search_to(
+        .store_search(
             &dest,
             at(15.5, 38.5),
             &GeoSearch::rect(5400.0, 5400.0, GeoUnit::Kilometers),
@@ -465,18 +503,18 @@ async fn store_search_to_saves_members_found_in_a_box() {
         .await
         .unwrap();
     assert_eq!(stored, 2);
-    let mut all = named(&dest).await.read_all().await.unwrap();
+    let mut all = named(&dest).await.to_vec().await.unwrap();
     all.sort();
     assert_eq!(all, ["Catania", "Palermo"]);
 }
 
 // Redisson: testBoxStoreSorted
 #[tokio::test]
-async fn store_search_to_with_store_dist_orders_by_distance() {
+async fn store_search_with_store_dist_orders_by_distance() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     let stored = geo_source
-        .store_search_to(
+        .store_search(
             &dest,
             at(15.0, 37.0),
             &GeoSearch::rect(5400.0, 5400.0, GeoUnit::Kilometers).store_dist(),
@@ -485,7 +523,7 @@ async fn store_search_to_with_store_dist_orders_by_distance() {
         .unwrap();
     assert_eq!(stored, 2);
     assert_eq!(
-        named(&dest).await.read_all().await.unwrap(),
+        named(&dest).await.to_vec().await.unwrap(),
         ["Catania", "Palermo"]
     );
 }
@@ -650,13 +688,13 @@ async fn radius_search_reports_distances_of_large_structured_members() {
         .await
         .geo::<BTreeMap<String, String>>(unique("test"));
     let map: BTreeMap<String, String> = (0..150).map(|i| (i.to_string(), i.to_string())).collect();
-    geo.add(&map, at(13.361389, 38.115556)).await.unwrap();
+    geo.insert(&map, at(13.361389, 38.115556)).await.unwrap();
     let mut map1 = map.clone();
     map1.remove("100");
-    geo.add(&map1, at(15.087269, 37.502669)).await.unwrap();
+    geo.insert(&map1, at(15.087269, 37.502669)).await.unwrap();
     let mut map2 = map.clone();
     map2.remove("0");
-    geo.add(&map2, at(15.081269, 37.502169)).await.unwrap();
+    geo.insert(&map2, at(15.081269, 37.502169)).await.unwrap();
 
     let found = geo.search(from_15_37(), &km200()).await.unwrap();
     let distance = |wanted: &BTreeMap<String, String>| {
@@ -959,17 +997,17 @@ async fn search_from_for_positions_on_an_empty_key_finds_nothing() {
 }
 
 async fn stored(dest: &str) -> Vec<String> {
-    named(dest).await.read_all().await.unwrap()
+    named(dest).await.to_vec().await.unwrap()
 }
 
 // Redisson: testRadiusStore
 #[tokio::test]
-async fn store_search_to_saves_members_within_the_radius() {
+async fn store_search_saves_members_within_the_radius() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200())
+            .store_search(&dest, from_15_37(), &km200())
             .await
             .unwrap(),
         2
@@ -981,12 +1019,12 @@ async fn store_search_to_saves_members_within_the_radius() {
 
 // Redisson: testRadiusStoreSorted
 #[tokio::test]
-async fn store_search_to_with_store_dist_saves_members_by_distance() {
+async fn store_search_with_store_dist_saves_members_by_distance() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200().store_dist())
+            .store_search(&dest, from_15_37(), &km200().store_dist())
             .await
             .unwrap(),
         2
@@ -996,12 +1034,12 @@ async fn store_search_to_with_store_dist_saves_members_by_distance() {
 
 // Redisson: testRadiusStoreCount
 #[tokio::test]
-async fn store_search_to_with_count_saves_the_nearest_member() {
+async fn store_search_with_count_saves_the_nearest_member() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200().count(1))
+            .store_search(&dest, from_15_37(), &km200().count(1))
             .await
             .unwrap(),
         1
@@ -1011,12 +1049,12 @@ async fn store_search_to_with_count_saves_the_nearest_member() {
 
 // Redisson: testRadiusStoreSortedCount
 #[tokio::test]
-async fn store_search_to_with_count_and_store_dist_saves_the_nearest() {
+async fn store_search_with_count_and_store_dist_saves_the_nearest() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200().count(1).store_dist())
+            .store_search(&dest, from_15_37(), &km200().count(1).store_dist())
             .await
             .unwrap(),
         1
@@ -1026,12 +1064,12 @@ async fn store_search_to_with_count_and_store_dist_saves_the_nearest() {
 
 // Redisson: testRadiusStoreOrderCount
 #[tokio::test]
-async fn store_search_to_with_order_and_count_saves_one_end() {
+async fn store_search_with_order_and_count_saves_one_end() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200().order(GeoOrder::Desc).count(1))
+            .store_search(&dest, from_15_37(), &km200().order(GeoOrder::Desc).count(1))
             .await
             .unwrap(),
         1
@@ -1039,7 +1077,7 @@ async fn store_search_to_with_order_and_count_saves_one_end() {
     assert_eq!(stored(&dest).await, ["Palermo"]);
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200().order(GeoOrder::Asc).count(1))
+            .store_search(&dest, from_15_37(), &km200().order(GeoOrder::Asc).count(1))
             .await
             .unwrap(),
         1
@@ -1049,13 +1087,13 @@ async fn store_search_to_with_order_and_count_saves_one_end() {
 
 // Redisson: testRadiusStoreSortedOrderCount
 #[tokio::test]
-async fn store_search_to_with_store_dist_order_and_count_saves_one_end() {
+async fn store_search_with_store_dist_order_and_count_saves_one_end() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     let desc = km200().order(GeoOrder::Desc).count(1).store_dist();
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &desc)
+            .store_search(&dest, from_15_37(), &desc)
             .await
             .unwrap(),
         1
@@ -1064,7 +1102,7 @@ async fn store_search_to_with_store_dist_order_and_count_saves_one_end() {
     let asc = km200().order(GeoOrder::Asc).count(1).store_dist();
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &asc)
+            .store_search(&dest, from_15_37(), &asc)
             .await
             .unwrap(),
         1
@@ -1074,12 +1112,12 @@ async fn store_search_to_with_store_dist_order_and_count_saves_one_end() {
 
 // Redisson: testRadiusStoreEmpty
 #[tokio::test]
-async fn store_search_to_from_an_empty_key_saves_nothing() {
+async fn store_search_from_an_empty_key_saves_nothing() {
     let (source, dest) = store_pair();
     let geo_source = named(&source).await;
     assert_eq!(
         geo_source
-            .store_search_to(&dest, from_15_37(), &km200())
+            .store_search(&dest, from_15_37(), &km200())
             .await
             .unwrap(),
         0
@@ -1089,12 +1127,12 @@ async fn store_search_to_from_an_empty_key_saves_nothing() {
 
 // Redisson: testRadiusStoreMember
 #[tokio::test]
-async fn store_search_from_to_saves_members_around_a_member() {
+async fn store_search_from_saves_members_around_a_member() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_from_to(&dest, "Palermo", &km200())
+            .store_search_from(&dest, "Palermo", &km200())
             .await
             .unwrap(),
         2
@@ -1106,12 +1144,12 @@ async fn store_search_from_to_saves_members_around_a_member() {
 
 // Redisson: testRadiusStoreMemberCount
 #[tokio::test]
-async fn store_search_from_to_with_count_saves_the_member_itself() {
+async fn store_search_from_with_count_saves_the_member_itself() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_from_to(&dest, "Palermo", &km200().count(1))
+            .store_search_from(&dest, "Palermo", &km200().count(1))
             .await
             .unwrap(),
         1
@@ -1121,12 +1159,12 @@ async fn store_search_from_to_with_count_saves_the_member_itself() {
 
 // Redisson: testRadiusStoreMemberOrderCount
 #[tokio::test]
-async fn store_search_from_to_with_order_and_count_saves_one_end() {
+async fn store_search_from_with_order_and_count_saves_one_end() {
     let (source, dest) = store_pair();
     let geo_source = sicily_at(&source).await;
     assert_eq!(
         geo_source
-            .store_search_from_to(&dest, "Palermo", &km200().order(GeoOrder::Desc).count(1))
+            .store_search_from(&dest, "Palermo", &km200().order(GeoOrder::Desc).count(1))
             .await
             .unwrap(),
         1
@@ -1134,7 +1172,7 @@ async fn store_search_from_to_with_order_and_count_saves_one_end() {
     assert_eq!(stored(&dest).await, ["Catania"]);
     assert_eq!(
         geo_source
-            .store_search_from_to(&dest, "Palermo", &km200().order(GeoOrder::Asc).count(1))
+            .store_search_from(&dest, "Palermo", &km200().order(GeoOrder::Asc).count(1))
             .await
             .unwrap(),
         1
@@ -1144,12 +1182,12 @@ async fn store_search_from_to_with_order_and_count_saves_one_end() {
 
 // Redisson: testRadiusStoreMemberEmpty
 #[tokio::test]
-async fn store_search_from_to_a_missing_member_saves_nothing() {
+async fn store_search_from_a_missing_member_saves_nothing() {
     let (source, dest) = store_pair();
     let geo_source = named(&source).await;
     assert_eq!(
         geo_source
-            .store_search_from_to(&dest, "Palermo", &km200())
+            .store_search_from(&dest, "Palermo", &km200())
             .await
             .unwrap(),
         0

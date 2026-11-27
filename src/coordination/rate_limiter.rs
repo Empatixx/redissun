@@ -5,7 +5,8 @@ use crate::pending::Pending;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
@@ -287,9 +288,9 @@ impl RateType {
     }
 }
 
-/// Settings for [`RateLimiter::set_rate_with`], [`RateLimiter::update_rate`] and [`RateLimiter::try_set_rate_with`].
+/// The settings the [`RateLimiter::init_rate`], [`RateLimiter::set_rate`] and [`RateLimiter::update_rate`] builders collect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RateLimiterArgs {
+struct RateLimiterArgs {
     rate_type: RateType,
     rate: u64,
     interval: Duration,
@@ -298,8 +299,7 @@ pub struct RateLimiterArgs {
 }
 
 impl RateLimiterArgs {
-    /// At most `rate` permits in any window of length `interval`, counted as `rate_type` says.
-    pub fn new(rate_type: RateType, rate: u64, interval: Duration) -> Self {
+    fn new(rate_type: RateType, rate: u64, interval: Duration) -> Self {
         Self {
             rate_type,
             rate,
@@ -307,18 +307,6 @@ impl RateLimiterArgs {
             keep_alive: Duration::ZERO,
             keep_state: false,
         }
-    }
-
-    /// Removes the limiter when it is not used for `keep_alive`; zero (the default) keeps it forever. Must be at least the interval.
-    pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
-        self.keep_alive = keep_alive;
-        self
-    }
-
-    /// Keeps the permits used within the current window when the rate changes, instead of starting over.
-    pub fn keep_state(mut self, keep_state: bool) -> Self {
-        self.keep_state = keep_state;
-        self
     }
 
     fn settings(&self) -> Result<Vec<Bytes>> {
@@ -359,7 +347,7 @@ pub struct RateLimiterConfig {
 
 /// A shared rate limiter with a sliding window, modelled on Redisson's `RRateLimiter` and using the same scripts and key layout.
 ///
-/// Configure it once with [`RateLimiter::try_set_rate`], then call [`RateLimiter::try_acquire`] or [`RateLimiter::acquire`] before each rate-limited action. The settings live in the hash `name`, the remaining permits in `{name}:value` and the handed-out permits in the sorted set `{name}:permits` (with a `:<client id>` suffix for [`RateType::PerClient`]). Times come from the clock of the calling client, so clients should keep their clocks in sync.
+/// Configure it once with [`RateLimiter::init_rate`], then call [`RateLimiter::try_acquire`] or [`RateLimiter::acquire`] before each rate-limited action. The settings live in the hash `name`, the remaining permits in `{name}:value` and the handed-out permits in the sorted set `{name}:permits` (with a `:<client id>` suffix for [`RateType::PerClient`]). Times come from the clock of the calling client, so clients should keep their clocks in sync.
 #[derive(Clone)]
 pub struct RateLimiter {
     key: Key,
@@ -390,21 +378,56 @@ impl RateLimiter {
         ]
     }
 
-    /// Sets the rate, but only when the limiter is not configured yet. Returns whether it was set.
+    /// Sets the rate, but only when the limiter is not configured yet; resolves to whether it was set. Redisson's `trySetRate`.
     ///
-    /// At most `rate` permits are handed out in any window of length `interval`.
-    pub async fn try_set_rate(
+    /// At most `rate` permits are handed out in any window of length `interval`. Add `.keep_alive(d)` to remove the limiter when it is not used for `d`.
+    ///
+    /// ```no_run
+    /// # async fn run(client: redissun::Client) -> redissun::Result<()> {
+    /// # use std::time::Duration;
+    /// use redissun::RateType;
+    /// let limiter = client.rate_limiter("api");
+    /// limiter
+    ///     .init_rate(RateType::Overall, 10, Duration::from_secs(1))
+    ///     .keep_alive(Duration::from_secs(3600))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[doc(alias = "trySetRate")]
+    pub fn init_rate(&self, rate_type: RateType, rate: u64, interval: Duration) -> InitRate<'_> {
+        InitRate {
+            limiter: self,
+            args: RateLimiterArgs::new(rate_type, rate, interval),
+        }
+    }
+
+    /// Sets the rate, replacing any earlier configuration, Redisson's `setRate`. The permits used under the new rate type are forgotten unless `.keep_state(true)` is set;
+    /// `.keep_alive(d)` removes the limiter when it is not used for `d`. With `keep_state`, permits used in the current window still count against the new rate; a change of rate type always starts over.
+    #[doc(alias = "setRate")]
+    pub fn set_rate(&self, rate_type: RateType, rate: u64, interval: Duration) -> SetRate<'_> {
+        SetRate {
+            limiter: self,
+            args: RateLimiterArgs::new(rate_type, rate, interval),
+            options: false,
+        }
+    }
+
+    /// Like [`RateLimiter::set_rate`], but only when the limiter is configured already; resolves to whether it was. Redisson's `updateRate`.
+    #[doc(alias = "updateRate")]
+    pub fn update_rate(
         &self,
         rate_type: RateType,
         rate: u64,
         interval: Duration,
-    ) -> Result<bool> {
-        self.try_set_rate_with(RateLimiterArgs::new(rate_type, rate, interval))
-            .await
+    ) -> UpdateRate<'_> {
+        UpdateRate {
+            limiter: self,
+            args: RateLimiterArgs::new(rate_type, rate, interval),
+        }
     }
 
-    /// Like [`RateLimiter::try_set_rate`], and also applies the keep-alive time of `args`. `keep_state` is ignored.
-    pub async fn try_set_rate_with(&self, args: RateLimiterArgs) -> Result<bool> {
+    async fn init_rate_with(&self, args: RateLimiterArgs) -> Result<bool> {
         let set: i64 = self
             .key
             .core
@@ -413,29 +436,13 @@ impl RateLimiter {
         Ok(set == 1)
     }
 
-    /// Sets the rate, replacing any earlier configuration and forgetting the permits used under the new rate type.
-    pub async fn set_rate(&self, rate_type: RateType, rate: u64, interval: Duration) -> Result<()> {
+    async fn reset_rate(&self, args: RateLimiterArgs) -> Result<()> {
         let _: i64 = self
             .key
             .core
-            .eval(
-                &SET_RATE,
-                self.keys(),
-                RateLimiterArgs::new(rate_type, rate, interval).settings()?,
-            )
+            .eval(&SET_RATE, self.keys(), args.settings()?)
             .await?;
         Ok(())
-    }
-
-    /// Sets the rate from `args`. With `keep_state`, permits used in the current window still count against the new rate; a change of rate type always starts over.
-    pub async fn set_rate_with(&self, args: RateLimiterArgs) -> Result<()> {
-        self.set_or_update(args, false).await?;
-        Ok(())
-    }
-
-    /// Like [`RateLimiter::set_rate_with`], but only when the limiter is configured already. Returns whether it was.
-    pub async fn update_rate(&self, args: RateLimiterArgs) -> Result<bool> {
-        self.set_or_update(args, true).await
     }
 
     async fn set_or_update(&self, args: RateLimiterArgs, require_exist: bool) -> Result<bool> {
@@ -502,6 +509,7 @@ impl RateLimiter {
     }
 
     /// Takes `permits` if the limit allows it right now; returns whether it did.
+    #[doc(alias = "tryAcquire")]
     pub async fn try_acquire(&self, permits: u64) -> Result<bool> {
         self.acquire_inner(permits, Some(Duration::ZERO)).await
     }
@@ -613,5 +621,107 @@ impl Object for RateLimiter {
 
     fn persist(&self) -> impl Future<Output = Result<bool>> + Send {
         self.persist_all()
+    }
+}
+
+/// A pending [`RateLimiter::init_rate`]. Await it, optionally after [`InitRate::keep_alive`].
+#[must_use = "init_rate does nothing until it is awaited"]
+#[derive(Debug)]
+pub struct InitRate<'a> {
+    limiter: &'a RateLimiter,
+    args: RateLimiterArgs,
+}
+
+impl InitRate<'_> {
+    /// Removes the limiter when it is not used for `keep_alive`; zero (the default) keeps it forever. Must be at least the interval.
+    #[doc(alias = "keepAliveTime")]
+    pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.args.keep_alive = keep_alive;
+        self
+    }
+}
+
+impl<'a> IntoFuture for InitRate<'a> {
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.limiter.init_rate_with(self.args))
+    }
+}
+
+/// A pending [`RateLimiter::set_rate`]. Await it, optionally after [`SetRate::keep_alive`] or [`SetRate::keep_state`].
+#[must_use = "set_rate does nothing until it is awaited"]
+#[derive(Debug)]
+pub struct SetRate<'a> {
+    limiter: &'a RateLimiter,
+    args: RateLimiterArgs,
+    options: bool,
+}
+
+impl SetRate<'_> {
+    /// Removes the limiter when it is not used for `keep_alive`; zero (the default) keeps it forever. Must be at least the interval.
+    #[doc(alias = "keepAliveTime")]
+    pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.args.keep_alive = keep_alive;
+        self.options = true;
+        self
+    }
+
+    /// Keeps the permits used within the current window when the rate changes, instead of starting over.
+    #[doc(alias = "keepState")]
+    pub fn keep_state(mut self, keep_state: bool) -> Self {
+        self.args.keep_state = keep_state;
+        self.options = true;
+        self
+    }
+}
+
+impl<'a> IntoFuture for SetRate<'a> {
+    type Output = Result<()>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            if self.options {
+                self.limiter.set_or_update(self.args, false).await?;
+                Ok(())
+            } else {
+                self.limiter.reset_rate(self.args).await
+            }
+        })
+    }
+}
+
+/// A pending [`RateLimiter::update_rate`]. Await it, optionally after [`UpdateRate::keep_alive`] or [`UpdateRate::keep_state`].
+#[must_use = "update_rate does nothing until it is awaited"]
+#[derive(Debug)]
+pub struct UpdateRate<'a> {
+    limiter: &'a RateLimiter,
+    args: RateLimiterArgs,
+}
+
+impl UpdateRate<'_> {
+    /// Removes the limiter when it is not used for `keep_alive`; zero (the default) keeps it forever. Must be at least the interval.
+    #[doc(alias = "keepAliveTime")]
+    pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.args.keep_alive = keep_alive;
+        self
+    }
+
+    /// Keeps the permits used within the current window when the rate changes, instead of starting over.
+    #[doc(alias = "keepState")]
+    pub fn keep_state(mut self, keep_state: bool) -> Self {
+        self.args.keep_state = keep_state;
+        self
+    }
+}
+
+impl<'a> IntoFuture for UpdateRate<'a> {
+    type Output = Result<bool>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.limiter.set_or_update(self.args, true))
     }
 }

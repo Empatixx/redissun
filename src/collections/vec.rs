@@ -1,5 +1,5 @@
 use crate::codec::Codec;
-use crate::collections::list;
+use crate::collections::list::{self, bounds};
 use crate::error::{Error, Result};
 use crate::lua::Lua;
 use crate::object::{HasKey, Key};
@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Bound, RangeBounds};
+use std::ops::RangeBounds;
 use std::sync::LazyLock;
 use uuid::Uuid;
 
@@ -47,14 +47,6 @@ static REMOVE: LazyLock<Lua> = LazyLock::new(|| {
         redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
         redis.call('lrem', KEYS[1], 1, ARGV[2])
         return v",
-    )
-});
-
-static FAST_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
-    Lua::from_lua(
-        "redis.call('lset', KEYS[1], ARGV[1], ARGV[2])
-        redis.call('lrem', KEYS[1], 1, ARGV[2])
-        return 1",
     )
 });
 
@@ -108,24 +100,6 @@ static RETAIN_VALUES: LazyLock<Lua> = LazyLock::new(|| {
 
 fn redis_index(index: usize) -> Result<i64> {
     i64::try_from(index).map_err(|_| Error::OutOfRange)
-}
-
-fn bounds(range: impl RangeBounds<usize>) -> Option<(i64, i64)> {
-    let start = match range.start_bound() {
-        Bound::Included(&start) => start,
-        Bound::Excluded(&start) => start.checked_add(1)?,
-        Bound::Unbounded => 0,
-    };
-    let stop = match range.end_bound() {
-        Bound::Included(&end) => Some(end),
-        Bound::Excluded(&end) => Some(end.checked_sub(1)?),
-        Bound::Unbounded => None,
-    };
-    if stop.is_some_and(|stop| start > stop) {
-        return None;
-    }
-    let clamp = |index: usize| i64::try_from(index).unwrap_or(i64::MAX);
-    Some((clamp(start), stop.map_or(-1, clamp)))
 }
 
 fn out_of_range(error: Error) -> Error {
@@ -261,9 +235,10 @@ where
         self.decode(raw)
     }
 
-    /// Replaces the value at the index and returns the old one.
+    /// Replaces the value at the index and returns the old one, like `mem::replace`. Redisson's `set`.
     /// Returns [`Error::OutOfRange`] when the index is past the end.
-    pub async fn set<Q>(&self, index: usize, v: &Q) -> Result<V>
+    #[doc(alias = "set")]
+    pub async fn replace<Q>(&self, index: usize, v: &Q) -> Result<V>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -282,9 +257,10 @@ where
         self.decode(previous)?.ok_or(Error::OutOfRange)
     }
 
-    /// Replaces the value at the index without reading the old one (`LSET`).
+    /// Replaces the value at the index without reading the old one (`LSET`). Redisson's `fastSet`; [`Vec::replace`] returns the old value.
     /// Returns [`Error::OutOfRange`] when the index is past the end.
-    pub async fn fast_set<Q>(&self, index: usize, v: &Q) -> Result<()>
+    #[doc(alias = "fastSet")]
+    pub async fn set<Q>(&self, index: usize, v: &Q) -> Result<()>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
@@ -309,12 +285,13 @@ where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        self.insert_all(index, std::iter::once(v)).await
+        self.insert_many(index, std::iter::once(v)).await
     }
 
     /// Inserts values, in order, before the index and moves the rest back. It is atomic, costs O(n) and is sent once without retry.
-    /// Returns [`Error::OutOfRange`] when the index is past the length.
-    pub async fn insert_all<'a, Q>(
+    /// Returns [`Error::OutOfRange`] when the index is past the length. Redisson's `addAll(index, values)`.
+    #[doc(alias = "addAll")]
+    pub async fn insert_many<'a, Q>(
         &self,
         index: usize,
         values: impl IntoIterator<Item = &'a Q>,
@@ -388,8 +365,9 @@ where
         Ok(usize::try_from(length).ok().filter(|length| *length > 0))
     }
 
-    /// Removes and returns the value at the index. It is atomic and costs O(n).
+    /// Removes and returns the value at the index. It is atomic and costs O(n). Redisson's `remove(index)` and `fastRemove`.
     /// Returns [`Error::OutOfRange`] when the index is past the end.
+    #[doc(alias = "fastRemove")]
     pub async fn remove(&self, index: usize) -> Result<V> {
         let index = redis_index(index)?;
         let raw: Option<Bytes> = if index == 0 {
@@ -412,22 +390,6 @@ where
                 .map_err(out_of_range)?
         };
         self.decode(raw)?.ok_or(Error::OutOfRange)
-    }
-
-    /// Removes the value at the index without returning it. It is atomic and costs O(n).
-    /// Returns [`Error::OutOfRange`] when the index is past the end.
-    pub async fn fast_remove(&self, index: usize) -> Result<()> {
-        let index = redis_index(index)?;
-        self.key
-            .core
-            .eval::<i64>(
-                &FAST_REMOVE,
-                vec![self.key.redis_key()],
-                vec![Bytes::from(index.to_string()), marker()],
-            )
-            .await
-            .map(|_| ())
-            .map_err(out_of_range)
     }
 
     /// Returns the values in the range, like a slice range: `vec.range(1..3)` or, for Redisson's inclusive `range(1, 3)`, `vec.range(1..=3)`.
@@ -465,8 +427,9 @@ where
         Ok(())
     }
 
-    /// Returns all values in order (`LRANGE 0 -1`).
-    pub async fn read_all(&self) -> Result<std::vec::Vec<V>> {
+    /// Returns all values in order (`LRANGE 0 -1`). Redisson's `readAll`.
+    #[doc(alias = "readAll")]
+    pub async fn to_vec(&self) -> Result<std::vec::Vec<V>> {
         list::read_all(&self.key, &self.codec).await
     }
 
@@ -537,8 +500,9 @@ where
         list::remove_matching(&self.key, &self.codec, v, count).await
     }
 
-    /// Removes every equal value and returns how many were removed.
-    pub async fn remove_all<Q>(&self, v: &Q) -> Result<usize>
+    /// Removes every equal value and returns how many were removed. Redisson's `removeAll(Collections.singleton(v))`.
+    #[doc(alias = "removeAll")]
+    pub async fn remove_value_all<Q>(&self, v: &Q) -> Result<usize>
     where
         V: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,

@@ -92,12 +92,12 @@ async fn eval_sends_the_source_only_when_redis_lacks_the_script() {
     let script = client().await.with_codec(StringCodec).script();
     let source = format!("return '{}'", unique("cached"));
     let lua = LuaScript::new(source.clone());
-    script.script_flush().await.unwrap();
-    assert_eq!(script.script_exists(&[lua.sha1()]).await.unwrap(), [false]);
+    script.flush().await.unwrap();
+    assert_eq!(script.exists(&[lua.sha1()]).await.unwrap(), [false]);
 
     let reply: String = script.eval(&source).await.unwrap();
     assert!(reply.starts_with("cached"));
-    assert_eq!(script.script_exists(&[lua.sha1()]).await.unwrap(), [true]);
+    assert_eq!(script.exists(&[lua.sha1()]).await.unwrap(), [true]);
 }
 
 #[tokio::test]
@@ -105,7 +105,7 @@ async fn eval_sha_runs_a_loaded_script() {
     let _cache = CACHE.lock().await;
     let script = client().await.with_codec(StringCodec).script();
     let source = format!("return ARGV[1] .. '{}'", unique("loaded"));
-    let sha = script.script_load(&source).await.unwrap();
+    let sha = script.load(&source).await.unwrap();
     assert_eq!(sha, LuaScript::new(source).sha1());
     let reply: String = script.eval_sha(&sha).arg("x").await.unwrap();
     assert!(reply.starts_with("xloaded"));
@@ -123,23 +123,23 @@ async fn a_lua_script_reloads_itself_after_a_flush() {
     let lua = LuaScript::new(INCRBY);
     let key = unique("counter");
     let first: i64 = script.run(&lua).key(key.clone()).arg(&1).await.unwrap();
-    script.script_flush().await.unwrap();
+    script.flush().await.unwrap();
     let second: i64 = script.run(&lua).key(key).arg(&1).await.unwrap();
     assert_eq!((first, second), (1, 2));
     assert!(format!("{lua:?}").contains(lua.sha1()));
 }
 
 #[tokio::test]
-async fn script_exists_answers_for_each_digest() {
+async fn exists_answers_for_each_digest() {
     let _cache = CACHE.lock().await;
     let script = client().await.script();
-    let sha = script.script_load("return 'exists'").await.unwrap();
+    let sha = script.load("return 'exists'").await.unwrap();
     let found = script
-        .script_exists(&[&sha, "0000000000000000000000000000000000000000"])
+        .exists(&[&sha, "0000000000000000000000000000000000000000"])
         .await
         .unwrap();
     assert_eq!(found, [true, false]);
-    assert!(script.script_exists(&[]).await.unwrap().is_empty());
+    assert!(script.exists(&[]).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -170,9 +170,9 @@ async fn read_only_scripts_can_read_but_not_write() {
 }
 
 #[tokio::test]
-async fn script_kill_without_a_running_script_fails() {
+async fn kill_without_a_running_script_fails() {
     let script = client().await.script();
-    let outcome = script.script_kill().await;
+    let outcome = script.kill().await;
     assert!(matches!(outcome, Err(Error::Redis(message)) if message.contains("NOTBUSY")));
 }
 
@@ -306,17 +306,17 @@ async fn a_value_set_by_a_script_is_read_back_through_the_codec() {
 }
 
 #[tokio::test]
-async fn script_exists_is_false_after_a_flush() {
+async fn exists_is_false_after_a_flush() {
     let _cache = CACHE.lock().await;
     let script = client().await.script();
-    let sha = script.script_load(GET_FOO).await.unwrap();
+    let sha = script.load(GET_FOO).await.unwrap();
     assert_eq!(sha, GET_FOO_SHA);
 
-    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [true]);
+    assert_eq!(script.exists(&[&sha]).await.unwrap(), [true]);
 
-    script.script_flush().await.unwrap();
+    script.flush().await.unwrap();
 
-    assert_eq!(script.script_exists(&[&sha]).await.unwrap(), [false]);
+    assert_eq!(script.exists(&[&sha]).await.unwrap(), [false]);
 }
 
 #[tokio::test]
@@ -329,10 +329,10 @@ async fn eval_sha_fails_with_noscript_after_a_flush() {
         .await
         .unwrap();
     let script = client.script();
-    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+    assert_eq!(script.load(GET_FOO).await.unwrap(), GET_FOO_SHA);
     let read: Decoded<String> = script.eval_sha(GET_FOO_SHA).read_only().await.unwrap();
     assert_eq!(read.into_inner(), "bar");
-    script.script_flush().await.unwrap();
+    script.flush().await.unwrap();
 
     let outcome = script
         .eval_sha::<Decoded<String>>(GET_FOO_SHA)
@@ -342,7 +342,7 @@ async fn eval_sha_fails_with_noscript_after_a_flush() {
 }
 
 #[tokio::test]
-async fn script_load_returns_the_digest_that_eval_sha_runs() {
+async fn load_returns_the_digest_that_eval_sha_runs() {
     let _cache = CACHE.lock().await;
     let client = client().await;
     client
@@ -351,7 +351,7 @@ async fn script_load_returns_the_digest_that_eval_sha_runs() {
         .await
         .unwrap();
     let script = client.script();
-    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+    assert_eq!(script.load(GET_FOO).await.unwrap(), GET_FOO_SHA);
     let read: Decoded<String> = script.eval_sha(GET_FOO_SHA).read_only().await.unwrap();
     assert_eq!(read.into_inner(), "bar");
 }
@@ -361,7 +361,7 @@ async fn eval_sha_reads_a_value_stored_after_the_script_was_loaded() {
     let _cache = CACHE.lock().await;
     let client = client().await;
     let script = client.script();
-    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+    assert_eq!(script.load(GET_FOO).await.unwrap(), GET_FOO_SHA);
 
     client
         .bucket::<String>("foo")
@@ -377,7 +377,7 @@ async fn eval_and_eval_sha_of_one_script_return_the_same_value() {
     let _cache = CACHE.lock().await;
     let client = client().await;
     let script = client.script();
-    assert_eq!(script.script_load(GET_FOO).await.unwrap(), GET_FOO_SHA);
+    assert_eq!(script.load(GET_FOO).await.unwrap(), GET_FOO_SHA);
 
     client
         .bucket::<String>("foo")

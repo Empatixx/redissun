@@ -22,11 +22,20 @@ Every pop is one atomic Redis command. If many programs pop from the same deque,
 | `push_front(&v)` | `LPUSH` | |
 | `pop_back()` | `RPOP` | returns `None` when empty |
 | `pop_front()` | `LPOP` | returns `None` when empty |
+| `extend_back(values)`, `extend_front(values)` | `RPUSH`, `LPUSH` | return the new length. Add `.if_exists()` to push only onto an existing deque (`RPUSHX`, `LPUSHX`). |
+| `pop_front_many(n)`, `pop_back_many(n)` | Lua script | up to `n` values, atomically |
+| `remove_value(&v)`, `remove_last_value(&v)` | `LREM` | removes the equal value nearest the front or the back |
+| `to_vec()`, `drain()` | `LRANGE`, Lua script | all values; `drain` also empties the deque |
+| `pop_back_push_front(&to)` | `RPOPLPUSH` | moves the back value to the front of `to` and returns it. `to` may be this deque. |
+| `pop_front_push_back(&to)` | `LMOVE LEFT RIGHT` | moves the front value to the back of `to` and returns it |
 | `front()` and `back()` | `LINDEX` | read without removing |
+| `contains(&v)`, `position(&v)` | `LPOS` | the first equal value, counted from the front |
 | `len()` and `is_empty()` | `LLEN` | |
 | `clear()` | `DEL` | |
-| `iter()` | `LRANGE` | a stream, 100 values at a time |
+| `iter()`, `iter_rev()` | `LRANGE` | a stream from front to back, or from back to front, 100 values at a time |
 | `pop_front_wait()`, `pop_back_wait()` | `BLPOP`, `BRPOP` | wait for a value. Add `.timeout(wait)` to get `None` when `wait` runs out. |
+| `pop_front_wait_any(&[&other])`, `pop_back_wait_any(&[&other])` | `BLPOP`, `BRPOP` | wait for a value in this deque or one of the others; gives the name of the deque and the value |
+| `pop_back_push_front_wait(&to)`, `pop_front_push_back_wait(&to)` | `BRPOPLPUSH`, `BLMOVE` | like the moves above, but wait for a value |
 
 `pop_front` and `pop_back` return `None` at once when the deque is empty.
 
@@ -46,7 +55,7 @@ loop {
 
 A blocking pop first tries a normal pop. Only when the deque is empty does it open its own short-lived connection and block on that. So a waiting worker never slows down your other calls. Each element goes to exactly one worker.
 
-Use `.timeout(wait)` for a time limit. A zero timeout pops once and does not wait. Do not wrap a pop in `tokio::time::timeout`: if the future is dropped at the wrong moment, an element that Redis has just handed over is lost.
+Use `.timeout(wait)` for a time limit. As in Redisson, it is rounded down to whole seconds, and a timeout under one second waits one second. A zero timeout pops once and does not wait. In Redis Cluster the deques of `pop_front_wait_any` and `pop_back_wait_any` must share a hash slot. Do not wrap a pop in `tokio::time::timeout`: if the future is dropped at the wrong moment, an element that Redis has just handed over is lost.
 
 ## Same list as Vec
 

@@ -541,7 +541,7 @@ async fn pending_summary_of_a_fresh_group_is_empty() {
 
 // Redisson: testUpdateGroupMessageId
 #[tokio::test]
-async fn update_group_message_id_rewinds_the_group_for_rereading() {
+async fn set_group_id_rewinds_the_group_for_rereading() {
     let log = stream().await;
     let id = add(&log, &[("0", "0")]).await;
     log.create_group("testGroup", &StreamId::latest())
@@ -554,7 +554,7 @@ async fn update_group_message_id_rewinds_the_group_for_rereading() {
         .await
         .unwrap();
     assert_eq!(s.len(), 2);
-    log.update_group_message_id("testGroup", &id).await.unwrap();
+    log.set_group_id("testGroup", &id).await.unwrap();
     let s2 = log
         .read_group("testGroup", "consumer2", None)
         .await
@@ -659,12 +659,12 @@ async fn claim_moves_idle_entries_with_their_fields_to_a_consumer() {
 
 // Redisson: testAutoClaimIds
 #[tokio::test]
-async fn fast_auto_claim_returns_only_the_claimed_ids() {
+async fn auto_claim_ids_returns_only_the_claimed_ids() {
     let log = stream().await;
     let [_, _, id3, id4] = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
     let (next, ids) = log
-        .fast_auto_claim("testGroup", "consumer1", Duration::from_millis(1), &id3, 10)
+        .auto_claim_ids("testGroup", "consumer1", Duration::from_millis(1), &id3, 10)
         .await
         .unwrap();
     assert_eq!(next, StreamId::new(0, 0));
@@ -673,12 +673,12 @@ async fn fast_auto_claim_returns_only_the_claimed_ids() {
 
 // Redisson: testClaimIds
 #[tokio::test]
-async fn fast_claim_returns_only_the_claimed_ids() {
+async fn claim_ids_returns_only_the_claimed_ids() {
     let log = stream().await;
     let [_, _, id3, id4] = two_consumers(&log).await;
     sleep(Duration::from_millis(5)).await;
     let res = log
-        .fast_claim(
+        .claim_ids(
             "testGroup",
             "consumer1",
             Duration::from_millis(1),

@@ -29,6 +29,7 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 | `HashMapCache` | hash and sorted set | `RMapCache` |
 | `HashSetCache` | sorted set | `RSetCache` |
 | `Topic` | pub/sub | `RTopic` |
+| `PatternTopic` | pub/sub | `RPatternTopic` |
 | `ReliableTopic` | stream and sorted set | `RReliableTopic` |
 | `ShardedTopic` | shard pub/sub | `RShardedTopic` |
 | `Stream` | stream | `RStream` |
@@ -44,11 +45,13 @@ redissun gives you objects that live in Redis. You use them like normal Rust obj
 
 - `client.keys()` finds, counts, expires and deletes keys by name on every master, like Redisson's `RKeys`.
 - `client.batch()` sends commands of many objects in one round trip.
+- `client.script()` and `client.function()` run your own Lua scripts and Redis functions, and `client.nodes()` runs server commands on each node.
 - It uses tokio. Every call is `async`.
 - Values are turned into bytes by a codec. The default is JSON.
 - Anything that must be atomic runs as a Lua script.
 - `Lock` can be taken again by its owner, a watchdog keeps it alive, and waiting programs wake up without polling.
-- Method names follow `std` and `tokio` when they have the same method. Otherwise they follow the Redis command name.
+- Method names follow `std` and `tokio`: `insert`, `try_insert`, `entry`, `pop_front`, `to_vec`, `swap`. Optional settings such as a time limit are builder calls before `.await`. Where there is no such name, they follow the Redis command.
+- Redisson's method names are doc aliases, so searching docs.rs for `fastPut` or `getAndSet` finds the redissun method.
 
 ## Requirements
 

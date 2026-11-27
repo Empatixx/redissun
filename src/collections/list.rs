@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::{stream, Stream, TryStreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::ops::{Bound, RangeBounds};
 use std::sync::LazyLock;
 
 const PAGE: i64 = 100;
@@ -18,15 +19,6 @@ static DRAIN: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
         "local vals = redis.call('lrange', KEYS[1], 0, -1)
         redis.call('del', KEYS[1])
-        return vals",
-    )
-});
-
-static DRAIN_UP_TO: LazyLock<Lua> = LazyLock::new(|| {
-    Lua::from_lua(
-        "local elemNum = math.min(ARGV[1], redis.call('llen', KEYS[1])) - 1
-        local vals = redis.call('lrange', KEYS[1], 0, elemNum)
-        redis.call('ltrim', KEYS[1], elemNum + 1, -1)
         return vals",
     )
 });
@@ -44,6 +36,25 @@ fn pop_many_script(command: &str) -> Lua {
         end
         return result"
     ))
+}
+
+/// The inclusive `start` and `stop` indexes Redis takes (`LRANGE`, `ZRANGE`, ...) for a Rust index range, `-1` for an open end. `None` when the range is empty.
+pub(crate) fn bounds(range: impl RangeBounds<usize>) -> Option<(i64, i64)> {
+    let start = match range.start_bound() {
+        Bound::Included(&start) => start,
+        Bound::Excluded(&start) => start.checked_add(1)?,
+        Bound::Unbounded => 0,
+    };
+    let stop = match range.end_bound() {
+        Bound::Included(&end) => Some(end),
+        Bound::Excluded(&end) => Some(end.checked_sub(1)?),
+        Bound::Unbounded => None,
+    };
+    if stop.is_some_and(|stop| start > stop) {
+        return None;
+    }
+    let clamp = |index: usize| i64::try_from(index).unwrap_or(i64::MAX);
+    Some((clamp(start), stop.map_or(-1, clamp)))
 }
 
 pub(crate) fn decode_all<V, C>(codec: &C, raw: &[Bytes]) -> Result<Vec<V>>
@@ -94,28 +105,15 @@ where
     decode_all(codec, &raw)
 }
 
-pub(crate) async fn drain<V, C>(key: &Key, codec: &C, max: Option<usize>) -> Result<Vec<V>>
+pub(crate) async fn drain<V, C>(key: &Key, codec: &C) -> Result<Vec<V>>
 where
     V: DeserializeOwned,
     C: Codec,
 {
-    let raw: Vec<Bytes> = match max {
-        None => {
-            key.core
-                .eval(&DRAIN, vec![key.redis_key()], Vec::new())
-                .await?
-        }
-        Some(0) => Vec::new(),
-        Some(max) => {
-            key.core
-                .eval(
-                    &DRAIN_UP_TO,
-                    vec![key.redis_key()],
-                    vec![Bytes::from(max.to_string())],
-                )
-                .await?
-        }
-    };
+    let raw: Vec<Bytes> = key
+        .core
+        .eval(&DRAIN, vec![key.redis_key()], Vec::new())
+        .await?;
     decode_all(codec, &raw)
 }
 

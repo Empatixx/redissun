@@ -49,11 +49,11 @@ impl Number for i64 {
     const ONE: Self = 1;
 
     async fn push(key: Key, value: Self) -> Result<()> {
-        AtomicI64::new(key).add_and_get(value).await.map(drop)
+        AtomicI64::new(key).add(value).await.map(drop)
     }
 
     async fn take(key: Key) -> Result<Self> {
-        AtomicI64::new(key).get_and_delete().await
+        AtomicI64::new(key).take().await
     }
 }
 
@@ -61,11 +61,11 @@ impl Number for f64 {
     const ONE: Self = 1.0;
 
     async fn push(key: Key, value: Self) -> Result<()> {
-        AtomicF64::new(key).add_and_get(value).await.map(drop)
+        AtomicF64::new(key).add(value).await.map(drop)
     }
 
     async fn take(key: Key) -> Result<Self> {
-        AtomicF64::new(key).get_and_delete().await
+        AtomicF64::new(key).take().await
     }
 }
 
@@ -224,8 +224,8 @@ impl<N: Summable> Adder<N> {
             .await?;
         let semaphore = Semaphore::new(part(key, &id, "semaphore"));
         let answered = match wait {
-            Some(wait) => semaphore.acquire(listeners).timeout(wait).await?,
-            None => Some(semaphore.acquire(listeners).await?),
+            Some(wait) => semaphore.acquire_many(listeners).timeout(wait).await?,
+            None => Some(semaphore.acquire_many(listeners).await?),
         };
         let Some(permits) = answered else {
             return Ok(None);

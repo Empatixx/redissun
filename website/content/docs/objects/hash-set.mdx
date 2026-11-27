@@ -19,18 +19,28 @@ Two values are equal when the codec turns them into the same bytes. See [Limitat
 | Method | Redis command | Notes |
 |---|---|---|
 | `insert(&v)` | `SADD` | `true` if the value was new |
-| `extend(values)` | `SADD` | one request. An empty list does nothing. |
+| `extend(values)` | `SADD` | one request; how many were new. An empty list does nothing. |
+| `try_extend(values)` | Lua script | adds all values only when none of them is in the set yet; returns whether it did |
 | `remove(&v)` | `SREM` | `true` if the value was there |
+| `remove_many(&[&v])` | `SREM` | how many were there |
+| `retain(&[&v])` | Lua script | keeps only the given values; returns whether the set changed |
 | `contains(&v)` | `SISMEMBER` | |
 | `contains_many(&[&v])` | `SMISMEMBER` | same order as the values |
+| `contains_all(&[&v])` | `SMISMEMBER` | `true` if every value is there; an empty list gives `true` |
 | `len()` and `is_empty()` | `SCARD` | |
 | `clear()` | `DEL` | |
 | `pop()` | `SPOP` | removes and returns a random value |
+| `pop_many(n)` | `SPOP` | removes and returns up to `n` random values |
 | `random()` | `SRANDMEMBER` | returns a random value, keeps it |
+| `random_many(n)` | `SRANDMEMBER` | up to `n` different random values |
 | `move_to(&other, &v)` | `SMOVE` | `true` if the value was there |
 | `union(&[&other])` | `SUNION` | returns a `Vec` |
 | `intersection(&[&other])` | `SINTER` | returns a `Vec` |
 | `difference(&[&other])` | `SDIFF` | returns a `Vec` |
+| `intersection_len(&[&other], limit)` | `SINTERCARD` | size of the intersection, counting stops at `limit` unless it is 0. Redis 7.0 or newer. |
+| `store_union(&[&a, &b])` | `SUNIONSTORE` | replaces this set with the union of the sources; returns the new size |
+| `store_intersection(&[&a, &b])` | `SINTERSTORE` | the same with the intersection |
+| `store_difference(&[&a, &b])` | `SDIFFSTORE` | the same with the values of the first source that are in none of the others |
 
 A set that does not exist counts as an empty set.
 
@@ -46,4 +56,4 @@ let all: Vec<String> = tags.iter().try_collect().await?;
 
 ## Redis Cluster
 
-`union`, `intersection`, `difference` and `move_to` use more than one key. In Redis Cluster all the sets must be in the same hash slot. Give them the same hash tag, for example `{team}:a` and `{team}:b`. Otherwise Redis returns an error.
+`union`, `intersection`, `difference`, `intersection_len`, the `store_*` methods and `move_to` use more than one key. In Redis Cluster all the sets must be in the same hash slot. Give them the same hash tag, for example `{team}:a` and `{team}:b`. Otherwise Redis returns an error.

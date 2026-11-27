@@ -49,10 +49,10 @@ async fn a_subscriber_gets_what_is_published() {
 #[tokio::test]
 async fn subscribers_of_one_client_share_a_connection() {
     let topic = client().await.sharded_topic::<u32>(unique("shared"));
-    assert_eq!(topic.listener_count(), 0);
+    assert_eq!(topic.local_subscriber_count().await, 0);
     let mut first = topic.subscribe().await.unwrap();
     let mut second = topic.clone().subscribe().await.unwrap();
-    assert_eq!(topic.listener_count(), 2);
+    assert_eq!(topic.local_subscriber_count().await, 2);
     assert_eq!(topic.subscriber_count().await.unwrap(), 1);
     assert_eq!(topic.publish(&7).await.unwrap(), 1);
     assert_eq!(timeout(WAIT, first.recv()).await.unwrap().unwrap(), 7);
@@ -73,22 +73,22 @@ async fn dropping_the_last_subscriber_unsubscribes() {
     let first = topic.subscribe().await.unwrap();
     let second = topic.subscribe().await.unwrap();
     drop(first);
-    assert_eq!(topic.listener_count(), 1);
+    assert_eq!(topic.local_subscriber_count().await, 1);
     assert_eq!(topic.subscriber_count().await.unwrap(), 1);
     drop(second);
-    assert_eq!(topic.listener_count(), 0);
+    assert_eq!(topic.local_subscriber_count().await, 0);
     eventually_no_subscriber(&topic).await;
     assert_eq!(topic.publish("nobody").await.unwrap(), 0);
 }
 
 #[tokio::test]
-async fn remove_all_listeners_ends_the_subscribers() {
+async fn unsubscribe_all_ends_the_subscribers() {
     let topic = client().await.sharded_topic::<String>(unique("removed"));
     let mut subscriber = topic.subscribe().await.unwrap();
     topic.publish("before").await.unwrap();
     sleep(Duration::from_millis(100)).await;
-    topic.remove_all_listeners();
-    assert_eq!(topic.listener_count(), 0);
+    topic.unsubscribe_all().await;
+    assert_eq!(topic.local_subscriber_count().await, 0);
     assert_eq!(
         timeout(WAIT, subscriber.recv()).await.unwrap().unwrap(),
         "before"

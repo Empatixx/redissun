@@ -33,7 +33,7 @@ pub(crate) struct Registry {
 /// redis-rs sends `SSUBSCRIBE` as a plain command, whose confirmation is its reply, but cannot match the confirmation of a plain `SUNSUBSCRIBE` to its request. So a channel has a connection of its own, and it unsubscribes by closing it.
 struct Channel {
     name: String,
-    /// The messages; `None` ends the subscribers, after `remove_all_listeners`.
+    /// The messages; `None` ends the subscribers, after `unsubscribe_all`.
     messages: broadcast::Sender<Option<Bytes>>,
     task: JoinHandle<()>,
     node: Arc<Mutex<Option<Arc<Node>>>>,
@@ -248,12 +248,14 @@ impl<M, C: Codec> ShardedTopic<M, C> {
     }
 
     /// Number of [`ShardedSubscriber`]s of this topic in this client, Redisson's `countListeners`.
-    pub fn listener_count(&self) -> usize {
+    #[doc(alias = "countListeners")]
+    pub async fn local_subscriber_count(&self) -> usize {
         self.key.core.sharded.listeners(self.key.name())
     }
 
     /// Ends every [`ShardedSubscriber`] of this topic in this client and unsubscribes, Redisson's `removeAllListeners`. Their `recv` fails once the messages already received are read.
-    pub fn remove_all_listeners(&self) {
+    #[doc(alias = "removeAllListeners")]
+    pub async fn unsubscribe_all(&self) {
         let channel = lock(&self.key.core.sharded.channels)
             .remove(self.key.name())
             .and_then(|channel| channel.upgrade());

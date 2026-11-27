@@ -19,10 +19,10 @@ let message = subscriber.recv().await?;
 |---|---|
 | `publish(&m)` | returns how many subscribers the topic has |
 | `subscribe()` | returns a `ReliableSubscriber` with `recv()` and `into_stream()` |
-| `size()` | the messages in the stream, read or not |
+| `len()` | the messages in the stream, read or not |
 | `subscriber_count()` | the subscribers in all programs |
-| `listener_count()` | the `ReliableSubscriber`s of this handle |
-| `remove_all_listeners()` | ends the subscribers of this handle and removes it |
+| `local_subscriber_count()` | the `ReliableSubscriber`s of this handle |
+| `unsubscribe_all()` | ends the subscribers of this handle and removes it |
 
 ## Subscribers
 
