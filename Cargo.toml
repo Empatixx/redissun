@@ -56,3 +56,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [[bench]]
 name = "compare"
 harness = false
+
+# Keep target/ small: tests build ~50 binaries per feature set, and full debug info
+# plus incremental caches grew target/ to hundreds of GB. Line tables keep backtraces.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
