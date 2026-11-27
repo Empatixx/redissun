@@ -110,7 +110,7 @@ The `Object` methods cover the hash and the list of every key, with Redisson's s
 | `rename(new)` | `rename` | renames the hash and every list; fails when the multimap does not exist |
 | `exists()`, `ttl()` | `isExists`, `remainTimeToLive` | read the hash |
 
-The scripts name the lists from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`.
+The scripts name the lists from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`, or `a` to `{a}2`. Every other method runs on a cluster: the values keys share the slot of the name.
 
 ## CacheNative
 
@@ -142,4 +142,4 @@ Redisson's layout:
 - A hash at the name maps each encoded key to `Hash.hash128toBase64` of the encoded key (a 22-character string, stored as is, not encoded). With `JsonCodec` the key `"key"` maps to `IKm9EBQhlzpVIBxUXDHBWw`.
 - The values of a key live in the list `{name}:<hash>`, or `name:<hash>` when the name already has a `{`. So every key of the multimap is in the slot of the name, also in a cluster.
 
-`remove_from_all_keys` and the index writes of the handle never remove a key from the hash, as in Redisson, so a key whose list it emptied still counts in `key_len` and `keys_to_vec` until `remove_all` or `remove_many`; `contains_key` is `false` and `get_all` is empty for it.
+`remove_from_all_keys` and the index writes of the handle never remove a key from the hash, as in Redisson, so a key whose list they emptied still counts in `key_len` and `keys_to_vec` until `remove_all` or `remove_many`; `contains_key` is `false` and `get_all` is empty for it.

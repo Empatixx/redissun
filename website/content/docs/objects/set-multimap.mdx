@@ -110,7 +110,7 @@ The `Object` methods cover the hash and the set of every key, with Redisson's sc
 | `rename(new)` | `rename` | renames the hash and every set; fails when the multimap does not exist |
 | `exists()`, `ttl()` | `isExists`, `remainTimeToLive` | read the hash |
 
-The scripts name the sets from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`.
+The scripts name the sets from the hash, so in a cluster `rename` works only to a name in the same slot, for example `{t}:a` to `{t}:b`, or `a` to `{a}2`. Every other method runs on a cluster: the values keys share the slot of the name.
 
 ## CacheNative
 

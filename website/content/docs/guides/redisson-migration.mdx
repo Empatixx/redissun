@@ -499,7 +499,8 @@ Every `RMap` method works as on `HashMap`; the table lists the rest.
 | `get(k).delete()` | `clear()` |
 | `get(k).readAll()`, `size()`, `contains(v)`, `containsAll(c)`, `iterator()` | `to_vec()`, `len()`, `contains(&v)`, `contains_all(..)`, `iter()` |
 | `get(k).get(i)`, `range(..)`, `indexOf(v)`, `lastIndexOf(v)` (list) | `get(i)`, `range(r)`, `position(&v)`, `rposition(&v)` |
-| `addListener(MapPutListener / MapRemoveListener / ListAddListener / ListRemoveListener / SetAddListener / SetRemoveListener / DeletedObjectListener / ExpiredObjectListener)` | `events()` or `events_of(&[MultimapEventKind::Put, ..])` → `MultimapEvents`; dropping it is `removeListener` |
+| `addListener(MapPutListener / MapRemoveListener / ListAddListener / ListRemoveListener / SetAddListener / SetRemoveListener / DeletedObjectListener / ExpiredObjectListener)`, `addListenerAsync(..)` | `events()` or `events_of(&[MultimapEventKind::Put, ..])` → `MultimapEvents` |
+| `removeListener(id)` | drop the `MultimapEvents` |
 | other `RList` / `RSet` methods on `get(k)` | `as_vec()` / `as_set()`, the raw `Vec` / `HashSet`; writes through it do not update the key index |
 
 ## LocalCachedMap

@@ -662,3 +662,224 @@ async fn events_of_nothing_is_a_config_error() {
         Err(redissun::Error::Config(_))
     ));
 }
+
+// --- Ports of the rest of Redisson's RedissonListMultimapTest ---
+//
+// Not ported: testSizeInMemory (redissun has no `sizeInMemory`), testDistributedIterator (redissun's `Vec` has no distributed iterator).
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SimpleKey {
+    key: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SimpleValue {
+    value: String,
+}
+
+fn sk(key: &str) -> SimpleKey {
+    SimpleKey {
+        key: key.to_string(),
+    }
+}
+
+fn sv(value: &str) -> SimpleValue {
+    SimpleValue {
+        value: value.to_string(),
+    }
+}
+
+fn svs(values: &[&str]) -> Vec<SimpleValue> {
+    values.iter().map(|v| sv(v)).collect()
+}
+
+async fn simple(name: &str) -> ListMultimap<SimpleKey, SimpleValue, JsonCodec> {
+    client().await.list_multimap(name.to_string())
+}
+
+fn list_on(client: &redissun::Client, name: &str) -> ListMultimap<String, String, JsonCodec> {
+    client.list_multimap(name.to_string())
+}
+
+#[tokio::test]
+async fn redisson_read_all_key_set() {
+    let map = list(&unique("test1")).await;
+    map.insert("1", "4").await.unwrap();
+    map.insert("2", "5").await.unwrap();
+    map.insert("3", "6").await.unwrap();
+    assert_eq!(map.keys_to_vec().await.unwrap(), ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn redisson_size() {
+    let map = simple(&unique("test1")).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    map.insert(&sk("0"), &sv("2")).await.unwrap();
+    map.insert(&sk("1"), &sv("4")).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 3);
+    assert_eq!(map.remove_many(&[&sk("0")]).await.unwrap(), 1);
+    assert!(map
+        .get(&sk("0"))
+        .unwrap()
+        .to_vec()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(map.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn redisson_key_size() {
+    let map = simple(&unique("test1")).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    map.insert(&sk("0"), &sv("2")).await.unwrap();
+    map.insert(&sk("1"), &sv("4")).await.unwrap();
+    assert_eq!(map.key_len().await.unwrap(), 2);
+    assert_eq!(map.remove_many(&[&sk("0")]).await.unwrap(), 1);
+    assert!(map
+        .get(&sk("0"))
+        .unwrap()
+        .to_vec()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(map.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn redisson_put() {
+    let map = simple(&format!("{{{}}}.some.key", unique("multi.map"))).await;
+    for v in ["1", "2", "3", "3"] {
+        map.insert(&sk("0"), &sv(v)).await.unwrap();
+    }
+    map.insert(&sk("3"), &sv("4")).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 5);
+    let want = svs(&["1", "2", "3", "3"]);
+    assert_eq!(map.get(&sk("0")).unwrap().to_vec().await.unwrap(), want);
+    assert_eq!(map.get_all(&sk("0")).await.unwrap(), want);
+    assert_eq!(
+        map.get(&sk("3")).unwrap().to_vec().await.unwrap(),
+        svs(&["4"])
+    );
+}
+
+#[tokio::test]
+async fn redisson_remove_all_from_collection() {
+    let map = simple(&unique("test1")).await;
+    for v in ["1", "2", "3"] {
+        map.insert(&sk("0"), &sv(v)).await.unwrap();
+    }
+    let values = map.get(&sk("0")).unwrap();
+    assert!(values.remove_values(&svs(&["1", "2"])).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 1);
+    assert!(values.remove_values(&svs(&["3"])).await.unwrap());
+    assert_eq!(values.len().await.unwrap(), 0);
+    assert!(!values.remove_values(&svs(&["3"])).await.unwrap());
+}
+
+#[tokio::test]
+async fn redisson_remove_all() {
+    let map = list(&unique("test1")).await;
+    for v in ["1", "1", "2", "3"] {
+        map.insert("0", v).await.unwrap();
+    }
+    let set = map.get("0").unwrap();
+    set.remove_values(["4", "5"]).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 4);
+    set.remove_values(["3"]).await.unwrap();
+    assert_eq!(map.len().await.unwrap(), 3);
+    assert_eq!(map.remove_all("0").await.unwrap(), ["1", "1", "2"]);
+    assert_eq!(map.len().await.unwrap(), 0);
+    assert!(map.remove_all("0").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn redisson_fast_remove() {
+    let map = simple(&unique("test1")).await;
+    for v in ["1", "2", "2", "3"] {
+        assert!(map.insert(&sk("0"), &sv(v)).await.unwrap());
+    }
+    assert_eq!(map.remove_many(&[&sk("0"), &sk("1")]).await.unwrap(), 1);
+    assert_eq!(map.len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn redisson_contains_key() {
+    let map = simple(&unique("test1")).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    assert!(map.contains_key(&sk("0")).await.unwrap());
+    assert!(!map.contains_key(&sk("1")).await.unwrap());
+}
+
+#[tokio::test]
+async fn redisson_contains_value() {
+    let map = simple(&format!("{{1}}{}", unique("test1"))).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    assert!(map.contains_value(&sv("1")).await.unwrap());
+    assert!(!map.contains_value(&sv("0")).await.unwrap());
+}
+
+#[tokio::test]
+async fn redisson_contains_entry() {
+    let map = simple(&unique("test1")).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    assert!(map.contains_entry(&sk("0"), &sv("1")).await.unwrap());
+    assert!(!map.contains_entry(&sk("0"), &sv("2")).await.unwrap());
+}
+
+#[tokio::test]
+async fn redisson_remove() {
+    let map = simple(&unique("test1")).await;
+    for v in ["1", "2", "3"] {
+        map.insert(&sk("0"), &sv(v)).await.unwrap();
+    }
+    assert!(map.remove(&sk("0"), &sv("2")).await.unwrap());
+    assert!(!map.remove(&sk("0"), &sv("5")).await.unwrap());
+    assert_eq!(map.get(&sk("0")).unwrap().len().await.unwrap(), 2);
+    assert_eq!(map.get_all(&sk("0")).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn redisson_put_all() {
+    let map = simple(&unique("test1")).await;
+    assert!(map
+        .extend(&sk("0"), &svs(&["1", "2", "3", "3"]))
+        .await
+        .unwrap());
+    assert!(map.extend(&sk("0"), &svs(&["1"])).await.unwrap());
+    assert_eq!(
+        map.get(&sk("0")).unwrap().to_vec().await.unwrap(),
+        svs(&["1", "2", "3", "3", "1"])
+    );
+}
+
+#[tokio::test]
+async fn redisson_replace_values() {
+    let map = simple(&unique("test1")).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    map.insert(&sk("3"), &sv("4")).await.unwrap();
+    let values = svs(&["11", "12", "12"]);
+    assert_eq!(
+        map.replace_values(&sk("0"), &values).await.unwrap(),
+        svs(&["1"])
+    );
+    assert_eq!(map.get_all(&sk("0")).await.unwrap(), values);
+    let none: [SimpleValue; 0] = [];
+    assert_eq!(map.replace_values(&sk("0"), &none).await.unwrap(), values);
+    assert!(map.get_all(&sk("0")).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn redisson_fast_replace_values() {
+    let map = simple(&unique("testFastReplace")).await;
+    map.insert(&sk("0"), &sv("1")).await.unwrap();
+    map.insert(&sk("3"), &sv("4")).await.unwrap();
+    let values = svs(&["11", "12", "12"]);
+    map.set_values(&sk("0"), &values).await.unwrap();
+    assert_eq!(map.get_all(&sk("0")).await.unwrap(), values);
+    let none: [SimpleValue; 0] = [];
+    map.set_values(&sk("0"), &none).await.unwrap();
+    assert!(map.get_all(&sk("0")).await.unwrap().is_empty());
+}
+
+every_operation_runs_on_a_cluster!(list_on);

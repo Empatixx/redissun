@@ -139,6 +139,7 @@ macro_rules! native_tests {
 mod list {
     base_multimap_cache_tests!(super::list_native);
     native_tests!(super::list_native);
+    every_operation_runs_on_a_cluster!(super::list_native, expire_key);
 
     // Redisson: RedissonListMultimapCacheNativeTest.testValues
     #[tokio::test]
@@ -165,6 +166,7 @@ mod list {
 mod set {
     base_multimap_cache_tests!(super::set_native);
     native_tests!(super::set_native);
+    every_operation_runs_on_a_cluster!(super::set_native, expire_key);
 
     // Redisson: RedissonSetMultimapCacheNativeTest.testValues
     #[tokio::test]
