@@ -22,7 +22,7 @@ use crate::eviction::{self, KEYS_LIMIT};
 use crate::lua::Lua;
 use crate::object::{millis, now_millis, HasKey, Key};
 use bytes::Bytes;
-use futures::{stream, Stream, TryStreamExt};
+use futures::{stream, Stream, StreamExt, TryStreamExt};
 use scripts::{
     ADD_AND_GET, CLEAR_EXPIRE, CONTAINS_KEY, CONTAINS_VALUE, EVICT, EXPIRE, FAST_PUT_WITH_LIMITS,
     FAST_REMOVE, FAST_REMOVE_BATCH, GET, GET_ALL, GET_ALL_WITH_TTL_ONLY, GET_WITH_TTL_ONLY, PUT,
