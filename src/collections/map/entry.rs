@@ -104,8 +104,16 @@ where
     V: Serialize + DeserializeOwned + Send + Sync,
     C: Codec,
 {
+    /// Writes the value, hands it to the writer, then releases the lock.
     async fn write(self, value: &V) -> Result<()> {
-        let body = self.target.write(&self.key, value).await;
+        let body = async {
+            self.target.write(&self.key, value).await?;
+            match self.target.store() {
+                Some(store) => store.written_value(&self.key, value).await,
+                None => Ok(()),
+            }
+        }
+        .await;
         self.lock.release(body).await
     }
 }
@@ -200,7 +208,15 @@ where
 
     /// Removes the entry and returns its value. Releases the lock.
     pub async fn remove(self) -> Result<V> {
-        let body = self.held.target.delete(&self.held.key).await;
+        let held = &self.held;
+        let body = async {
+            held.target.delete(&held.key).await?;
+            match held.target.store() {
+                Some(store) => store.deleted(std::slice::from_ref(&held.key)).await,
+                None => Ok(()),
+            }
+        }
+        .await;
         self.held.lock.release(body).await?;
         Ok(self.value)
     }

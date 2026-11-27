@@ -1,9 +1,9 @@
 ---
 title: Loaders and writers
-description: Read-through from another store with a MapLoader, and load_all.
+description: Read-through with a MapLoader and write-through with a MapWriter.
 ---
 
-A map can sit in front of another store, such as a SQL database. A `MapLoader` fills the map on a miss: read-through. This is Redisson's `MapOptions` with a `MapLoader` or a `MapLoaderAsync`; redissun has one trait for both.
+A map can sit in front of another store, such as a SQL database. A `MapLoader` fills the map on a miss: read-through. A `MapWriter` hands every change of the map to the store: write-through. This is Redisson's `MapOptions`; redissun has one trait for `MapLoader` and `MapLoaderAsync`, and one for `MapWriter` and `MapWriterAsync`.
 
 ## A loader
 
@@ -79,3 +79,63 @@ users.load_many(&["jirka", "petr"]).replace_existing().await?;
 | `.replace_existing()` | keys the map holds keep their value | `replaceExistingValues = true` |
 
 Each key is loaded as a miss is, under its lock. The load stops at the first error. Without a loader, or with `parallelism(0)`, it is an `Error::Config`.
+
+## A writer
+
+Implement `MapWriter` with plain `async fn`s and give it to the builder with `.writer(w)`. A map can have a loader and a writer, also the same value for both.
+
+```rust
+use redissun::{BoxError, MapWriter};
+
+impl MapWriter<String, User> for Users {
+    async fn write(&self, entries: &[(String, User)]) -> Result<(), BoxError> {
+        for (id, user) in entries {
+            sqlx::query("INSERT INTO users VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2")
+                .bind(id)
+                .bind(&user.name)
+                .execute(&self.0)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, keys: &[String]) -> Result<(), BoxError> {
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(keys)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+}
+```
+
+The keys within one call are unique and keep the order of the map call.
+
+## When the writer is called
+
+| Method | Writer call | When |
+|---|---|---|
+| `insert`, `set` | `write([(k, v)])` | always |
+| `try_insert` | `write([(k, v)])` | it stored the value |
+| `replace` | `write([(k, v)])` | the key was present |
+| `compare_and_set` | `write([(k, new)])` | it returned `true` |
+| `incr_by`, `incr_by_float` | `write([(k, new value)])` | always; the new number decoded as `V` |
+| `remove` | `delete([k])` | always, also for a missing key, as in Redisson |
+| `remove_if_eq` | `delete([k])` | it returned `true` |
+| `remove_many` | `delete(removed keys)` | at least one key was removed |
+| `extend` | `write(batch)` | once per `.batch_size(n)` batch |
+| `entry(&k)` writes | `write([(k, v)])` or `delete([k])` | the entry writes or removes, under its lock |
+| `clear`, `del`, loaded values | none | |
+
+`remove_many` with a writer runs Redisson's `fastRemoveOperationBatchAsync` script to learn which keys it removed. Redisson calls `delete([])` when none was removed; redissun calls nothing.
+
+## Write-through
+
+Redis changes first, then the writer is called, as in Redisson. If the writer still fails after its attempts, the call returns `Err(Error::Writer(_))` with the writer's error as the source, and Redis keeps the change.
+
+| Option | Default | Redisson |
+|---|---|---|
+| `.writer_retry_attempts(n)` | 1: the writer is called at most `n` times for one change | `writerRetryAttempts` (Redisson's `0` is one call) |
+| `.writer_retry_interval(d)` | 100 ms between two calls | `writerRetryInterval` |
+
+`writer_retry_attempts(0)` is an `Error::Config` at `build()`. Each failed attempt but the last is logged at `warn` with the map name.

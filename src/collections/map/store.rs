@@ -116,7 +116,6 @@ where
 }
 
 /// The object-safe twin of [`MapWriter`].
-#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 pub(crate) trait ErasedWriter<K, V>: Send + Sync {
     fn write<'a>(
         &'a self,
@@ -239,7 +238,6 @@ impl<K, V> StoreOptions<K, V> {
 }
 
 /// The loader and writer of one map. The map tells it what it did in encoded form, and it decodes the entries for the user's types.
-#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 pub(crate) struct Store<K, V, C: Codec> {
     key: Key,
     codec: C,
@@ -255,9 +253,12 @@ impl<K, V, C: Codec> Store<K, V, C> {
     pub(crate) fn has_loader(&self) -> bool {
         self.loader.is_some()
     }
+
+    pub(crate) fn has_writer(&self) -> bool {
+        self.writer.is_some()
+    }
 }
 
-#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 impl<K, V, C> Store<K, V, C>
 where
     K: Serialize + DeserializeOwned + Send + Sync,
@@ -290,6 +291,14 @@ where
 
     pub(crate) fn encode_key(&self, k: &K) -> Result<Bytes> {
         self.codec.encode(k)
+    }
+
+    /// The map stored `v` under the encoded key `k`, from a value it holds decoded.
+    pub(crate) async fn written_value(&self, k: &Bytes, v: &V) -> Result<()> {
+        if self.writer.is_none() {
+            return Ok(());
+        }
+        self.written(&[(k.clone(), self.codec.encode(v)?)]).await
     }
 
     /// The map stored these encoded entries.
@@ -341,7 +350,6 @@ where
 }
 
 /// Calls `call` up to `attempts` times (at least once), `interval` apart, and returns the last error: Redisson's `RetryableMapWriterAsync`.
-#[allow(dead_code)] // The maps call the writer from the write-through commit on.
 pub(crate) async fn retry<F, Fut>(
     attempts: usize,
     interval: Duration,

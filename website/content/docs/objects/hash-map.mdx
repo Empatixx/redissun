@@ -96,13 +96,16 @@ Entries for the same key taken in one program, even by futures joined in one tas
 | Option | Default | Redisson |
 |---|---|---|
 | `.loader(l)` | none | `MapOptions.loader`, `loaderAsync` |
+| `.writer(w)` | none | `MapOptions.writer`, `writerAsync` |
+| `.writer_retry_attempts(n)` | 1 | `writerRetryAttempts` |
+| `.writer_retry_interval(d)` | 100 ms | `writerRetryInterval` |
 
 | Method | Notes |
 |---|---|
 | `load_all()` | loads every key of the loader; `.parallelism(n)`, `.replace_existing()` |
 | `load_many(&[&k])` | loads those keys |
 
-With a loader, `get`, `get_many`, `contains_key` and `entry` ask it on a miss.
+With a loader, `get`, `get_many`, `contains_key` and `entry` ask it on a miss. With a writer, every write and remove calls it after Redis changed; `clear` and `del` do not. A writer that still fails returns `Error::Writer`, and Redis keeps the change.
 
 ## Missing keys and null values
 

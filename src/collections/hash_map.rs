@@ -77,6 +77,18 @@ static REMOVE_IF: LazyLock<Lua> = LazyLock::new(|| {
     )
 });
 
+/// RedissonMap.fastRemoveOperationBatchAsync: one `0`/`1` per key, for the writer to get the removed keys.
+static FAST_REMOVE_BATCH: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        "local result = {}; \
+        for i = 1, #ARGV, 1 do \
+        local val = redis.call('hdel', KEYS[1], ARGV[i]); \
+        table.insert(result, val); \
+        end;\
+        return result;",
+    )
+});
+
 static CONTAINS_VALUE: LazyLock<Lua> = LazyLock::new(|| {
     Lua::from_lua(
         "local values = redis.call('HVALS', KEYS[1])
@@ -145,6 +157,11 @@ impl<K, V, C: Codec> HashMap<K, V, C> {
     fn loads(&self) -> bool {
         self.store.as_ref().is_some_and(|store| store.has_loader())
     }
+
+    /// The store when it has a writer; `None` skips every writer call.
+    fn writer(&self) -> Option<&Store<K, V, C>> {
+        self.store.as_deref().filter(|store| store.has_writer())
+    }
 }
 
 /// Sets up a [`HashMap`] with a [`MapLoader`](crate::MapLoader) or a [`MapWriter`](crate::MapWriter), Redisson's `getMap(name, MapOptions)`. Get one from [`Client::hash_map_builder`](crate::Client::hash_map_builder), set its options, then `.build().await`.
@@ -199,6 +216,22 @@ where
         raw.map(|bytes| self.codec.decode(&bytes)).transpose()
     }
 
+    /// Hands a stored entry to the writer, if there is one.
+    async fn written(&self, k: Bytes, v: Bytes) -> Result<()> {
+        match self.writer() {
+            Some(store) => store.written(&[(k, v)]).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Hands a removed key to the writer, if there is one.
+    async fn deleted(&self, k: Bytes) -> Result<()> {
+        match self.writer() {
+            Some(store) => store.deleted(&[k]).await,
+            None => Ok(()),
+        }
+    }
+
     /// The value of `k`, taken under the key's lock to read and change it, like [`std::collections::hash_map::Entry`]: Redisson's `compute`, `computeIfAbsent`, `computeIfPresent` and `merge`.
     ///
     /// The lock is the one [`lock`](HashMap::lock) returns, the lock Redisson's compute family takes, so programs do not change the key at once. Calls for the same key from this client wait for each other, also futures joined in one task: while you hold an entry, taking another one for the same key in the same task waits forever.
@@ -239,7 +272,7 @@ where
 
     per_key_objects!();
 
-    /// Inserts an entry and returns the value it replaced. The key and value are borrowed: `map.insert("a", &value)`.
+    /// Inserts an entry and returns the value it replaced. The key and value are borrowed: `map.insert("a", &value)`. With a writer, the entry is written after Redis stored it.
     pub async fn insert<Q, W>(&self, k: &Q, v: &W) -> Result<Option<V>>
     where
         K: Borrow<Q>,
@@ -247,15 +280,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
         let previous: Option<Bytes> = self
             .key
             .core
             .eval(
                 &INSERT,
                 vec![self.key.redis_key()],
-                vec![self.codec.encode(k)?, self.codec.encode(v)?],
+                vec![k.clone(), v.clone()],
             )
             .await?;
+        self.written(k, v).await?;
         self.decode_value(previous)
     }
 
@@ -281,21 +316,19 @@ where
         }
     }
 
-    /// Removes the entry and returns its value.
+    /// Removes the entry and returns its value. With a writer, the key is deleted from the store also when the map did not have it, as in Redisson.
     pub async fn remove<Q>(&self, k: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let k = self.codec.encode(k)?;
         let previous: Option<Bytes> = self
             .key
             .core
-            .eval(
-                &REMOVE,
-                vec![self.key.redis_key()],
-                vec![self.codec.encode(k)?],
-            )
+            .eval(&REMOVE, vec![self.key.redis_key()], vec![k.clone()])
             .await?;
+        self.deleted(k).await?;
         self.decode_value(previous)
     }
 
@@ -435,16 +468,21 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
+        let k = self.codec.encode(k)?;
         let value: i64 = self
             .key
             .query_once({
                 let mut cmd = redis::cmd("HINCRBY");
                 cmd.arg(self.key.redis_key());
-                cmd.arg(&self.codec.encode(k)?[..]);
+                cmd.arg(&k[..]);
                 cmd.arg(delta);
                 cmd
             })
             .await?;
+        // The writer gets the new number as `get` would return it.
+        if self.writer().is_some() {
+            self.written(k, Bytes::from(value.to_string())).await?;
+        }
         Ok(value)
     }
 
@@ -454,16 +492,24 @@ where
         K: Borrow<Q>,
         Q: Serialize + ?Sized + Sync,
     {
-        let value: f64 = self
-            .key
-            .query_once({
-                let mut cmd = redis::cmd("HINCRBYFLOAT");
-                cmd.arg(self.key.redis_key());
-                cmd.arg(&self.codec.encode(k)?[..]);
-                cmd.arg(delta);
-                cmd
-            })
-            .await?;
+        let k = self.codec.encode(k)?;
+        let mut cmd = redis::cmd("HINCRBYFLOAT");
+        cmd.arg(self.key.redis_key());
+        cmd.arg(&k[..]);
+        cmd.arg(delta);
+        if self.writer().is_none() {
+            let value: f64 = self.key.query_once(cmd).await?;
+            return Ok(value);
+        }
+        // The writer gets the reply's text, the bytes `get` would decode.
+        let reply: Bytes = self.key.query_once(cmd).await?;
+        let value = std::str::from_utf8(&reply)
+            .ok()
+            .and_then(|text| text.parse::<f64>().ok())
+            .ok_or_else(|| {
+                crate::error::Error::Redis("HINCRBYFLOAT did not return a number".into())
+            })?;
+        self.written(k, reply).await?;
         Ok(value)
     }
 
@@ -494,15 +540,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
         let added: i64 = self
             .key
             .query({
                 let mut cmd = redis::cmd("HSET");
                 cmd.arg(self.key.redis_key());
-                cmd.arg((&self.codec.encode(k)?[..], &self.codec.encode(v)?[..]));
+                cmd.arg((&k[..], &v[..]));
                 cmd
             })
             .await?;
+        self.written(k, v).await?;
         Ok(added == 1)
     }
 
@@ -515,15 +563,19 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
+        let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
         let raw: Option<Bytes> = self
             .key
             .core
             .eval_once(
                 &PUT_IF_ABSENT,
                 vec![self.key.redis_key()],
-                vec![self.codec.encode(k)?, self.codec.encode(v)?],
+                vec![k.clone(), v.clone()],
             )
             .await?;
+        if raw.is_none() {
+            self.written(k, v).await?;
+        }
         self.decode_value(raw)
     }
 
@@ -540,8 +592,14 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        self.eval_value(&REPLACE, vec![self.codec.encode(k)?, self.codec.encode(v)?])
-            .await
+        let (k, v) = (self.codec.encode(k)?, self.codec.encode(v)?);
+        let previous = self
+            .eval_value(&REPLACE, vec![k.clone(), v.clone()])
+            .await?;
+        if previous.is_some() {
+            self.written(k, v).await?;
+        }
+        Ok(previous)
     }
 
     /// Replaces the value only when it currently equals `old`; returns whether it did. Redisson's `replace(key, old, new)`.
@@ -552,15 +610,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        self.eval_flag(
-            &REPLACE_IF,
-            vec![
-                self.codec.encode(k)?,
-                self.codec.encode(old)?,
-                self.codec.encode(new)?,
-            ],
-        )
-        .await
+        let (k, new) = (self.codec.encode(k)?, self.codec.encode(new)?);
+        let replaced = self
+            .eval_flag(
+                &REPLACE_IF,
+                vec![k.clone(), self.codec.encode(old)?, new.clone()],
+            )
+            .await?;
+        if replaced {
+            self.written(k, new).await?;
+        }
+        Ok(replaced)
     }
 
     /// Removes the entry only when its value equals `v`; returns whether it did. Redisson's `remove(key, value)`.
@@ -571,14 +631,17 @@ where
         Q: Serialize + ?Sized + Sync,
         W: Serialize + ?Sized + Sync,
     {
-        self.eval_flag(
-            &REMOVE_IF,
-            vec![self.codec.encode(k)?, self.codec.encode(v)?],
-        )
-        .await
+        let k = self.codec.encode(k)?;
+        let removed = self
+            .eval_flag(&REMOVE_IF, vec![k.clone(), self.codec.encode(v)?])
+            .await?;
+        if removed {
+            self.deleted(k).await?;
+        }
+        Ok(removed)
     }
 
-    /// Removes the keys and returns how many were present (`HDEL`).
+    /// Removes the keys and returns how many were present (`HDEL`). With a writer, the removed keys are deleted from the store in one call, and none removed calls nothing.
     #[doc(alias = "fastRemove")]
     pub async fn remove_many<Q>(&self, ks: &[&Q]) -> Result<usize>
     where
@@ -592,6 +655,24 @@ where
             .iter()
             .map(|k| self.codec.encode(*k))
             .collect::<Result<Vec<Bytes>>>()?;
+        if let Some(store) = self.writer() {
+            let flags: Vec<i64> = self
+                .key
+                .core
+                .eval(
+                    &FAST_REMOVE_BATCH,
+                    vec![self.key.redis_key()],
+                    fields.clone(),
+                )
+                .await?;
+            let removed: Vec<Bytes> = fields
+                .into_iter()
+                .zip(flags)
+                .filter_map(|(k, flag)| (flag == 1).then_some(k))
+                .collect();
+            store.deleted(&removed).await?;
+            return Ok(removed.len());
+        }
         let removed: usize = self
             .key
             .query({
@@ -764,8 +845,8 @@ impl<K, V, C: Codec> Extend<'_, K, V, C> {
 
 impl<'m, K, V, C> IntoFuture for Extend<'m, K, V, C>
 where
-    K: Send + Sync + 'm,
-    V: Send + Sync + 'm,
+    K: Serialize + DeserializeOwned + Send + Sync + 'm,
+    V: Serialize + DeserializeOwned + Send + Sync + 'm,
     C: Codec,
 {
     type Output = Result<()>;
@@ -783,6 +864,9 @@ where
                 let mut cmd = self.map.key.key_cmd("HSET");
                 cmd.arg(crate::client::request::binary_pairs(batch));
                 self.map.key.query::<()>(cmd).await?;
+                if let Some(store) = self.map.writer() {
+                    store.written(batch).await?;
+                }
             }
             Ok(())
         })
