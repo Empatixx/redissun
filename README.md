@@ -75,6 +75,7 @@ async fn main() -> redissun::Result<()> {
 | [`FencedLock`](https://empatixx.github.io/redissun/docs/objects/fenced-lock) | hash, string and pub/sub | stable |
 | [`MultiLock`](https://empatixx.github.io/redissun/docs/objects/multi-lock) | the locks it holds | stable |
 | [`SortedSet`](https://empatixx.github.io/redissun/docs/objects/sorted-set) | sorted set | stable |
+| [`TimeSeries`](https://empatixx.github.io/redissun/docs/objects/time-series) | values by timestamp with labels, TTL and retention | experimental |
 | [`DelayedQueue`](https://empatixx.github.io/redissun/docs/objects/delayed-queue) | list, sorted set and pub/sub | stable |
 | [`BitSet`](https://empatixx.github.io/redissun/docs/objects/bit-set) | string | stable |
 | [`HyperLogLog`](https://empatixx.github.io/redissun/docs/objects/hyper-log-log) | HyperLogLog | stable |

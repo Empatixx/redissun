@@ -89,6 +89,11 @@ pub mod sorted_set {
     pub use crate::collections::sorted_set::Extend;
 }
 
+/// The builders and types [`TimeSeries`] methods return.
+pub mod time_series {
+    pub use crate::collections::time_series::{Insert, Set, TryInsert};
+}
+
 /// The builders [`VecDeque`] methods return.
 pub mod vec_deque {
     pub use crate::collections::vec_deque::Extend;
@@ -155,6 +160,7 @@ pub use collections::multimap::{
     SetMultimapCacheNative,
 };
 pub use collections::sorted_set::{Aggregate, SortedSet};
+pub use collections::time_series::{TimeSeries, TimeSeriesEntry, Timestamp};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};

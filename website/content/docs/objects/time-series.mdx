@@ -1,0 +1,35 @@
+---
+title: TimeSeries
+description: Values ordered by timestamp with labels, per-entry TTL and retention, on Redisson's RTimeSeries layout. Experimental.
+---
+
+**Experimental.** A `TimeSeries<V, L>` holds values ordered by timestamp, each with an optional label of type `L` (use `()` for none) and an optional time to live. It is Redisson's `RTimeSeries` and shares its data with Redisson 4.8.0 clients. It runs on Redis or Valkey 6.2 or newer.
+
+```rust
+use std::time::Duration;
+
+let temperatures = client.time_series::<f64, String>("temperatures");
+temperatures.insert(1_000, &21.5).label("kitchen").await?;
+temperatures.insert(2_000, &22.0).ttl(Duration::from_secs(3600)).await?;
+let first = temperatures.get(1_000).await?;
+```
+
+## How it is stored
+
+Three keys, as in Redisson 4.8.0 (with the `redissun` prefix):
+
+- the sorted set `name`, scored by timestamp;
+- the sorted set `redissun__ts_ttl:{name}`, the same members scored by expiry (Unix milliseconds);
+- the hash `redissun__ts_seq:{name}`, fields `id` (the entry counter), `total` and `incremented`.
+
+Each member is `struct.pack('BBc0Lc0Lc0', 4, #id, id, #value, value, #field, field)`: `id` is a 20-digit zero-padded counter and `field` a flag byte (`2` no label, `3` label) followed by the encoded label. Members of the 4.7 layout still read.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(ts, &v)[.label(&l)][.ttl(d)][.retention(d)]` | adds an entry, keeping the ones already at `ts`. `false` when it is behind its retention window. Redisson's `add`. |
+| `try_insert(ts, &v)…` | adds only when no live entry is at `ts`. Redisson's `addIfAbsent`. |
+| `set(ts, &v)…` | replaces every entry at `ts`; `true` when none was live. Redisson's `addOrReplace`. |
+| `get(ts)`, `entry(ts)` | the first live entry at `ts`. Redisson's `get`, `getEntry`. |
+| `len()`, `is_empty()` | live entries. Redisson's `size`. |

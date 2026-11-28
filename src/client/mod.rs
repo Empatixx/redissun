@@ -24,6 +24,7 @@ use crate::collections::multimap::{
     SetMultimapCache, SetMultimapCacheNative, Shape as MultimapShape,
 };
 use crate::collections::sorted_set::SortedSet;
+use crate::collections::time_series::TimeSeries;
 use crate::coordination::adder::{Adder, Summable};
 use crate::coordination::gcra::Gcra;
 use crate::coordination::latch::CountDownLatch;
@@ -220,6 +221,12 @@ impl<C: Codec> Client<C> {
     /// Returns the [`SortedSet`] stored under `name`.
     pub fn sorted_set<V>(&self, name: impl Into<Arc<str>>) -> SortedSet<V, C> {
         SortedSet::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the [`TimeSeries`] stored under `name`, Redisson's `getTimeSeries`. **Experimental.** Use `L = ()` for a series without labels. Like Redisson's, the handle schedules the clean-up task of expired entries.
+    #[doc(alias = "getTimeSeries")]
+    pub fn time_series<V, L>(&self, name: impl Into<Arc<str>>) -> TimeSeries<V, L, C> {
+        TimeSeries::new(Key::new(self.core.clone(), name), self.codec.clone())
     }
 
     /// Returns the [`HashSetCache`] stored under `name`.
