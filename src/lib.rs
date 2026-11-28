@@ -92,8 +92,8 @@ pub mod sorted_set {
 /// The builders and types [`TimeSeries`] methods return.
 pub mod time_series {
     pub use crate::collections::time_series::{
-        Add, Extend, Insert, Range, RangeEntries, ReadAfter, RemoveRange, Set, SetIfGreater,
-        SetIfLess, SetSum, TryInsert,
+        Add, Aggregate, Aggregation, Extend, Insert, Range, RangeEntries, ReadAfter, RemoveRange,
+        Set, SetIfGreater, SetIfLess, SetSum, TimeSeriesBucket, TimeSeriesInfo, TryInsert,
     };
 }
 

@@ -771,3 +771,133 @@ async fn add_under_json_codec_with_numbers() {
     assert_eq!(t.add(2, &2.0).await.unwrap(), 3.5);
     assert_eq!(t.get(2).await.unwrap(), Some(3.5));
 }
+
+// ---- Task 5: aggregate and info ----
+
+// Redisson: testAggregate
+#[tokio::test]
+async fn redisson_aggregate() {
+    use redissun::time_series::Aggregation::*;
+    let t = numeric(&unique("ts")).await;
+    for (ts, v) in [(0, "1"), (10, "3"), (20, "5"), (100, "10"), (150, "20")] {
+        t.insert(ts, v).await.unwrap();
+    }
+    let buckets = t
+        .aggregate(
+            0..=200,
+            Duration::from_millis(100),
+            &[Count, Sum, Avg, Min, Max, ValueRange, First, Last],
+        )
+        .await
+        .unwrap();
+    assert_eq!(buckets.len(), 2);
+    let first = &buckets[0];
+    assert_eq!(first.timestamp, 0);
+    assert_eq!(first.get(Count), Some(3.0));
+    assert_eq!(first.get(Sum), Some(9.0));
+    assert_eq!(first.get(Avg), Some(3.0));
+    assert_eq!(first.get(Min), Some(1.0));
+    assert_eq!(first.get(Max), Some(5.0));
+    assert_eq!(first.get(ValueRange), Some(4.0));
+    assert_eq!(first.get(First), Some(1.0));
+    assert_eq!(first.get(Last), Some(5.0));
+    assert_eq!(buckets[1].timestamp, 100);
+    assert_eq!(buckets[1].get(Count), Some(2.0));
+    assert_eq!(buckets[1].get(Avg), Some(15.0));
+}
+
+// Redisson: testAggregateAlignment
+#[tokio::test]
+async fn redisson_aggregate_alignment() {
+    use redissun::time_series::Aggregation::Count;
+    let t = numeric(&unique("ts")).await;
+    for ts in (0..100).step_by(10) {
+        t.insert(ts as i64, &ts.to_string()).await.unwrap();
+    }
+    let starts = |b: Vec<redissun::time_series::TimeSeriesBucket>| {
+        b.iter().map(|b| b.timestamp).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        starts(
+            t.aggregate(0..=100, Duration::from_millis(50), &[Count])
+                .await
+                .unwrap()
+        ),
+        [0, 50]
+    );
+    assert_eq!(
+        starts(
+            t.aggregate(0..=100, Duration::from_millis(50), &[Count])
+                .align_to(25)
+                .await
+                .unwrap()
+        ),
+        [-25, 25, 75]
+    );
+}
+
+#[tokio::test]
+async fn aggregate_argument_validation() {
+    use redissun::time_series::Aggregation::Count;
+    let t = numeric(&unique("ts")).await;
+    assert!(matches!(
+        t.aggregate(.., Duration::from_micros(500), &[Count]).await,
+        Err(redissun::Error::Config(_))
+    ));
+    assert!(matches!(
+        t.aggregate(.., Duration::from_millis(1), &[]).await,
+        Err(redissun::Error::Config(_))
+    ));
+    assert!(t
+        .aggregate(.., Duration::from_millis(1), &[Count])
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn aggregate_and_info_ignore_expired_entries() {
+    use redissun::time_series::Aggregation::Count;
+    let t = numeric(&unique("ts")).await;
+    t.insert(1, "1")
+        .ttl(Duration::from_millis(50))
+        .await
+        .unwrap();
+    t.insert(2, "2").await.unwrap();
+    sleep(Duration::from_millis(150)).await;
+    let buckets = t
+        .aggregate(.., Duration::from_millis(1000), &[Count])
+        .await
+        .unwrap();
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(buckets[0].get(Count), Some(1.0));
+    let info = t.info().await.unwrap();
+    assert_eq!(info.len, 1);
+    assert_eq!(info.first_timestamp, Some(2));
+}
+
+// Redisson: testInfo
+#[tokio::test]
+async fn redisson_info() {
+    let t = ts(&unique("ts")).await;
+    let empty = t.info().await.unwrap();
+    assert_eq!(empty.len, 0);
+    assert_eq!(empty.total_entries, 0);
+    assert_eq!(empty.first_timestamp, None);
+    assert_eq!(empty.last_timestamp, None);
+    assert_eq!(empty.entries_issued, 0);
+    assert_eq!(empty.ttl, None);
+    for (ts, v) in [(30, "c"), (10, "a"), (20, "b")] {
+        t.insert(ts, v).await.unwrap();
+    }
+    let info = t.info().await.unwrap();
+    assert_eq!(info.len, 3);
+    assert_eq!(info.total_entries, 3);
+    assert_eq!(info.first_timestamp, Some(10));
+    assert_eq!(info.last_timestamp, Some(30));
+    assert!(info.memory_usage > 0);
+    assert_eq!(info.ttl, None);
+    assert_eq!(info.entries_issued, 3);
+    assert_eq!(info.len, t.len().await.unwrap());
+    assert_eq!(info.first_timestamp, t.first_timestamp().await.unwrap());
+}

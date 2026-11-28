@@ -1,5 +1,6 @@
 //! [`TimeSeries`], Redisson's `RTimeSeries`: values by timestamp with labels, per-entry TTL and retention, on Redisson's keys and Lua scripts.
 
+mod aggregate;
 mod builders;
 mod ranges;
 mod reads;
@@ -23,6 +24,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
+pub use aggregate::{Aggregate, Aggregation, TimeSeriesBucket, TimeSeriesInfo};
 pub use builders::{Add, Extend, Insert, Set, SetIfGreater, SetIfLess, SetSum, TryInsert};
 pub use ranges::{Range, RangeEntries, ReadAfter, RemoveRange};
 pub use timestamp::{TimeSeriesEntry, Timestamp};
