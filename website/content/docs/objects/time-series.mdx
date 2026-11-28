@@ -76,5 +76,5 @@ Timestamps are `i64` milliseconds (`Timestamp` converts from integers and `Syste
 
 ## Events
 
-`events()` reports `Added` (`zadd`), `Removed` (`zrem`), `Deleted` (`del`) and `Expired` (`expired`) of the series, Redisson's `ScoredSortedSetAddListener`, `ScoredSortedSetRemoveListener`, `DeletedObjectListener` and `ExpiredObjectListener`. Redis sends them only with `notify-keyspace-events` containing `E` and `z`, `g`, `x` for the kinds you need. In a cluster a listener hears one master. Drop the listener to stop.
+`events()` reports `Added` (`zadd`), `Removed` (`zrem`), `Deleted` (`del`) and `Expired` (`expired`) of the series, Redisson's `ScoredSortedSetAddListener`, `ScoredSortedSetRemoveListener`, `DeletedObjectListener` and `ExpiredObjectListener`. Redis sends them only with `notify-keyspace-events` containing `E` and `z`, `g`, `x` for the kinds you need. Removing the last entry deletes the sorted set, so it also reports `Deleted`, as in Redisson. In a cluster a listener hears one master. Drop the listener to stop.
 

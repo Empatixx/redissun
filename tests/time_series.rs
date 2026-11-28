@@ -928,6 +928,9 @@ async fn events_report_add_remove_delete_expire() {
     let other: Ts = client.time_series(unique("ts"));
     let mut events = t.events().await.unwrap();
     other.insert(1, "x").await.unwrap();
+    // Removing the last member deletes the sorted set and sends `del` as well, so one entry stays.
+    t.insert(99, "keep").await.unwrap();
+    assert_eq!(next_event(&mut events).await, Added);
     t.insert(1, "a").await.unwrap();
     assert_eq!(next_event(&mut events).await, Added);
     t.remove(1).await.unwrap();
