@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod builders;
+mod events;
 mod ranges;
 mod reads;
 mod scripts;
@@ -26,6 +27,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use aggregate::{Aggregate, Aggregation, TimeSeriesBucket, TimeSeriesInfo};
 pub use builders::{Add, Extend, Insert, Set, SetIfGreater, SetIfLess, SetSum, TryInsert};
+pub use events::{TimeSeriesEvent, TimeSeriesEventKind, TimeSeriesEvents};
 pub use ranges::{Range, RangeEntries, ReadAfter, RemoveRange};
 pub use timestamp::{TimeSeriesEntry, Timestamp};
 
@@ -350,6 +352,17 @@ impl<V, L, C: Codec> TimeSeries<V, L, C> {
             )
             .await?;
         Ok(usize::try_from(size).unwrap_or(0))
+    }
+
+    /// Starts listening to every kind of change, Redisson's `addListener`. See [`TimeSeriesEvents`] for the server setting it needs.
+    #[doc(alias = "addListener")]
+    pub async fn events(&self) -> Result<TimeSeriesEvents> {
+        events::subscribe(&self.key, &TimeSeriesEventKind::ALL).await
+    }
+
+    /// Starts listening to the changes of `kinds`. No kinds is an [`Error::Config`].
+    pub async fn events_of(&self, kinds: &[TimeSeriesEventKind]) -> Result<TimeSeriesEvents> {
+        events::subscribe(&self.key, kinds).await
     }
 
     /// Whether the series holds no live entry.

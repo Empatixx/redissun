@@ -901,3 +901,133 @@ async fn redisson_info() {
     assert_eq!(info.len, t.len().await.unwrap());
     assert_eq!(info.first_timestamp, t.first_timestamp().await.unwrap());
 }
+
+// ---- Task 6: events and cluster ----
+
+async fn next_event(
+    events: &mut redissun::time_series::TimeSeriesEvents,
+) -> redissun::TimeSeriesEvent {
+    tokio::time::timeout(Duration::from_secs(3), events.recv())
+        .await
+        .expect("no event within 3 s")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn events_report_add_remove_delete_expire() {
+    use redissun::TimeSeriesEvent::*;
+    let (_container, url) = common::own_redis().await;
+    common::raw_command_at(&url, &["CONFIG", "SET", "notify-keyspace-events", "Egzx"]).await;
+    let client = redissun::Client::builder()
+        .url(url.clone())
+        .build()
+        .await
+        .unwrap();
+    let n = unique("ts");
+    let t: Ts = client.time_series(n.clone());
+    let other: Ts = client.time_series(unique("ts"));
+    let mut events = t.events().await.unwrap();
+    other.insert(1, "x").await.unwrap();
+    t.insert(1, "a").await.unwrap();
+    assert_eq!(next_event(&mut events).await, Added);
+    t.remove(1).await.unwrap();
+    assert_eq!(next_event(&mut events).await, Removed);
+    t.insert(2, "b").await.unwrap();
+    assert_eq!(next_event(&mut events).await, Added);
+    assert!(t.expire(Duration::from_millis(100)).await.unwrap());
+    assert_eq!(next_event(&mut events).await, Expired);
+    t.insert(3, "c").await.unwrap();
+    assert_eq!(next_event(&mut events).await, Added);
+    assert!(t.del().await.unwrap());
+    assert_eq!(next_event(&mut events).await, Deleted);
+}
+
+#[tokio::test]
+async fn no_kinds_is_a_config_error() {
+    let t = ts(&unique("ts")).await;
+    assert!(matches!(
+        t.events_of(&[]).await,
+        Err(redissun::Error::Config(_))
+    ));
+}
+
+#[tokio::test]
+async fn every_operation_runs_on_a_cluster() {
+    use futures::TryStreamExt;
+    use redissun::time_series::Aggregation::Count;
+    let topology = common::topology::Topology::cluster().await;
+    let client = redissun::Client::builder()
+        .url(topology.cluster_url())
+        .eviction_interval(Duration::from_secs(1))
+        .build()
+        .await
+        .expect("could not connect to the cluster");
+    for name in [format!("{{{}}}:ts", unique("c")), unique("plain")] {
+        let t: TimeSeries<String, String, StringCodec> =
+            client.with_codec(StringCodec).time_series(name.clone());
+        t.insert(1, "1")
+            .label("l")
+            .ttl(Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(t.try_insert(2, "2").await.unwrap());
+        t.set(3, "3").await.unwrap();
+        t.set_sum(3, "4").await.unwrap();
+        t.add(4, "5").await.unwrap();
+        t.extend([(5, "6".to_string())]).await.unwrap();
+        assert_eq!(t.get_all(3).await.unwrap(), strings(&["7"]), "{name}");
+        assert_eq!(t.range_entries(..).rev().await.unwrap().len(), 5, "{name}");
+        assert_eq!(t.labels(..).await.unwrap(), strings(&["l"]), "{name}");
+        assert_eq!(
+            t.aggregate(.., Duration::from_secs(1), &[Count])
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{name}"
+        );
+        assert_eq!(t.info().await.unwrap().len, 5, "{name}");
+        assert_eq!(t.read_after(3).await.unwrap().len(), 2, "{name}");
+        assert_eq!(t.pop_first().await.unwrap().as_deref(), Some("1"), "{name}");
+        assert_eq!(t.remove_range(2..=2).await.unwrap(), 1, "{name}");
+        let all: Vec<String> = t.iter().try_collect().await.unwrap();
+        assert_eq!(all.len(), 3, "{name}");
+        t.insert(10, "short")
+            .ttl(Duration::from_millis(100))
+            .await
+            .unwrap();
+        let ttl_key = if name.contains('{') {
+            format!("redissun__ts_ttl:{name}")
+        } else {
+            ttl_key(&name)
+        };
+        let port = topology.cluster_master_of(&name).await;
+        let mut gone = false;
+        for _ in 0..50 {
+            sleep(Duration::from_millis(200)).await;
+            if int_reply(&topology.cli(port, &["ZCARD", &ttl_key]).await) == 3 {
+                gone = true;
+                break;
+            }
+        }
+        assert!(
+            gone,
+            "{name}: the clean-up did not remove the expired entry"
+        );
+        assert!(t.expire(Duration::from_secs(60)).await.unwrap());
+        let renamed = if name.starts_with('{') {
+            format!("{}:renamed", &name[..name.find('}').unwrap() + 1])
+        } else {
+            format!("{{{name}}}")
+        };
+        if name.starts_with('{') {
+            t.rename(&renamed).await.unwrap();
+            let moved: TimeSeries<String, String, StringCodec> =
+                client.with_codec(StringCodec).time_series(renamed.clone());
+            assert_eq!(moved.len().await.unwrap(), 3, "{name}");
+            assert!(moved.del().await.unwrap());
+        } else {
+            assert!(t.del().await.unwrap());
+        }
+    }
+}

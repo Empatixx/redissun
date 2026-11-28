@@ -163,7 +163,9 @@ pub use collections::multimap::{
     SetMultimapCacheNative,
 };
 pub use collections::sorted_set::{Aggregate, SortedSet};
-pub use collections::time_series::{TimeSeries, TimeSeriesEntry, Timestamp};
+pub use collections::time_series::{
+    TimeSeries, TimeSeriesEntry, TimeSeriesEvent, TimeSeriesEventKind, Timestamp,
+};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};
