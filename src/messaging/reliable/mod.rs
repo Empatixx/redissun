@@ -2,4 +2,5 @@
 
 pub(crate) mod message;
 pub(crate) mod queue;
-mod scripts;
+pub(crate) mod scripts;
+pub(crate) mod topic;

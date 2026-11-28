@@ -481,3 +481,89 @@ return redis.call('zrange', KEYS[1], 0, tonumber(ARGV[3]) - 1)
         .concat(),
     )
 });
+
+/// Publishes to a topic. KEYS 1–8 are the topic's (log, payloads, meta, subscriptions, counter, config, disabled, statistics), then 12 keys per subscription queue. ARGV[1] the topic's event channel, ARGV[2] the number of subscriptions, then their wake channels, then the number of messages and per message: priority, delay ms (`-1` = the topic's), ttl ms (`-1` = the topic's), delivery limit, payload, headers.
+/// Replies `{'disabled'}`, `{'nosub'}`, `{'full'}`, `{'size', max}` or `{'ok', ids…}`.
+pub(crate) static PUBLISH: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        r#"
+local events = ARGV[1]
+local t = redis.call('time')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local function cfg(field) return redis.call('hget', KEYS[6], field) end
+local function num(value, default) if value then return tonumber(value) end return default end
+if redis.call('sismember', KEYS[7], 'publish') == 1 then return {'disabled'} end
+local subs = tonumber(ARGV[2])
+local retention = cfg('retention') or 'delete-processed'
+if subs == 0 and retention ~= 'optional' then return {'nosub'} end
+local at = 3 + subs
+local n = tonumber(ARGV[at])
+-- the log: entries past the topic's TTL go; with delete-processed, entries no subscription holds go too
+local ttl = num(cfg('ttl'), 0)
+if ttl > 0 then
+  for _, id in ipairs(redis.call('zrangebyscore', KEYS[1], '-inf', now - ttl, 'limit', 0, 100)) do
+    redis.call('zrem', KEYS[1], id)
+    redis.call('hdel', KEYS[2], id)
+    redis.call('hdel', KEYS[3], id .. ':p', id .. ':h')
+  end
+end
+if retention == 'delete-processed' then
+  for _, id in ipairs(redis.call('zrange', KEYS[1], 0, 99)) do
+    local held = false
+    for j = 0, subs - 1 do
+      if redis.call('hexists', KEYS[8 + 12 * j + 5], id) == 1 then held = true break end
+    end
+    if not held then
+      redis.call('zrem', KEYS[1], id)
+      redis.call('hdel', KEYS[2], id)
+      redis.call('hdel', KEYS[3], id .. ':p', id .. ':h')
+    end
+  end
+end
+local max = num(cfg('max-size'), 0)
+if max > 0 and redis.call('zcard', KEYS[1]) + n > max then
+  redis.call('publish', events, 'full\n\n')
+  return {'full'}
+end
+local bytes = num(cfg('max-message-size'), 0)
+for i = 0, n - 1 do
+  local payload = ARGV[at + 1 + i * 6 + 4]
+  if bytes > 0 and #payload > bytes then return {'size', tostring(bytes)} end
+end
+local result = {'ok'}
+for i = 0, n - 1 do
+  local b = at + 1 + i * 6
+  local p, delay, mttl, lim = tonumber(ARGV[b]), tonumber(ARGV[b + 1]), tonumber(ARGV[b + 2]), tonumber(ARGV[b + 3])
+  local payload, headers = ARGV[b + 4], ARGV[b + 5]
+  local seq = redis.call('incr', KEYS[5])
+  local id = tostring(now) .. '-' .. tostring(seq)
+  redis.call('zadd', KEYS[1], now, id)
+  redis.call('hset', KEYS[2], id, payload)
+  redis.call('hset', KEYS[3], id .. ':p', p)
+  if #headers > 0 then redis.call('hset', KEYS[3], id .. ':h', headers) end
+  if delay < 0 then delay = num(cfg('delay'), 0) end
+  if mttl < 0 then mttl = ttl end
+  for j = 0, subs - 1 do
+    local k = 8 + 12 * j
+    redis.call('hset', KEYS[k + 5], id, payload)
+    redis.call('hset', KEYS[k + 6], id .. ':p', p, id .. ':d', 0)
+    if lim > 0 then redis.call('hset', KEYS[k + 6], id .. ':l', lim) end
+    if #headers > 0 then redis.call('hset', KEYS[k + 6], id .. ':h', headers) end
+    if mttl > 0 then redis.call('zadd', KEYS[k + 4], now + mttl, id) end
+    if delay > 0 then
+      redis.call('zadd', KEYS[k + 2], now + delay, id)
+    else
+      redis.call('zadd', KEYS[k + 1], (9 - p) * 17592186044416 + seq, id)
+      redis.call('publish', ARGV[3 + j], '1')
+    end
+  end
+  table.insert(result, id)
+end
+redis.call('hincrby', KEYS[8], 'published', n)
+local ids = {}
+for i = 2, #result do table.insert(ids, result[i]) end
+redis.call('publish', events, 'published\n\n' .. table.concat(ids, ' '))
+return result
+"#,
+    )
+});

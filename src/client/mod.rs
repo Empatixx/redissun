@@ -255,6 +255,19 @@ impl<C: Codec> Client<C> {
         )
     }
 
+    /// Returns the reliable publish/subscribe topic stored under `name`, with the functionality of Redisson PRO's `getReliablePubSubTopic`. **Experimental.**
+    #[doc(alias = "getReliablePubSubTopic")]
+    pub fn reliable_pubsub_topic<V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> crate::messaging::reliable::topic::ReliablePubSubTopic<V, C> {
+        let name: Arc<str> = name.into();
+        crate::messaging::reliable::topic::ReliablePubSubTopic::new(
+            Key::new(self.core.clone(), tagged(&name)),
+            self.codec.clone(),
+        )
+    }
+
     /// Returns the [`HashSetCache`] stored under `name`.
     pub fn hash_set_cache<V>(&self, name: impl Into<Arc<str>>) -> HashSetCache<V, C> {
         let name: Arc<str> = name.into();

@@ -28,7 +28,7 @@ const FALLBACK: Duration = Duration::from_secs(2);
 /// How often an add waits for room in a full queue.
 const FULL_RETRY: Duration = Duration::from_millis(100);
 
-fn millis(d: Duration) -> i64 {
+pub(crate) fn millis(d: Duration) -> i64 {
     i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
 
@@ -212,7 +212,7 @@ const SUFFIXES: [&str; 11] = [
     ":dead",
 ];
 
-fn keys_of(base: &str) -> Vec<String> {
+pub(crate) fn keys_of(base: &str) -> Vec<String> {
     std::iter::once(base.to_string())
         .chain(SUFFIXES.iter().map(|s| format!("{base}{s}")))
         .collect()
@@ -237,13 +237,13 @@ impl<V, C: Codec> HasKey for ReliableQueue<V, C> {
 }
 
 /// One parsed message row: id, payload, headers, deliveries.
-type Row = (String, Option<Bytes>, Bytes, u32);
+pub(crate) type Row = (String, Option<Bytes>, Bytes, u32);
 
 fn bytes_of(value: &Value) -> Option<Bytes> {
     crate::reply::bytes(value)
 }
 
-fn rows(values: &[Value]) -> Result<Vec<Row>> {
+pub(crate) fn rows(values: &[Value]) -> Result<Vec<Row>> {
     values
         .chunks(4)
         .map(|chunk| match chunk {
@@ -269,19 +269,19 @@ impl<V, C: Codec> ReliableQueue<V, C> {
         }
     }
 
-    fn base(&self) -> &str {
+    pub(crate) fn base(&self) -> &str {
         self.key.name()
     }
 
-    fn wake_channel(&self) -> String {
+    pub(crate) fn wake_channel(&self) -> String {
         format!("redissun_rq:{}", self.base())
     }
 
-    fn event_channel(&self) -> String {
+    pub(crate) fn event_channel(&self) -> String {
         format!("redissun_rq_events:{}", self.base())
     }
 
-    async fn run<T: redis::FromRedisValue>(
+    pub(crate) async fn run<T: redis::FromRedisValue>(
         &self,
         script: &Lua,
         args: Vec<Bytes>,
@@ -529,7 +529,10 @@ where
     V: DeserializeOwned,
     C: Codec,
 {
-    fn message(&self, (id, payload, headers, deliveries): Row) -> Result<Option<Message<V, C>>> {
+    pub(crate) fn message(
+        &self,
+        (id, payload, headers, deliveries): Row,
+    ) -> Result<Option<Message<V, C>>> {
         let Some(payload) = payload else {
             return Ok(None);
         };
@@ -769,7 +772,7 @@ where
         Ok((deliveries, due))
     }
 
-    async fn poll_wait(
+    pub(crate) async fn poll_wait(
         &self,
         count: usize,
         visibility: Option<Duration>,
