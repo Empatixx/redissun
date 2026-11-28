@@ -30,6 +30,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RBlockingQueue` | `VecDeque` with `pop_front_wait` |
 | `RMapCache` | `HashMapCache` |
 | `RMapCacheNative` | `MapCacheNative` |
+| `RTimeSeries` | `TimeSeries` (experimental) |
 | `RSetCache` | `HashSetCache` |
 | `RListMultimap` | `ListMultimap` |
 | `RSetMultimap` | `SetMultimap` |
@@ -536,6 +537,38 @@ Every `HashMapCache` method works and returns the same builders; see [`## HashMa
 | `addListener(ObjectListener)` | `keyspace_events()`, `keyspace_events_of(..)` |
 | `loader`, `loaderAsync`, `writer`, `writerAsync`, `writeMode`, `writeBehindBatchSize`, `writeBehindDelay`, `writerRetryAttempts`, `writerRetryInterval` | `.loader(l)`, `.writer(w)`, `.write_mode(m)` (`WriteMode::WriteBehind { batch_size, delay }`), `.writer_retry_attempts(n)`, `.writer_retry_interval(d)` on the builder |
 | `destroy()` | `flush().await`, then drop |
+
+## TimeSeries
+
+| Redisson | redissun |
+|---|---|
+| `getTimeSeries(name[, codec])` | `client[.with_codec(c)].time_series::<V, L>(name)` |
+| `add(ts, v[, label][, ttl])`, `add(TimeSeriesAddArgs)` | `insert(ts, &v)` with `.label(&l)`, `.ttl(d)`, `.retention(d)` → `bool` |
+| `addIfAbsent(args)` | `try_insert(ts, &v)` (same options) |
+| `addOrReplace(args)` | `set(ts, &v)` (same options) |
+| `addIfLess`, `addIfGreater`, `addAndSum` | `set_if_less`, `set_if_greater`, `set_sum` |
+| `addAndGet(args)` | `add(ts, &delta)` → the running total |
+| `addAll(Map[, ttl])`, `addAll(Collection[, ttl])` | `extend(entries)` with `.ttl(d)` |
+| `size()` | `len()`, `is_empty()` |
+| `get(ts)`, `getEntry(ts)`, `getAll(ts)`, `getAllEntries(ts)` | `get`, `entry`, `get_all`, `get_all_entries` |
+| `remove(ts)`, `getAndRemove(ts)`, `getAndRemoveEntry(ts)` | `remove(ts)` → `Option<V>`, `remove_entry(ts)` |
+| `removeAll(ts)`, `getAndRemoveAll(ts)`, `getAndRemoveAllEntries(ts)` | `remove_all(ts)` → `Vec<V>` (`.len()` for the count), `remove_all_entries(ts)` |
+| `first()`, `first(n)`, `firstEntry()`, `firstEntries(n)` | `first()`, `first_many(n)`, `first_entry()`, `first_entries(n)` |
+| `last()`, `last(n)`, `lastEntry()`, `lastEntries(n)` | `last()`, `last_many(n)`, `last_entry()`, `last_entries(n)` (oldest first, as in Redisson) |
+| `pollFirst…`, `pollLast…` | `pop_first…`, `pop_last…` |
+| `firstTimestamp()`, `lastTimestamp()` | `first_timestamp()`, `last_timestamp()` |
+| `range(s, e[, limit])`, `rangeReversed…`, `rangeByLabel…`, `rangeReversedByLabel…` | `range(s..=e)` with `.rev()`, `.limit(n)`, `.label(&l)`, `.unlabelled()` (Redisson's `null` label) |
+| `entryRange…` | `range_entries(s..=e)` (same options) |
+| `removeRange(s, e)`, `removeRangeByLabel(s, e, l)` | `remove_range(s..=e)` with `.label(&l)`, `.unlabelled()` |
+| `labels()`, `labels(s, e)` | `labels(..)`, `labels(s..=e)` |
+| `aggregate(TimeSeriesAggregationArgs)` | `aggregate(s..=e, bucket, &[Aggregation])` with `.align_to(ts)`, `.filter_by_value(min, max)`, `.label(&l)`, `.unlabelled()` |
+| `readTail(TimeSeriesReadArgs)` | `read_after(ts)` with `.count(n)`, `.label(&l)`, `.unlabelled()` |
+| `info()` | `info()` → `TimeSeriesInfo` |
+| `iterator()`, `iterator(n)`, `stream()`, `stream(n)` | `iter()`, `iter_with(n)` |
+| `addListener(ScoredSortedSetAddListener / ScoredSortedSetRemoveListener / DeletedObjectListener / ExpiredObjectListener)`, `removeListener` | `events()`, `events_of(&[TimeSeriesEventKind])`, then drop |
+| `delete`, `isExists`, `rename`, `expire`, `clearExpire`, `remainTimeToLive` | `Object` over the three keys |
+
+Timestamps are `i64` milliseconds. A limit or count of `0` returns nothing (Redisson: no limit), except `read_after(..).count(0)`, which means no limit. Not ported: `TrackingListener`, `copy`, `renamenx`, `expireAt`, conditional `expire`, `sizeInMemory`, `destroy`.
 
 ## VecDeque blocking
 
