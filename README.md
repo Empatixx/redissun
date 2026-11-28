@@ -76,6 +76,7 @@ async fn main() -> redissun::Result<()> {
 | [`MultiLock`](https://empatixx.github.io/redissun/docs/objects/multi-lock) | the locks it holds | stable |
 | [`SortedSet`](https://empatixx.github.io/redissun/docs/objects/sorted-set) | sorted set | stable |
 | [`TimeSeries`](https://empatixx.github.io/redissun/docs/objects/time-series) | values by timestamp with labels, TTL and retention | experimental |
+| [`TimeSeriesNative`, `TimeSeriesNatives`](https://empatixx.github.io/redissun/docs/objects/time-series-native) | Redis 8 time series (`TS.*`) | experimental |
 | [`DelayedQueue`](https://empatixx.github.io/redissun/docs/objects/delayed-queue) | list, sorted set and pub/sub | stable |
 | [`BitSet`](https://empatixx.github.io/redissun/docs/objects/bit-set) | string | stable |
 | [`HyperLogLog`](https://empatixx.github.io/redissun/docs/objects/hyper-log-log) | HyperLogLog | stable |

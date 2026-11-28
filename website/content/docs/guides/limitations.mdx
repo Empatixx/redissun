@@ -69,5 +69,9 @@ description: Things to know about this version.
   - The clean-up runs on the runtime that created the handle. Expiry uses each client's clock, as in Redisson.
   - Not ported: `copy`, `renamenx`, `expireAt`, `sizeInMemory`, `destroy`, `TrackingListener`.
   - `events()` hears nothing unless the server's `notify-keyspace-events` enables the kinds (`E` with `z`, `g`, `x`).
+- **TimeSeriesNative and Redisson's `RTimeSeriesNative`** (experimental).
+  - Not in `Batch`.
+  - `add_many` is not atomic, as `TS.MADD` is not: a refused sample fails the call while other samples may already be stored.
+  - `TS.MGET`, `TS.MRANGE`, `TS.QUERYINDEX` and `TS.QUERYLABELS` go to one master.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error, except for the entry time limits of `HashMapCache` and `HashSetCache` and the entry TTLs of `MapCacheNative`, where zero means no limit. A `MapCacheNative` deadline (`.expire_at(t)`) is sent in whole Unix milliseconds, rounded down.
 - **Before 1.0**, the API can change between minor versions.

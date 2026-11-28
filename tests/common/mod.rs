@@ -101,6 +101,55 @@ pub async fn redis8_client() -> Client {
         .unwrap()
 }
 
+static CONTAINER_810: OnceCell<(ContainerAsync<Redis>, String)> = OnceCell::const_new();
+static CONTAINER_810_ID: OnceLock<String> = OnceLock::new();
+
+extern "C" fn remove_container_810() {
+    if let Some(id) = CONTAINER_810_ID.get() {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", "-v", id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// A shared `redis:8.10-alpine` (Redisson's time series test image), or `REDISSUN_TEST_REDIS810_URL`.
+#[allow(dead_code)]
+pub async fn redis810_url() -> String {
+    if let Ok(url) = std::env::var("REDISSUN_TEST_REDIS810_URL") {
+        return url;
+    }
+    CONTAINER_810
+        .get_or_init(|| async {
+            let container = Redis::default()
+                .with_tag("8.10-alpine")
+                .start()
+                .await
+                .unwrap();
+            let port = container.get_host_port_ipv4(6379).await.unwrap();
+            if CONTAINER_810_ID.set(container.id().to_string()).is_ok() {
+                unsafe {
+                    libc::atexit(remove_container_810);
+                }
+            }
+            wait_until_ready(port).await;
+            (container, format!("redis://127.0.0.1:{port}"))
+        })
+        .await
+        .1
+        .clone()
+}
+
+#[allow(dead_code)]
+pub async fn redis810_client() -> Client {
+    Client::builder()
+        .url(redis810_url().await)
+        .build()
+        .await
+        .unwrap()
+}
+
 static CONTAINER_GCRA: OnceCell<(ContainerAsync<Redis>, String)> = OnceCell::const_new();
 static CONTAINER_GCRA_ID: OnceLock<String> = OnceLock::new();
 
