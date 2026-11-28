@@ -888,7 +888,18 @@ pub(super) static ADD_COMPARING: LazyLock<Lua> = LazyLock::new(|| {
                 "removeMembers(existing); ",
                 "end; ",
                 "storeEntry(nextId(), timestamp, stored); ",
+                "if policy ~= 3 then ",
+                "result = 1; ",
+                "elseif folded == nil then ",
+                "result = 1; ",
+                "end; ",
+                "elseif stale ~= nil then ",
+                "removeMembers(stale); ",
+                "end; ",
+                "end; ",
             ),
+            RETENTION_TRIM,
+            "return result;",
         ]
         .concat(),
     )
