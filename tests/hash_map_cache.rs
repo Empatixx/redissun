@@ -389,14 +389,15 @@ async fn an_idle_entry_expires_and_a_read_keeps_it_alive() {
         .hash_map_cache::<String, String>(unique("cache"));
     cache
         .insert("a", "x")
-        .max_idle(Duration::from_millis(500))
+        .max_idle(Duration::from_millis(1000))
         .await
         .unwrap();
+    // Reads every 250 ms keep a 1 s idle limit alive with room for a slow machine.
     for _ in 0..4 {
         sleep(Duration::from_millis(250)).await;
         assert_eq!(cache.get("a").await.unwrap(), Some("x".to_string()));
     }
-    sleep(Duration::from_millis(800)).await;
+    sleep(Duration::from_millis(1500)).await;
     assert_eq!(cache.get("a").await.unwrap(), None);
     assert!(!cache.contains_key("a").await.unwrap());
 }

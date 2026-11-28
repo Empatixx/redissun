@@ -48,8 +48,9 @@ async fn unreachable_server_fails_instead_of_hanging() {
 
 #[tokio::test]
 async fn zero_connect_timeout_is_a_config_error() {
+    // The options are checked before anything connects, so no server is needed (a shared container that is still starting made this test flaky).
     let result = Client::builder()
-        .url(redis_url().await)
+        .url("redis://127.0.0.1:1")
         .connect_timeout(Duration::ZERO)
         .build()
         .await;
