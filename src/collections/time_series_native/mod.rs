@@ -117,7 +117,7 @@ impl TimeSeriesNative {
         self.key.query_once(cmd).await.map_err(unsupported)
     }
 
-    async fn read<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
+    async fn read_cmd<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
         self.key.read(cmd).await.map_err(unsupported)
     }
 
@@ -232,7 +232,7 @@ impl TimeSeriesNative {
     pub async fn first(&self) -> Result<Option<Sample>> {
         let mut cmd = self.cmd("TS.RANGE");
         cmd.arg("-").arg("+").arg("COUNT").arg(1);
-        let reply: Value = self.read(cmd).await?;
+        let reply: Value = self.read_cmd(cmd).await?;
         Ok(reply::samples(&reply)?.into_iter().next())
     }
 
@@ -347,7 +347,7 @@ impl TimeSeriesNative {
             };
             let mut cmd = self.cmd("TS.RANGE");
             cmd.arg(from).arg("+").arg("COUNT").arg(page);
-            let reply: Value = self.read(cmd).await?;
+            let reply: Value = self.read_cmd(cmd).await?;
             let samples = reply::samples(&reply)?;
             let next = match samples.last() {
                 Some(last) if samples.len() as u64 == page => last.timestamp.checked_add(1),
@@ -556,7 +556,7 @@ impl<'a> IntoFuture for Get<'a> {
             if self.latest {
                 cmd.arg("LATEST");
             }
-            let reply: Value = self.series.read(cmd).await?;
+            let reply: Value = self.series.read_cmd(cmd).await?;
             reply::sample(&reply)
         })
     }
@@ -594,7 +594,7 @@ impl<'a> IntoFuture for Range<'a> {
                 .series
                 .cmd(if self.rev { "TS.REVRANGE" } else { "TS.RANGE" });
             self.range.append(from, to, &[], &mut cmd)?;
-            let reply: Value = self.series.read(cmd).await?;
+            let reply: Value = self.series.read_cmd(cmd).await?;
             reply::samples(&reply)
         })
     }
@@ -650,7 +650,7 @@ impl<'a> IntoFuture for Read<'a> {
                     .await
                     .map_err(unsupported)?
             } else {
-                self.series.read(cmd).await?
+                self.series.read_cmd(cmd).await?
             };
             reply::samples(&reply)
         })
@@ -720,7 +720,7 @@ impl<'a> IntoFuture for Info<'a> {
             if self.debug {
                 cmd.arg("DEBUG");
             }
-            let reply: Value = self.series.read(cmd).await?;
+            let reply: Value = self.series.read_cmd(cmd).await?;
             reply::info(&reply)
         })
     }

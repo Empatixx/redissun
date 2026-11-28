@@ -563,7 +563,7 @@ mod tests {
         cmd.args_iter()
             .filter_map(|a| match a {
                 redis::Arg::Simple(b) => Some(String::from_utf8_lossy(b).into_owned()),
-                redis::Arg::Cursor => None,
+                _ => None,
             })
             .collect()
     }
