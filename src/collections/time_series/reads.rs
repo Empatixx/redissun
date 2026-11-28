@@ -115,21 +115,21 @@ where
         reply: &redis::Value,
     ) -> Result<Vec<TimeSeriesEntry<V, L>>> {
         let items = reply::array(reply);
-        if items.len() % 4 != 0 {
+        if !items.len().is_multiple_of(4) {
             return Err(reply::malformed());
         }
-        items
-            .chunks_exact(4)
-            .map(|group| {
-                let (Some(flag), Some(timestamp)) =
-                    (reply::number(&group[2]), reply::number(&group[3]))
+        let (groups, _) = items.as_chunks::<4>();
+        groups
+            .iter()
+            .map(|[value, label, flag, timestamp]| {
+                let (Some(flag), Some(timestamp)) = (reply::number(flag), reply::number(timestamp))
                 else {
                     return Err(reply::malformed());
                 };
                 Ok(TimeSeriesEntry {
                     timestamp,
-                    value: self.decode_value(&group[0])?,
-                    label: self.decode_label(flag, Some(&group[1]))?,
+                    value: self.decode_value(value)?,
+                    label: self.decode_label(flag, Some(label))?,
                 })
             })
             .collect()

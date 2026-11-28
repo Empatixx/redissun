@@ -738,6 +738,218 @@ pub(super) static SCAN: LazyLock<Lua> = LazyLock::new(|| {
         "return {tostring(nextPos), result};",
     ))
 });
+
+/// RedissonTimeSeries.addAllAsync(Collection, Duration) without a time to live (line 279)
+pub(super) static EXTEND: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            NEXT_ID,
+            concat!(
+                "local expirationTime = ARGV[2]; ",
+                "local lastValues = redis.call('zrange', KEYS[2], -1, -1, 'withscores'); ",
+                "if (#lastValues > 0 and tonumber(lastValues[2]) > tonumber(ARGV[2])) then ",
+                "expirationTime = tonumber(lastValues[2]); ",
+                "end; ",
+                "for i = 3, #ARGV, 4 do ",
+                "local id = nextId(); ",
+                "local lbl = string.char(ARGV[i+1]) .. ARGV[i+3]; ",
+                "local val = struct.pack('BBc0Lc0Lc0', 4, ",
+                "string.len(id), id, ",
+                "string.len(ARGV[i+2]), ARGV[i+2], ",
+                "string.len(lbl), lbl); ",
+                "redis.call('zadd', KEYS[1], ARGV[i], val); ",
+                "redis.call('zadd', KEYS[2], expirationTime + 1, val); ",
+                "end; ",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.addAllAsync(Collection, Duration) with a time to live (line 264)
+pub(super) static EXTEND_TTL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            NEXT_ID,
+            concat!(
+                "for i = 3, #ARGV, 4 do ",
+                "local id = nextId(); ",
+                "local lbl = string.char(ARGV[i+1]) .. ARGV[i+3]; ",
+                "local val = struct.pack('BBc0Lc0Lc0', 4, ",
+                "string.len(id), id, ",
+                "string.len(ARGV[i+2]), ARGV[i+2], ",
+                "string.len(lbl), lbl); ",
+                "redis.call('zadd', KEYS[1], ARGV[i], val); ",
+                "redis.call('zadd', KEYS[2], ARGV[2], val); ",
+                "end; ",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.FORMAT_NUMBER (line 585)
+const FORMAT_NUMBER: &str = concat!(
+    "local function formatNumber(value) ",
+    "if value ~= value then ",
+    "return 'NaN'; ",
+    "end; ",
+    "if value == math.huge then ",
+    "return 'Infinity'; ",
+    "end; ",
+    "if value == -math.huge then ",
+    "return '-Infinity'; ",
+    "end; ",
+    "local text = string.format('%.15g', value); ",
+    "if tonumber(text) ~= value then ",
+    "text = string.format('%.16g', value); ",
+    "if tonumber(text) ~= value then ",
+    "text = string.format('%.17g', value); ",
+    "end; ",
+    "end; ",
+    "return text; ",
+    "end; ",
+);
+
+/// RedissonTimeSeries.READ_NUMBER (line 611)
+const READ_NUMBER: &str = concat!(
+    "local function readNumber(text, timestamp) ",
+    "local number = tonumber(text); ",
+    "if number == nil or number ~= number ",
+    "or number == math.huge or number == -math.huge then ",
+    "error('RTimeSeries value at timestamp ' .. timestamp ",
+    ".. ' is not a finite number'); ",
+    "end; ",
+    "return number; ",
+    "end; ",
+);
+
+/// RedissonTimeSeries.ADD_COMPARING (line 635)
+pub(super) static ADD_COMPARING: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            NEXT_ID,
+            REMOVE_MEMBERS,
+            ENTRY_ARGS,
+            STORE_ENTRY,
+            RETENTION_CUTOFF,
+            FORMAT_NUMBER,
+            READ_NUMBER,
+            concat!(
+                "local now = tonumber(ARGV[3]); ",
+                "local policy = tonumber(ARGV[9]); ",
+                "local result = 0; ",
+            ),
+            WITHIN_RETENTION,
+            concat!(
+                "local folded; ",
+                "local stale; ",
+                "local existing = redis.call('zrangebyscore', KEYS[1], timestamp, timestamp); ",
+                "for j = 1, #existing do ",
+                "local expirationDate = redis.call('zscore', KEYS[2], existing[j]); ",
+                "if expirationDate == false or tonumber(expirationDate) > now then ",
+                "local marker, id, val = struct.unpack('BBc0Lc0Lc0', existing[j]); ",
+                "local number = readNumber(val, timestamp); ",
+                "if folded == nil then ",
+                "folded = number; ",
+                "elseif policy == 3 then ",
+                "folded = folded + number; ",
+                "elseif policy == 1 and number < folded then ",
+                "folded = number; ",
+                "elseif policy == 2 and number > folded then ",
+                "folded = number; ",
+                "end; ",
+                "else ",
+                "if stale == nil then ",
+                "stale = {}; ",
+                "end; ",
+                "table.insert(stale, existing[j]); ",
+                "end; ",
+                "end; ",
+                "local incoming = readNumber(entryValue, timestamp); ",
+                "local store = true; ",
+                "local stored = entryValue; ",
+                "if folded ~= nil then ",
+                "if policy == 1 then ",
+                "store = incoming < folded; ",
+                "elseif policy == 2 then ",
+                "store = incoming > folded; ",
+                "else ",
+                "local sum = folded + incoming; ",
+                "if sum ~= sum or sum == math.huge or sum == -math.huge then ",
+                "error('RTimeSeries sum at timestamp ' .. timestamp ",
+                ".. ' is not a finite number'); ",
+                "end; ",
+                "stored = formatNumber(sum); ",
+                "end; ",
+                "end; ",
+                "if store then ",
+                "if #existing > 0 then ",
+                "removeMembers(existing); ",
+                "end; ",
+                "storeEntry(nextId(), timestamp, stored); ",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.INCREMENT (line 723)
+pub(super) static INCREMENT: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            NEXT_ID,
+            REMOVE_MEMBERS,
+            ENTRY_ARGS,
+            STORE_ENTRY,
+            concat!(
+                "local state = redis.call('hmget', KEYS[3], 'incremented', 'total'); ",
+                "if state[1] ~= false and tonumber(timestamp) < tonumber(state[1]) then ",
+                "timestamp = state[1]; ",
+                "end; ",
+            ),
+            RETENTION_CUTOFF,
+            FORMAT_NUMBER,
+            READ_NUMBER,
+            WITHIN_RETENTION,
+            concat!(
+                "local amount = readNumber(entryValue, timestamp); ",
+                "local previous = '0'; ",
+                "if state[2] ~= false then ",
+                "previous = state[2]; ",
+                "end; ",
+                "local moved = tonumber(previous) + amount; ",
+                "if moved ~= moved or moved == math.huge or moved == -math.huge then ",
+                "error('RTimeSeries total at timestamp ' .. timestamp ",
+                ".. ' is not a finite number'); ",
+                "end; ",
+                "local id = nextId(); ",
+                "local total = redis.call('hincrbyfloat', KEYS[3], 'total', ",
+                "formatNumber(amount)); ",
+                "if amount ~= 0 and total == previous then ",
+                "error('RTimeSeries amount at timestamp ' .. timestamp ",
+                ".. ' is too small to change a total of ' .. previous); ",
+                "end; ",
+                "redis.call('hset', KEYS[3], 'incremented', timestamp); ",
+                "local existing = redis.call('zrangebyscore', KEYS[1], timestamp, timestamp); ",
+                "if #existing > 0 then ",
+                "removeMembers(existing); ",
+                "end; ",
+                "storeEntry(id, timestamp, total); ",
+                "end; ",
+            ),
+            RETENTION_TRIM,
+            concat!(
+                "local reply = redis.call('hget', KEYS[3], 'total'); ",
+                "if reply == false then ",
+                "reply = '0'; ",
+                "end; ",
+                "return reply;",
+            ),
+        ]
+        .concat(),
+    )
+});
 #[cfg(test)]
 mod tests {
     use super::*;

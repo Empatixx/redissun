@@ -629,3 +629,145 @@ async fn redisson_read_tail_advancing_a_cursor() {
     }
     assert_eq!(seen, strings(&["v0", "v1", "v2", "v3", "v4"]));
 }
+
+// ---- Task 4: extend, comparing policies, add ----
+
+/// Encodes every value as 8 big-endian bytes of an `f64`: not text, so the policies refuse it.
+#[derive(Clone)]
+struct F64BeCodec;
+
+impl redissun::Codec for F64BeCodec {
+    fn encode<T: serde::Serialize + ?Sized>(&self, value: &T) -> redissun::Result<bytes::Bytes> {
+        let text =
+            serde_json::to_string(value).map_err(|e| redissun::Error::Codec(e.to_string()))?;
+        let number: f64 = text.parse().unwrap_or(0.0);
+        Ok(bytes::Bytes::copy_from_slice(&number.to_be_bytes()))
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> redissun::Result<T> {
+        let raw: [u8; 8] = bytes
+            .try_into()
+            .map_err(|_| redissun::Error::Codec("not 8 bytes".into()))?;
+        serde_json::from_str(&f64::from_be_bytes(raw).to_string())
+            .map_err(|e| redissun::Error::Codec(e.to_string()))
+    }
+}
+
+#[tokio::test]
+async fn extend_takes_tuples_and_entries() {
+    let t = ts(&unique("ts")).await;
+    t.extend(vec![(1, "a".to_string()), (2, "b".to_string())])
+        .await
+        .unwrap();
+    t.extend([labelled(3, "c", "l")]).await.unwrap();
+    t.extend(Vec::<(i64, String)>::new()).await.unwrap();
+    assert_eq!(t.len().await.unwrap(), 3);
+    assert_eq!(t.entry(3).await.unwrap(), Some(labelled(3, "c", "l")));
+    let n = unique("ts");
+    let short = ts(&n).await;
+    short
+        .extend([(1, "x".to_string())])
+        .ttl(Duration::from_millis(100))
+        .await
+        .unwrap();
+    assert_eq!(short.len().await.unwrap(), 1);
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(short.len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn try_insert_over_an_expired_entry_is_true() {
+    let t = ts(&unique("ts")).await;
+    t.insert(1, "old")
+        .ttl(Duration::from_millis(50))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(150)).await;
+    assert!(t.try_insert(1, "new").await.unwrap());
+    assert_eq!(t.get(1).await.unwrap().as_deref(), Some("new"));
+}
+
+#[tokio::test]
+async fn policies_refuse_a_binary_codec_before_sending() {
+    let n = unique("ts");
+    let t = client()
+        .await
+        .with_codec(F64BeCodec)
+        .time_series::<f64, String>(n.clone());
+    match t.set_sum(1, &1.0).await {
+        Err(redissun::Error::Config(m)) => assert!(m.contains("encodes numbers as text"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        t.add(1, &1.0).await,
+        Err(redissun::Error::Config(_))
+    ));
+    assert_eq!(exists(&[&n]).await, 0);
+}
+
+// Redisson: testPutAll
+#[tokio::test]
+async fn redisson_put_all() {
+    let t = ts(&unique("ts")).await;
+    let map: std::collections::BTreeMap<i64, String> =
+        (1..=4).map(|i| (i, i.to_string())).collect();
+    t.extend(map).await.unwrap();
+    assert_eq!(t.len().await.unwrap(), 4);
+}
+
+// Redisson: testAddIfLess
+#[tokio::test]
+async fn redisson_add_if_less() {
+    let t = numeric(&unique("ts")).await;
+    assert!(t.set_if_less(5, "10").await.unwrap());
+    assert!(t.set_if_less(5, "4").await.unwrap());
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("4"));
+    assert!(!t.set_if_less(5, "9").await.unwrap());
+    assert!(!t.set_if_less(5, "4").await.unwrap());
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("4"));
+    assert_eq!(t.len().await.unwrap(), 1);
+}
+
+// Redisson: testAddIfGreater
+#[tokio::test]
+async fn redisson_add_if_greater() {
+    let t = numeric(&unique("ts")).await;
+    assert!(t.set_if_greater(5, "4").await.unwrap());
+    assert!(t.set_if_greater(5, "10").await.unwrap());
+    assert!(!t.set_if_greater(5, "9").await.unwrap());
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("10"));
+    assert_eq!(t.len().await.unwrap(), 1);
+}
+
+// Redisson: testAddAndSum
+#[tokio::test]
+async fn redisson_add_and_sum() {
+    let t = numeric(&unique("ts")).await;
+    assert!(t.set_sum(5, "10").await.unwrap());
+    assert!(!t.set_sum(5, "5").await.unwrap());
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("15"));
+    assert!(!t.set_sum(5, "-15").await.unwrap());
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("0"));
+    assert_eq!(t.len().await.unwrap(), 1);
+}
+
+// Redisson: testAddAndGet
+#[tokio::test]
+async fn redisson_add_and_get() {
+    let t = numeric(&unique("ts")).await;
+    assert_eq!(t.add(1, "5").await.unwrap(), 5.0);
+    assert_eq!(t.add(2, "3").await.unwrap(), 8.0);
+    assert_eq!(t.add(3, "-4").await.unwrap(), 4.0);
+    assert_eq!(t.range(0..=10).await.unwrap(), strings(&["5", "8", "4"]));
+    assert_eq!(t.len().await.unwrap(), 3);
+    assert_eq!(t.add(3, "1").await.unwrap(), 5.0);
+    assert_eq!(t.get_all(3).await.unwrap(), strings(&["5"]));
+}
+
+#[tokio::test]
+async fn add_under_json_codec_with_numbers() {
+    let t = client().await.time_series::<f64, String>(unique("ts"));
+    assert_eq!(t.add(1, &1.5).await.unwrap(), 1.5);
+    assert_eq!(t.add(2, &2.0).await.unwrap(), 3.5);
+    assert_eq!(t.get(2).await.unwrap(), Some(3.5));
+}

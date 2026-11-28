@@ -155,6 +155,96 @@ add_builder!(
     run_set
 );
 
+add_builder!(
+    /// A pending [`TimeSeries::set_if_less`]. Await it, optionally after [`SetIfLess::label`], [`SetIfLess::ttl`] or [`SetIfLess::retention`]. Resolves to whether it stored the value.
+    SetIfLess,
+    bool,
+    run_set_if_less
+);
+
+add_builder!(
+    /// A pending [`TimeSeries::set_if_greater`]. Await it, optionally after [`SetIfGreater::label`], [`SetIfGreater::ttl`] or [`SetIfGreater::retention`]. Resolves to whether it stored the value.
+    SetIfGreater,
+    bool,
+    run_set_if_greater
+);
+
+add_builder!(
+    /// A pending [`TimeSeries::set_sum`]. Await it, optionally after [`SetSum::label`], [`SetSum::ttl`] or [`SetSum::retention`]. Resolves to whether it stored the sum.
+    SetSum,
+    bool,
+    run_set_sum
+);
+
+add_builder!(
+    /// A pending [`TimeSeries::add`]. Await it, optionally after [`Add::label`], [`Add::ttl`] or [`Add::retention`]. Resolves to the running total.
+    Add,
+    f64,
+    run_add
+);
+
+/// The encoded entries of an [`Extend`]: timestamp, value and label.
+pub(crate) type EncodedEntries = Result<Vec<(i64, Bytes, Option<Bytes>)>>;
+
+/// A pending [`TimeSeries::extend`]. Await it, optionally after [`Extend::ttl`].
+#[must_use = "an extend does nothing until it is awaited"]
+pub struct Extend<'a, V, L, C: Codec> {
+    series: &'a TimeSeries<V, L, C>,
+    entries: EncodedEntries,
+    ttl: Option<Duration>,
+}
+
+impl<'a, V, L, C: Codec> Extend<'a, V, L, C> {
+    pub(super) fn new(series: &'a TimeSeries<V, L, C>, entries: EncodedEntries) -> Self {
+        Self {
+            series,
+            entries,
+            ttl: None,
+        }
+    }
+
+    /// Makes every entry expire after `ttl`, measured on this client's clock. Zero, less than a millisecond, or more than `i64::MAX` milliseconds means no time to live.
+    #[doc(alias = "timeToLive")]
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+}
+
+impl<'a, V, L, C: Codec> IntoFuture for Extend<'a, V, L, C>
+where
+    V: Send + Sync + 'a,
+    L: Send + Sync + 'a,
+{
+    type Output = Result<()>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let entries = self.entries?;
+            if entries.is_empty() {
+                return Ok(());
+            }
+            let now = now_millis();
+            let with_ttl = self.ttl.and_then(whole_millis).is_some();
+            let mut args = Vec::with_capacity(2 + entries.len() * 4);
+            args.push(Bytes::from_static(SEQUENCE_WIDTH.as_bytes()));
+            args.push(Bytes::from(expiration(self.ttl, now).to_string()));
+            for (timestamp, value, label) in entries {
+                args.push(Bytes::from(timestamp.to_string()));
+                let (flag, label) = match label {
+                    Some(label) => (LABEL_FIELD_SET, label),
+                    None => (LABEL_FIELD_EMPTY, Bytes::new()),
+                };
+                args.push(Bytes::from_static(flag.as_bytes()));
+                args.push(value);
+                args.push(label);
+            }
+            self.series.run_extend(args, with_ttl).await
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

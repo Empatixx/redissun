@@ -7,19 +7,23 @@ mod scripts;
 mod timestamp;
 
 use crate::codec::Codec;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::eviction;
 use crate::object::{now_millis, prefix_name, HasKey, Key};
 use crate::reply;
 use bytes::Bytes;
-use scripts::{ADD_ENTRY, ADD_IF_ABSENT, ADD_OR_REPLACE, EVICT, GET, GET_ENTRY, SIZE};
+use scripts::{
+    ADD_COMPARING, ADD_ENTRY, ADD_IF_ABSENT, ADD_OR_REPLACE, EVICT, EXTEND, EXTEND_TTL, GET,
+    GET_ENTRY, INCREMENT, SIZE,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::{Arc, OnceLock};
 
-pub use builders::{Insert, Set, TryInsert};
+pub use builders::{Add, Extend, Insert, Set, SetIfGreater, SetIfLess, SetSum, TryInsert};
 pub use ranges::{Range, RangeEntries, ReadAfter, RemoveRange};
 pub use timestamp::{TimeSeriesEntry, Timestamp};
 
@@ -56,6 +60,8 @@ fn seq_name(name: &str) -> String {
 pub struct TimeSeries<V, L, C: Codec> {
     key: Key,
     codec: C,
+    /// Whether the codec encodes numbers as text, Redisson's `numericCodec`, probed once per handle.
+    numeric: Arc<OnceLock<bool>>,
     _marker: PhantomData<fn() -> (V, L)>,
 }
 
@@ -64,6 +70,7 @@ impl<V, L, C: Codec> Clone for TimeSeries<V, L, C> {
         Self {
             key: self.key.clone(),
             codec: self.codec.clone(),
+            numeric: self.numeric.clone(),
             _marker: PhantomData,
         }
     }
@@ -95,6 +102,7 @@ impl<V, L, C: Codec> TimeSeries<V, L, C> {
         let series = Self {
             key,
             codec,
+            numeric: Arc::new(OnceLock::new()),
             _marker: PhantomData,
         };
         eviction::schedule(
@@ -149,6 +157,67 @@ impl<V, L, C: Codec> TimeSeries<V, L, C> {
         self.write_flag(&ADD_OR_REPLACE, args).await
     }
 
+    /// Redisson's `checkNumericCodec`: the comparing policies and `add` read stored values with `tonumber`, so the codec must encode numbers as text. A codec that cannot encode a number at all is left to the script.
+    fn check_numeric(&self, method: &str) -> Result<()> {
+        let numeric = *self.numeric.get_or_init(|| {
+            [1.5f64, -2.25f64]
+                .iter()
+                .all(|probe| match self.codec.encode(probe) {
+                    Err(_) => true,
+                    Ok(bytes) => std::str::from_utf8(&bytes)
+                        .ok()
+                        .filter(|text| text.is_ascii())
+                        .and_then(|text| text.trim().parse::<f64>().ok())
+                        .is_some_and(|parsed| parsed == *probe),
+                })
+        });
+        if numeric {
+            Ok(())
+        } else {
+            Err(Error::Config(format!(
+                "{method} on '{}' requires a codec that encodes numbers as text; use JsonCodec or StringCodec",
+                self.key.name()
+            )))
+        }
+    }
+
+    /// `ADD_COMPARING` with Redisson's policy `1` (less), `2` (greater) or `3` (sum).
+    async fn run_comparing(
+        &self,
+        method: &str,
+        policy: &'static str,
+        mut args: Vec<Bytes>,
+    ) -> Result<bool> {
+        self.check_numeric(method)?;
+        args.push(Bytes::from_static(policy.as_bytes()));
+        self.write_flag(&ADD_COMPARING, args).await
+    }
+
+    async fn run_set_if_less(&self, args: Vec<Bytes>) -> Result<bool> {
+        self.run_comparing("set_if_less", "1", args).await
+    }
+
+    async fn run_set_if_greater(&self, args: Vec<Bytes>) -> Result<bool> {
+        self.run_comparing("set_if_greater", "2", args).await
+    }
+
+    async fn run_set_sum(&self, args: Vec<Bytes>) -> Result<bool> {
+        self.run_comparing("set_sum", "3", args).await
+    }
+
+    /// `INCREMENT`, Redisson's `addAndGet`: the reply is the running total as text.
+    async fn run_add(&self, args: Vec<Bytes>) -> Result<f64> {
+        self.check_numeric("add")?;
+        let total: String = self
+            .key
+            .core
+            .eval_once(&INCREMENT, self.all_keys(), args)
+            .await?;
+        total
+            .parse()
+            .map_err(|_| Error::Codec(format!("not a number: {total}")))
+    }
+
     /// Adds `value` at `timestamp`, keeping the entries already there, Redisson's `add`. Resolves to `false` only when the entry is behind its [`retention`](Insert::retention) window and was not stored.
     #[doc(alias = "add")]
     pub fn insert<W>(&self, timestamp: impl Into<Timestamp>, value: &W) -> Insert<'_, V, L, C>
@@ -181,6 +250,89 @@ impl<V, L, C: Codec> TimeSeries<V, L, C> {
         W: Serialize + ?Sized,
     {
         Set::new(self, timestamp.into().as_millis(), self.codec.encode(value))
+    }
+
+    /// Stores `value` at `timestamp` when it is less than every live value there (or none is there), replacing them with this one entry, Redisson's `addIfLess`. Needs a codec that encodes numbers as text. Resolves to whether it stored the value.
+    #[doc(alias = "addIfLess")]
+    pub fn set_if_less<W>(
+        &self,
+        timestamp: impl Into<Timestamp>,
+        value: &W,
+    ) -> SetIfLess<'_, V, L, C>
+    where
+        V: Borrow<W>,
+        W: Serialize + ?Sized,
+    {
+        SetIfLess::new(self, timestamp.into().as_millis(), self.codec.encode(value))
+    }
+
+    /// Like [`set_if_less`](TimeSeries::set_if_less) for a greater value, Redisson's `addIfGreater`.
+    #[doc(alias = "addIfGreater")]
+    pub fn set_if_greater<W>(
+        &self,
+        timestamp: impl Into<Timestamp>,
+        value: &W,
+    ) -> SetIfGreater<'_, V, L, C>
+    where
+        V: Borrow<W>,
+        W: Serialize + ?Sized,
+    {
+        SetIfGreater::new(self, timestamp.into().as_millis(), self.codec.encode(value))
+    }
+
+    /// Replaces the live entries at `timestamp` with one holding their sum plus `value`, Redisson's `addAndSum`. Needs a codec that encodes numbers as text.
+    #[doc(alias = "addAndSum")]
+    pub fn set_sum<W>(&self, timestamp: impl Into<Timestamp>, value: &W) -> SetSum<'_, V, L, C>
+    where
+        V: Borrow<W>,
+        W: Serialize + ?Sized,
+    {
+        SetSum::new(self, timestamp.into().as_millis(), self.codec.encode(value))
+    }
+
+    /// Adds `delta` to the series' running total and records the new total at `timestamp`, Redisson's `addAndGet`. Resolves to the total. Needs a codec that encodes numbers as text.
+    #[doc(alias = "addAndGet")]
+    pub fn add<W>(&self, timestamp: impl Into<Timestamp>, delta: &W) -> Add<'_, V, L, C>
+    where
+        V: Borrow<W>,
+        W: Serialize + ?Sized,
+    {
+        Add::new(self, timestamp.into().as_millis(), self.codec.encode(delta))
+    }
+
+    /// Adds every entry, keeping what is at their timestamps, Redisson's `addAll`. Takes `(timestamp, value)`, `(timestamp, value, label)` or [`TimeSeriesEntry`] items; optionally with [`Extend::ttl`]. An empty input sends nothing.
+    #[doc(alias = "addAll")]
+    pub fn extend<I, E>(&self, entries: I) -> Extend<'_, V, L, C>
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<TimeSeriesEntry<V, L>>,
+        V: Serialize,
+        L: Serialize,
+    {
+        let encoded = entries
+            .into_iter()
+            .map(|entry| -> Result<(i64, Bytes, Option<Bytes>)> {
+                let entry = entry.into();
+                let label = entry
+                    .label
+                    .as_ref()
+                    .map(|l| self.codec.encode(l))
+                    .transpose()?;
+                Ok((entry.timestamp, self.codec.encode(&entry.value)?, label))
+            })
+            .collect();
+        Extend::new(self, encoded)
+    }
+
+    /// Runs Redisson's `addAll(Collection, ttl)` scripts.
+    async fn run_extend(&self, args: Vec<Bytes>, ttl: bool) -> Result<()> {
+        let script = if ttl { &EXTEND_TTL } else { &EXTEND };
+        let _: redis::Value = self
+            .key
+            .core
+            .eval_once(script, self.all_keys(), args)
+            .await?;
+        Ok(())
     }
 
     /// The number of live entries, Redisson's `size`.
