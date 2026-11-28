@@ -73,5 +73,13 @@ description: Things to know about this version.
   - Not in `Batch`.
   - `add_many` is not atomic, as `TS.MADD` is not: a refused sample fails the call while other samples may already be stored.
   - `TS.MGET`, `TS.MRANGE`, `TS.QUERYINDEX` and `TS.QUERYLABELS` go to one master.
+- **ReliableQueue and Redisson PRO's `RReliableQueue`** (experimental).
+  - The backend is redissun's own, so a Redisson PRO client cannot share a queue.
+  - `move_to` and the move to a dead-letter queue in another slot are two steps, not atomic; a dead letter arrives at least once.
+  - Per-message `headersCodec` is not ported: headers use the queue's codec.
+- **ReliablePubSubTopic and Redisson PRO's `RReliablePubSubTopic`** (experimental).
+  - Own backend, not shared with Redisson PRO. Each subscription keeps its own copy of a message (it is a `ReliableQueue`), so memory grows with the number of subscriptions.
+  - A subscription created while a publish runs may miss that message.
+  - The dead-letter destination is a `ReliableQueue`, not a topic. Deduplication, `groupIdClaimTimeout` and per-consumer statistics are not ported; subscription statistics report ready, delayed and unacknowledged messages and consumers.
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error, except for the entry time limits of `HashMapCache` and `HashSetCache` and the entry TTLs of `MapCacheNative`, where zero means no limit. A `MapCacheNative` deadline (`.expire_at(t)`) is sent in whole Unix milliseconds, rounded down.
 - **Before 1.0**, the API can change between minor versions.

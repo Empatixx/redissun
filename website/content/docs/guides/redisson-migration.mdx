@@ -33,6 +33,8 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RTimeSeries` | `TimeSeries` (experimental) |
 | `RTimeSeriesNative` | `TimeSeriesNative` (experimental) |
 | `RTimeSeriesNatives` | `TimeSeriesNatives` (experimental) |
+| `RReliableQueue` (PRO) | `ReliableQueue` (experimental, own backend) |
+| `RReliablePubSubTopic` (PRO) | `ReliablePubSubTopic` (experimental, own backend) |
 | `RSetCache` | `HashSetCache` |
 | `RListMultimap` | `ListMultimap` |
 | `RSetMultimap` | `SetMultimap` |
@@ -598,6 +600,48 @@ Timestamps are `i64` milliseconds. A limit or count of `0` returns nothing (Redi
 | Natives: `queryIndex(filters)`, `labelNames(filters)`, `labelValues(label, filters)` | `query_index(&Filter)`, `label_names()`, `label_values(label)` with `.filter(&Filter)` |
 
 `TSAggregation` → `Aggregator`, `TSReducer` → `Reducer`, `TSDuplicatePolicy` → `DuplicatePolicy`, `TSEncoding` → `Encoding`, `TSBucketTimestamp` → `BucketTimestamp`; filters are built with `Filter` instead of strings.
+
+## ReliableQueue
+
+Redisson PRO's `RReliableQueue` and redissun's `ReliableQueue` have the same features, but not the same data: they cannot share a queue.
+
+| Redisson | redissun |
+|---|---|
+| `getReliableQueue(name[, codec])` | `client[.with_codec(c)].reliable_queue::<V>(name)` |
+| `setConfig(QueueConfig)`, `setConfigIfAbsent(..)` | `set_config(&QueueConfig)`, `set_config_if_absent(..)` |
+| `add(QueueAddArgs)`, `addMany(..)` with `MessageArgs` | `add(&v)` with the message options, `add_many(MessageArgs…)`; `.timeout(d)` |
+| `poll()`, `poll(QueuePollArgs)`, `pollMany(..)` | `poll()`, `poll_many(n)` with `.visibility`, `.timeout`, `.ack_mode` |
+| `acknowledge(QueueAckArgs)` | `Delivery::ack()`, `ack(&ids)` |
+| `negativeAcknowledge(QueueNegativeAckArgs.failed(..) / .rejected(..))` | `Delivery::nack(Nack::Failed { delay } / Nack::Rejected)`, `nack(&ids, ..)` |
+| `size()`, `countDelayedMessages()`, `countUnacknowledgedMessages()` | `len()`, `delayed_len()`, `unacked_len()` |
+| `contains`, `containsMany`, `get`, `getAll`, `listAll` | `contains`, `contains_many`, `get`, `get_many`, `list_all` |
+| `remove(QueueRemoveArgs)`, `removeMany(..)`, `clear()` | `remove(&ids)`, `clear()` |
+| `move(QueueMoveArgs)` | `move_to(dest, QueueMove)` |
+| `getDeadLetterQueueSources()` | `dead_letter_sources()` |
+| `disableOperation`, `enableOperation` | `disable`, `enable` |
+| `addListener(QueueEventListener)`, `removeListener` | `events()`, then drop |
+
+## ReliablePubSubTopic
+
+Same features as Redisson PRO's `RReliablePubSubTopic`, not the same data.
+
+| Redisson | redissun |
+|---|---|
+| `getReliablePubSubTopic(name[, codec])` | `client[.with_codec(c)].reliable_pubsub_topic::<V>(name)` |
+| `setConfig(TopicConfig)`, `setConfigIfAbsent(..)` | `set_config(&TopicConfig)`, `set_config_if_absent(..)` |
+| `publish(PublishArgs)`, `publishMany(..)` | `publish(&v)` with the message options, `publish_many(MessageArgs…)` |
+| `createSubscription([SubscriptionConfig])` | `create_subscription()` with `.name`, `.dead_letter_queue`, `.delivery_limit`, `.visibility`, `.position` |
+| `getSubscription`, `hasSubscription`, `removeSubscription`, `getSubscriptions` | `subscription`, `has_subscription`, `remove_subscription`, `subscriptions` |
+| `Subscription.createPullConsumer([ConsumerConfig])`, `createPushConsumer(..)` + `MessageListener` | `pull_consumer()` with `.name`; `PullConsumer::into_stream(wait)` |
+| `PullConsumer.pull([PullArgs])`, `pullMany(..)` | `pull()`, `pull_many(n)` |
+| `Subscription.seek(Position)`, `getConsumerNames`, `hasConsumer`, `removeConsumer`, `getStatistics` | `seek`, `consumer_names`, `has_consumer`, `remove_consumer`, `statistics` |
+| `size`, `contains`, `containsMany`, `get`, `getAll`, `listAll`, `clear` | `len`, `contains`, `contains_many`, `get`, `get_many`, `list_all`, `clear` |
+| `getDeadLetterTopicSources()` | `dead_letter_sources()` |
+| `disableOperation`, `enableOperation` (`PubSubOperation`) | `disable`, `enable` |
+| `getStatistics()` | `statistics()` |
+| `addListener(PubSubEventListener)`, `removeListener` | `events()`, then drop |
+| `RetentionMode.SUBSCRIPTION_REQUIRED_DELETE_PROCESSED` / `…_RETAIN_ALL` / `SUBSCRIPTION_OPTIONAL_RETAIN_ALL` | `Retention::RequiredDeleteProcessed` / `RequiredRetainAll` / `OptionalRetainAll` |
+| `Position.latest()`, `earliest()`, `messageId(..)`, `messageIdExclusive(..)`, `timestamp(..)`, `timestampExclusive(..)` | `Position::Latest`, `Earliest`, `Id { id, inclusive }`, `Time { at, inclusive }` |
 
 ## VecDeque blocking
 

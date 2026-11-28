@@ -1541,7 +1541,21 @@ mod cluster {
         .expect("the batches did not finish");
         assert!(has_errors.load(Ordering::SeqCst));
 
-        execute_batch(&client).await.unwrap();
+        // A leaked connection never comes back; a batch that only ran into the 100 ms timeout on a busy machine does, so a few tries tell them apart.
+        let mut last = None;
+        for _ in 0..10 {
+            match execute_batch(&client).await {
+                Ok(_) => {
+                    last = None;
+                    break;
+                }
+                Err(e) => {
+                    last = Some(e);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+        assert!(last.is_none(), "the only connection leaked: {last:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

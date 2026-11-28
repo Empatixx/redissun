@@ -1,0 +1,52 @@
+---
+title: ReliableQueue
+description: A queue with acknowledgements, redelivery, priorities, delays, TTL, deduplication and a dead-letter queue; the functionality of Redisson PRO's RReliableQueue. Experimental.
+---
+
+**Experimental.** `ReliableQueue<V>` has the functionality of Redisson PRO's `RReliableQueue`. Redisson's implementation is not open source, so the data layout and the Lua scripts are redissun's own: a Redisson PRO client cannot share the queue. It runs on Redis or Valkey 6.2 or newer, in a cluster too (every key is in the slot of `{name}`).
+
+```rust
+use std::time::Duration;
+use redissun::reliable_queue::{Nack, QueueConfig};
+
+let jobs = client.reliable_queue::<String>("jobs");
+jobs.set_config(&QueueConfig::new().delivery_limit(3).dead_letter_queue("jobs-dead")).await?;
+jobs.add("resize photo.jpg").priority(7).await?;
+
+if let Some(job) = jobs.poll().timeout(Duration::from_secs(5)).await? {
+    match process(&job.payload) {
+        Ok(()) => { job.ack().await?; }
+        Err(_) => { job.nack(Nack::Failed { delay: Duration::from_secs(10) }).await?; }
+    }
+}
+```
+
+## How a message moves
+
+A message is **ready**, **delayed** (until its delay ends), or **unacknowledged** (polled, invisible until its visibility ends). `ack` removes it. `nack(Nack::Failed { delay })` puts it back (after the delay) until its delivery limit is reached; then, like `nack(Nack::Rejected)`, it goes to the dead-letter queue, or is deleted without one. A `Delivery` dropped without `ack` or `nack` comes back after its visibility. Ready messages are delivered by priority (0–9, higher first), FIFO within a priority.
+
+Times are the server's (`TIME`), so clients with skewed clocks agree. Delayed, timed-out and expired messages are handled at the start of every script that reads the queue, at most 100 of each kind per call; no background task is needed. A waiting `poll` wakes on a pub/sub notification when a message becomes ready and at the next delayed or visibility deadline.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `set_config(&QueueConfig)`, `set_config_if_absent(..)` | `delivery_limit` (10), `visibility` (30 s), `ttl`, `dead_letter_queue`, `max_message_size`, `delay`, `max_size`, `processing_mode`. Redisson's `setConfig`, `setConfigIfAbsent`. |
+| `add(&v)` with `.priority(p)`, `.delay(d)`, `.ttl(d)`, `.delivery_limit(n)`, `.dedup_by_hash(window)`, `.dedup_by_id(id, window)`, `.header(name, &value)`, `.timeout(d)` | resolves to the `Message`, `None` when deduplicated. `.timeout` waits for room in a full queue. |
+| `add_many(MessageArgs…)` | all in one script. Redisson's `addMany`. |
+| `poll()` with `.visibility(d)`, `.timeout(d)`, `.ack_mode(AckMode)`; `poll_many(n)` | a `Delivery` (derefs to `Message`) with `ack()` and `nack(Nack)`. |
+| `consumer(wait)` | a `Stream` of deliveries, a loop of waiting polls. |
+| `ack(&ids)`, `nack(&ids, Nack)` | for ids kept elsewhere. |
+| `len()`, `delayed_len()`, `unacked_len()`, `is_empty()` | Redisson's `size`, `countDelayedMessages`, `countUnacknowledgedMessages`. |
+| `contains(id)`, `contains_many(&ids)`, `get(id)`, `get_many(&ids)`, `list_all()` | without changing the messages. |
+| `remove(&ids)`, `clear()` | in any state. |
+| `move_to(dest, QueueMove::Ids(..) \| QueueMove::Count(n))` | to another queue, keeping the ids; not atomic across the two queues. Redisson's `move`. |
+| `dead_letter_sources()` | the queues that use this one as their dead-letter queue. |
+| `disable(QueueOperation)`, `enable(..)` | a disabled `Add` or `Poll` fails with `Error::OperationDisabled`. |
+| `events()` | `QueueEvent::{Added, Polled, Acknowledged, NegativelyAcknowledged, Removed, Full, Config, Disabled, Enabled}`. |
+
+`Message` has `id`, `payload`, `deliveries` and `header::<T>(name)`. `Object` covers every key.
+
+## How it is stored
+
+`{name}` (ready, sorted set), `{name}:delayed`, `{name}:unacked`, `{name}:expiry` (sorted sets by time), `{name}:payloads`, `{name}:meta` (hashes), `{name}:dedup` with `{name}:dedup:exp`, `{name}:config`, `{name}:disabled`, `{name}:seq` and `{name}:dead`. Ids are `<server ms>-<sequence>`. A dead-letter queue in another slot receives its messages from the client in a second step; after a crash in between, the next poll or nack repeats the move, so a dead letter arrives at least once.

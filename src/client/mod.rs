@@ -242,6 +242,32 @@ impl<C: Codec> Client<C> {
         TimeSeriesNatives::new(self.core.clone())
     }
 
+    /// Returns the reliable queue stored under `name`, with the functionality of Redisson PRO's `getReliableQueue`. **Experimental.** Every key is in the slot of `{name}`.
+    #[doc(alias = "getReliableQueue")]
+    pub fn reliable_queue<V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> crate::messaging::reliable::queue::ReliableQueue<V, C> {
+        let name: Arc<str> = name.into();
+        crate::messaging::reliable::queue::ReliableQueue::new(
+            Key::new(self.core.clone(), tagged(&name)),
+            self.codec.clone(),
+        )
+    }
+
+    /// Returns the reliable publish/subscribe topic stored under `name`, with the functionality of Redisson PRO's `getReliablePubSubTopic`. **Experimental.**
+    #[doc(alias = "getReliablePubSubTopic")]
+    pub fn reliable_pubsub_topic<V>(
+        &self,
+        name: impl Into<Arc<str>>,
+    ) -> crate::messaging::reliable::topic::ReliablePubSubTopic<V, C> {
+        let name: Arc<str> = name.into();
+        crate::messaging::reliable::topic::ReliablePubSubTopic::new(
+            Key::new(self.core.clone(), tagged(&name)),
+            self.codec.clone(),
+        )
+    }
+
     /// Returns the [`HashSetCache`] stored under `name`.
     pub fn hash_set_cache<V>(&self, name: impl Into<Arc<str>>) -> HashSetCache<V, C> {
         let name: Arc<str> = name.into();

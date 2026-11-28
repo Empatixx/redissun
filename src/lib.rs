@@ -89,6 +89,27 @@ pub mod sorted_set {
     pub use crate::collections::sorted_set::Extend;
 }
 
+/// The types and builders of [`ReliablePubSubTopic`].
+pub mod reliable_pubsub_topic {
+    pub use crate::messaging::reliable::message::{AckMode, Message, MessageArgs, Nack};
+    pub use crate::messaging::reliable::queue::Delivery;
+    pub use crate::messaging::reliable::topic::{
+        CreateConsumer, CreateSubscription, Position, PubSubOperation, Publish, PublishMany,
+        PullConsumer, Retention, Subscription, SubscriptionStatistics, TopicConfig, TopicEvent,
+        TopicEvents, TopicStatistics,
+    };
+}
+
+/// The types and builders of [`ReliableQueue`].
+pub mod reliable_queue {
+    pub use crate::messaging::reliable::message::{
+        AckMode, Dedup, Message, MessageArgs, Nack, ProcessingMode, QueueEvent, QueueOperation,
+    };
+    pub use crate::messaging::reliable::queue::{
+        Add, AddMany, Delivery, Poll, PollMany, QueueConfig, QueueEvents, QueueMove,
+    };
+}
+
 /// The types and builders of [`TimeSeriesNative`] and [`TimeSeriesNatives`].
 pub mod time_series_native {
     pub use crate::collections::time_series_native::{
@@ -195,6 +216,8 @@ pub use locks::multi_lock::{LockTarget, MultiLock, MultiLockGuard, MultiLockRequ
 pub use locks::rw_lock::RwLock;
 pub use locks::{Lock, LockGuard, LockRequest};
 pub use messaging::delayed_queue::DelayedQueue;
+pub use messaging::reliable::queue::ReliableQueue;
+pub use messaging::reliable::topic::ReliablePubSubTopic;
 pub use messaging::reliable_topic::{ReliableSubscriber, ReliableTopic};
 pub use messaging::sharded_topic::{ShardedSubscriber, ShardedTopic};
 pub use messaging::stream::{
