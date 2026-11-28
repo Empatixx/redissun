@@ -1,6 +1,8 @@
 //! [`TimeSeries`], Redisson's `RTimeSeries`: values by timestamp with labels, per-entry TTL and retention, on Redisson's keys and Lua scripts.
 
 mod builders;
+mod ranges;
+mod reads;
 mod scripts;
 mod timestamp;
 
@@ -18,6 +20,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 pub use builders::{Insert, Set, TryInsert};
+pub use ranges::{Range, RangeEntries, ReadAfter, RemoveRange};
 pub use timestamp::{TimeSeriesEntry, Timestamp};
 
 /// Redisson's `getTimeoutSetName`: the sorted set of expiry times.

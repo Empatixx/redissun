@@ -91,7 +91,9 @@ pub mod sorted_set {
 
 /// The builders and types [`TimeSeries`] methods return.
 pub mod time_series {
-    pub use crate::collections::time_series::{Insert, Set, TryInsert};
+    pub use crate::collections::time_series::{
+        Insert, Range, RangeEntries, ReadAfter, RemoveRange, Set, TryInsert,
+    };
 }
 
 /// The builders [`VecDeque`] methods return.

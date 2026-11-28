@@ -350,3 +350,282 @@ async fn numeric_series_read_back_their_text() {
     assert_eq!(t.get(1).await.unwrap(), Some("1.5".to_string()));
     t.del().await.unwrap();
 }
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|v| v.to_string()).collect()
+}
+
+// ---- Task 2: reads and removals by timestamp, head and tail ----
+
+#[tokio::test]
+async fn one_timestamp_holds_many_until_set_collapses_it() {
+    let t = ts(&unique("ts")).await;
+    for v in ["a", "b", "c"] {
+        assert!(t.insert(5, v).await.unwrap());
+    }
+    assert_eq!(t.get_all(5).await.unwrap(), strings(&["a", "b", "c"]));
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("a"));
+    assert!(!t.set(5, "z").await.unwrap());
+    assert_eq!(t.get_all(5).await.unwrap(), strings(&["z"]));
+}
+
+#[tokio::test]
+async fn expired_entries_are_invisible_everywhere() {
+    let n = unique("ts");
+    let t = ts(&n).await;
+    t.insert(1, "x")
+        .label("l")
+        .ttl(Duration::from_millis(50))
+        .await
+        .unwrap();
+    t.insert(2, "y").await.unwrap();
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(t.len().await.unwrap(), 1);
+    assert_eq!(t.get(1).await.unwrap(), None);
+    assert!(t.get_all(1).await.unwrap().is_empty());
+    assert_eq!(t.first().await.unwrap().as_deref(), Some("y"));
+    assert_eq!(t.first_timestamp().await.unwrap(), Some(2));
+    assert_eq!(t.last_many(5).await.unwrap(), strings(&["y"]));
+    assert_eq!(t.range(..).await.unwrap(), strings(&["y"]));
+    assert!(t.labels(..).await.unwrap().is_empty());
+    let after: Vec<i64> = t
+        .read_after(0)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.timestamp)
+        .collect();
+    assert_eq!(after, [2]);
+    assert_eq!(t.pop_first().await.unwrap().as_deref(), Some("y"));
+    assert_eq!(int_reply(&raw_command(&["ZCARD", &n]).await), 1);
+}
+
+#[tokio::test]
+async fn head_and_tail_of_nothing() {
+    let t = ts(&unique("ts")).await;
+    assert_eq!(t.first().await.unwrap(), None);
+    assert_eq!(t.last().await.unwrap(), None);
+    assert_eq!(t.first_entry().await.unwrap(), None);
+    assert_eq!(t.last_entry().await.unwrap(), None);
+    assert!(t.first_many(3).await.unwrap().is_empty());
+    assert!(t.last_entries(3).await.unwrap().is_empty());
+    assert_eq!(t.first_timestamp().await.unwrap(), None);
+    assert_eq!(t.last_timestamp().await.unwrap(), None);
+    assert_eq!(t.pop_first().await.unwrap(), None);
+    assert_eq!(t.pop_last_entry().await.unwrap(), None);
+    assert!(t.first_many(0).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn first_last_and_pop_keep_ascending_order() {
+    let t = ts(&unique("ts")).await;
+    for i in 1..=5 {
+        t.insert(i, &format!("v{i}")).await.unwrap();
+    }
+    assert_eq!(t.first_many(2).await.unwrap(), strings(&["v1", "v2"]));
+    assert_eq!(t.last_many(2).await.unwrap(), strings(&["v4", "v5"]));
+    assert_eq!(t.last_timestamp().await.unwrap(), Some(5));
+    assert_eq!(t.last_entries(1).await.unwrap(), [entry(5, "v5")]);
+    assert_eq!(t.pop_last_many(2).await.unwrap(), strings(&["v4", "v5"]));
+    assert_eq!(t.pop_first_entries(1).await.unwrap(), [entry(1, "v1")]);
+    assert_eq!(t.len().await.unwrap(), 2);
+    assert_eq!(t.remove(2).await.unwrap().as_deref(), Some("v2"));
+    assert_eq!(t.remove(2).await.unwrap(), None);
+    assert_eq!(t.remove_entry(3).await.unwrap(), Some(entry(3, "v3")));
+    assert!(t.is_empty().await.unwrap());
+}
+
+// Redisson: testDuplicatesKeepInsertionOrder
+#[tokio::test]
+async fn redisson_duplicates_keep_insertion_order() {
+    let t = ts(&unique("ts")).await;
+    for v in ["a", "b", "c"] {
+        t.insert(5, v).await.unwrap();
+    }
+    assert_eq!(t.len().await.unwrap(), 3);
+    assert_eq!(t.range(5..=5).await.unwrap(), strings(&["a", "b", "c"]));
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("a"));
+    assert!(t.remove(5).await.unwrap().is_some());
+    assert_eq!(t.get(5).await.unwrap().as_deref(), Some("b"));
+    assert_eq!(t.range(5..=5).await.unwrap(), strings(&["b", "c"]));
+}
+
+// Redisson: testGetAllAndRemoveAll
+#[tokio::test]
+async fn redisson_get_all_and_remove_all() {
+    let t = ts(&unique("ts")).await;
+    t.insert(1, "a").label("x").await.unwrap();
+    t.insert(1, "b").await.unwrap();
+    t.insert(2, "c").await.unwrap();
+    assert_eq!(
+        t.get_all_entries(1).await.unwrap(),
+        [labelled(1, "a", "x"), entry(1, "b")]
+    );
+    assert_eq!(t.remove_all(1).await.unwrap().len(), 2);
+    assert!(t.get_all(1).await.unwrap().is_empty());
+    assert_eq!(t.remove_all_entries(2).await.unwrap(), [entry(2, "c")]);
+    assert!(t.is_empty().await.unwrap());
+}
+
+// Redisson: testPollSkipsExpiredWithoutConsumingThem
+#[tokio::test]
+async fn redisson_poll_skips_expired_without_consuming_them() {
+    let t = ts(&unique("ts")).await;
+    for i in 0..5 {
+        t.insert(i, &format!("old{i}"))
+            .ttl(Duration::from_millis(500))
+            .await
+            .unwrap();
+    }
+    sleep(Duration::from_millis(700)).await;
+    t.insert(100, "a").await.unwrap();
+    t.insert(101, "b").await.unwrap();
+    assert_eq!(t.len().await.unwrap(), 2);
+    assert_eq!(t.pop_first().await.unwrap().as_deref(), Some("a"));
+    assert_eq!(t.pop_first_many(10).await.unwrap(), strings(&["b"]));
+    assert_eq!(t.len().await.unwrap(), 0);
+}
+
+// ---- Task 3: ranges, label filters, remove_range, labels, read_after, iter ----
+
+#[tokio::test]
+async fn range_bounds_at_the_edges() {
+    use std::ops::Bound::{Excluded, Unbounded};
+    let t = ts(&unique("ts")).await;
+    let big = (1i64 << 53) + 1;
+    for (i, ts) in [i64::MIN, -1, 0, big, i64::MAX].into_iter().enumerate() {
+        t.insert(ts, &format!("v{i}")).await.unwrap();
+    }
+    assert_eq!(
+        t.range(..).await.unwrap(),
+        strings(&["v0", "v1", "v2", "v3", "v4"])
+    );
+    assert_eq!(t.range(..0).await.unwrap(), strings(&["v0", "v1"]));
+    assert!(t
+        .range((Excluded(i64::MAX), Unbounded))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(t.range(5..5).await.unwrap().is_empty());
+    let last = t.range_entries(..=i64::MAX).rev().limit(1).await.unwrap();
+    assert_eq!(last.len(), 1);
+    assert_eq!(last[0].timestamp, i64::MAX);
+}
+
+#[tokio::test]
+async fn limit_zero_is_empty() {
+    let t = ts(&unique("ts")).await;
+    t.insert(1, "a").await.unwrap();
+    assert!(t.range(..).limit(0).await.unwrap().is_empty());
+    assert!(t.range_entries(..).limit(0).await.unwrap().is_empty());
+    assert_eq!(t.range(..).limit(1).await.unwrap(), strings(&["a"]));
+}
+
+#[tokio::test]
+async fn label_filters() {
+    let t = ts(&unique("ts")).await;
+    t.insert(1, "a").label("cpu").await.unwrap();
+    t.insert(2, "b").label("mem").await.unwrap();
+    t.insert(3, "c").await.unwrap();
+    assert_eq!(t.range(..).label("cpu").await.unwrap(), strings(&["a"]));
+    assert_eq!(t.range(..).unlabelled().await.unwrap(), strings(&["c"]));
+    assert_eq!(
+        t.range(..).unlabelled().label("mem").await.unwrap(),
+        strings(&["b"])
+    );
+    assert_eq!(
+        t.range(..).label("mem").unlabelled().await.unwrap(),
+        strings(&["c"])
+    );
+}
+
+#[tokio::test]
+async fn iter_pages_through_everything() {
+    use futures::TryStreamExt;
+    let t = ts(&unique("ts")).await;
+    let expected: Vec<String> = (0..25).map(|i| format!("v{i:02}")).collect();
+    for (i, v) in expected.iter().enumerate() {
+        t.insert(i as i64, v).await.unwrap();
+    }
+    let all: Vec<String> = t.iter_with(3).try_collect().await.unwrap();
+    assert_eq!(all, expected);
+    let default: Vec<String> = t.iter().try_collect().await.unwrap();
+    assert_eq!(default, expected);
+}
+
+// Redisson: testRangeReversed
+#[tokio::test]
+async fn redisson_range_reversed() {
+    let t = ts(&unique("ts")).await;
+    for i in 1..=4 {
+        t.insert(i, &format!("{}", i * 10)).await.unwrap();
+    }
+    assert_eq!(
+        t.range(1..=4).rev().limit(2).await.unwrap(),
+        strings(&["40", "30"])
+    );
+    assert_eq!(
+        t.range(1..=4).rev().await.unwrap(),
+        strings(&["40", "30", "20", "10"])
+    );
+    let t2 = ts(&unique("ts")).await;
+    t2.insert(1, "10").await.unwrap();
+    t2.insert(2, "20").await.unwrap();
+    t2.insert(3, "30")
+        .ttl(Duration::from_secs(1))
+        .await
+        .unwrap();
+    t2.insert(4, "40").await.unwrap();
+    sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        t2.range(1..=4).rev().limit(2).await.unwrap(),
+        strings(&["40", "20"])
+    );
+}
+
+// Redisson: testRemoveRangeByLabel
+#[tokio::test]
+async fn redisson_remove_range_by_label() {
+    let t = ts(&unique("ts")).await;
+    t.insert(1, "a1").label("cpu").await.unwrap();
+    t.insert(2, "b1").label("mem").await.unwrap();
+    t.insert(3, "a2").label("cpu").await.unwrap();
+    t.insert(4, "plain").await.unwrap();
+    assert_eq!(t.remove_range(0..=10).label("cpu").await.unwrap(), 2);
+    assert_eq!(t.range(0..=10).await.unwrap(), strings(&["b1", "plain"]));
+    assert_eq!(t.remove_range(0..=10).label("nope").await.unwrap(), 0);
+    assert_eq!(t.remove_range(0..=10).unlabelled().await.unwrap(), 1);
+    assert_eq!(t.range(0..=10).await.unwrap(), strings(&["b1"]));
+    assert_eq!(t.remove_range(..).await.unwrap(), 1);
+}
+
+// Redisson: testLabels
+#[tokio::test]
+async fn redisson_labels() {
+    let t = ts(&unique("ts")).await;
+    t.insert(1, "a1").label("cpu").await.unwrap();
+    t.insert(2, "b1").label("mem").await.unwrap();
+    t.insert(3, "a2").label("cpu").await.unwrap();
+    t.insert(4, "plain").await.unwrap();
+    assert_eq!(t.labels(..).await.unwrap(), strings(&["cpu", "mem"]));
+    assert_eq!(t.labels(2..=2).await.unwrap(), strings(&["mem"]));
+    assert!(t.labels(4..=4).await.unwrap().is_empty());
+    assert!(ts(&unique("ts")).await.labels(..).await.unwrap().is_empty());
+}
+
+// Redisson: testReadTailAdvancingACursor
+#[tokio::test]
+async fn redisson_read_tail_advancing_a_cursor() {
+    let t = ts(&unique("ts")).await;
+    let mut cursor = i64::MIN;
+    let mut seen = Vec::new();
+    for round in 0..5i64 {
+        t.insert(round * 10, &format!("v{round}")).await.unwrap();
+        for e in t.read_after(cursor).await.unwrap() {
+            seen.push(e.value);
+            cursor = e.timestamp;
+        }
+        assert!(t.read_after(cursor).await.unwrap().is_empty());
+    }
+    assert_eq!(seen, strings(&["v0", "v1", "v2", "v3", "v4"]));
+}

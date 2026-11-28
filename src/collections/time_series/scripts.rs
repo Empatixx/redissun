@@ -279,6 +279,465 @@ pub(super) static EVICT: LazyLock<Lua> = LazyLock::new(|| {
         "return #expiredKeys;",
     ))
 });
+
+/// RedissonTimeSeries.LIVE_AT_TIMESTAMP (line 1224)
+const LIVE_AT_TIMESTAMP: &str = concat!(
+    "local result = {}; ",
+    "local doomed = {}; ",
+    "local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[2]); ",
+    "for i = 1, #values do ",
+    "local expirationDate = redis.call('zscore', KEYS[2], values[i]); ",
+    "if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then ",
+);
+
+/// RedissonTimeSeries.getAllAsync (line 1240)
+pub(super) static GET_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            LIVE_AT_TIMESTAMP,
+            concat!(
+                "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+                "table.insert(result, val); ",
+                "end; ",
+                "end; ",
+                "return result;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.getAllEntriesAsync (line 1258)
+pub(super) static GET_ALL_ENTRIES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            LIVE_AT_TIMESTAMP,
+            "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+            DECODE_LABEL,
+            concat!(
+                "table.insert(result, val); ",
+                "table.insert(result, label); ",
+                "table.insert(result, n); ",
+                "table.insert(result, ARGV[2]); ",
+                "end; ",
+                "end; ",
+                "return result;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.getAndRemoveAsync (line 1369)
+pub(super) static GET_AND_REMOVE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[2]);",
+        "for i = 1, #values do ",
+        "local expirationDate = redis.call('zscore', KEYS[2], values[i]); ",
+        "if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then ",
+        "redis.call('zrem', KEYS[2], values[i]); ",
+        "redis.call('zrem', KEYS[1], values[i]); ",
+        "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+        "return val;",
+        "end;",
+        "end;",
+        "return nil;",
+    ))
+});
+
+/// RedissonTimeSeries.getAndRemoveEntryAsync (line 1392)
+pub(super) static GET_AND_REMOVE_ENTRY: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            concat!(
+                "local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[2]);",
+                "for i = 1, #values do ",
+                "local expirationDate = redis.call('zscore', KEYS[2], values[i]); ",
+                "if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then ",
+                "redis.call('zrem', KEYS[2], values[i]); ",
+                "redis.call('zrem', KEYS[1], values[i]); ",
+                "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+            ),
+            DECODE_LABEL,
+            concat!(
+                "if n == 2 then ",
+                "return {n, ARGV[2], val};",
+                "end;",
+                "return {n, ARGV[2], val, label};",
+                "end;",
+                "end;",
+                "return nil;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.getAndRemoveAllAsync (line 1303)
+pub(super) static GET_AND_REMOVE_ALL: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            REMOVE_MEMBERS,
+            LIVE_AT_TIMESTAMP,
+            concat!(
+                "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+                "table.insert(result, val); ",
+                "table.insert(doomed, values[i]); ",
+                "end; ",
+                "end; ",
+                "removeMembers(doomed); ",
+                "return result;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.getAndRemoveAllEntriesAsync (line 1323)
+pub(super) static GET_AND_REMOVE_ALL_ENTRIES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            REMOVE_MEMBERS,
+            LIVE_AT_TIMESTAMP,
+            "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+            DECODE_LABEL,
+            concat!(
+                "table.insert(result, val); ",
+                "table.insert(result, label); ",
+                "table.insert(result, n); ",
+                "table.insert(result, ARGV[2]); ",
+                "table.insert(doomed, values[i]); ",
+                "end; ",
+                "end; ",
+                "removeMembers(doomed); ",
+                "return result;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.FORMAT_TIMESTAMP (line 1539)
+const FORMAT_TIMESTAMP: &str = concat!(
+    "local function formatTimestamp(score) ",
+    "if score >= 9223372036854775808 then ",
+    "return '9223372036854775807'; ",
+    "end; ",
+    "if score <= -9223372036854775808 then ",
+    "return '-9223372036854775808'; ",
+    "end; ",
+    "return string.format('%.0f', score); ",
+    "end; ",
+);
+
+/// RedissonTimeSeries.KEEP_MEMBERS (line 1574)
+static KEEP_MEMBERS: LazyLock<String> = LazyLock::new(|| {
+    [
+        FORMAT_TIMESTAMP,
+        concat!(
+            "local result = {}; ",
+            "local members = {}; ",
+            "local scores = {}; ",
+            "local keepLimit = tonumber(ARGV[4]); ",
+            "local wholeTimestamps = ARGV[8] == '1'; ",
+            "local function keep(member, score) ",
+            "if keepLimit > 0 and #members >= keepLimit then ",
+            "if not wholeTimestamps then ",
+            "return false; ",
+            "end; ",
+            "if score ~= scores[#members] then ",
+            "return false; ",
+            "end; ",
+            "end; ",
+            "table.insert(members, member); ",
+            "table.insert(scores, score); ",
+            "return true; ",
+            "end; ",
+        ),
+    ]
+    .concat()
+});
+
+/// RedissonTimeSeries.MATCHES_LABEL (line 339)
+const MATCHES_LABEL: &str = concat!(
+    "local matches = true; ",
+    "if labelMode == '1' then ",
+    "matches = label == labelValue; ",
+    "elseif labelMode == '2' then ",
+    "matches = label == 0; ",
+    "end; ",
+);
+
+/// RedissonTimeSeries.COLLECT_RANGE (line 1598)
+static COLLECT_RANGE: LazyLock<String> = LazyLock::new(|| {
+    [
+        concat!(
+            "local labelMode = ARGV[6]; ",
+            "local labelValue = ARGV[7]; ",
+            "local function collect() ",
+            "local limit = tonumber(ARGV[4]); ",
+            "if limit < 0 then ",
+            "return; ",
+            "end; ",
+            "local pageSize = limit; ",
+            "if pageSize <= 0 or pageSize > 500 then ",
+            "pageSize = 500; ",
+            "elseif pageSize < 100 then ",
+            "pageSize = 100; ",
+            "end; ",
+            "local anyExpired = redis.call('zcount', KEYS[2], '-inf', ARGV[1]) > 0; ",
+            "local low = tonumber(ARGV[2]); ",
+            "local high = tonumber(ARGV[3]); ",
+            "local from, to = ARGV[2], ARGV[3]; ",
+            "local seek, page, rank = 'zrangebyscore', 'zrange', 'zrank'; ",
+            "if ARGV[5] ~= '0' then ",
+            "from, to = ARGV[3], ARGV[2]; ",
+            "seek, page, rank = 'zrevrangebyscore', 'zrevrange', 'zrevrank'; ",
+            "end; ",
+            "local head = redis.call(seek, KEYS[1], from, to, 'limit', 0, 1); ",
+            "if #head == 0 then ",
+            "return; ",
+            "end; ",
+            "local index = redis.call(rank, KEYS[1], head[1]); ",
+            "while true do ",
+            "local values = redis.call(page, KEYS[1], index, index + pageSize - 1, 'withscores'); ",
+            "if #values == 0 then ",
+            "return; ",
+            "end; ",
+            "for i = 1, #values, 2 do ",
+            "local score = tonumber(values[i+1]); ",
+            "if score < low or score > high then ",
+            "return; ",
+            "end; ",
+            "local live = true; ",
+            "if anyExpired then ",
+            "local expirationDate = redis.call('zscore', KEYS[2], values[i]); ",
+            "live = expirationDate == false ",
+            "or tonumber(expirationDate) > tonumber(ARGV[1]); ",
+            "end; ",
+            "if live then ",
+            "local label = 0; ",
+            "if labelMode == '1' or labelMode == '2' then ",
+            "local n, t, val; ",
+            "n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+        ),
+        DECODE_LABEL,
+        "end; ",
+        MATCHES_LABEL,
+        concat!(
+            "if matches then ",
+            "if not keep(values[i], values[i+1]) then ",
+            "return; ",
+            "end; ",
+            "end; ",
+            "end; ",
+            "end; ",
+            "index = index + #values/2; ",
+            "end; ",
+            "end; ",
+            "collect(); ",
+        ),
+    ]
+    .concat()
+});
+
+/// RedissonTimeSeries.UNPACK_VALUES (line 1737)
+const UNPACK_VALUES: &str = concat!(
+    "for i = 1, #members do ",
+    "local n, t, val = struct.unpack('BBc0Lc0Lc0', members[i]); ",
+    "table.insert(result, val); ",
+    "end; ",
+    "return result;",
+);
+
+/// RedissonTimeSeries.COLLECT_VALUES (line 1763)
+pub(super) static COLLECT_VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua([KEEP_MEMBERS.as_str(), COLLECT_RANGE.as_str(), UNPACK_VALUES].concat())
+});
+
+/// RedissonTimeSeries.UNPACK_ENTRIES (line 1744)
+static UNPACK_ENTRIES: LazyLock<String> = LazyLock::new(|| {
+    [
+        concat!(
+            "for i = 1, #members do ",
+            "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', members[i]); ",
+        ),
+        DECODE_LABEL,
+        concat!(
+            "table.insert(result, val); ",
+            "table.insert(result, label); ",
+            "table.insert(result, n); ",
+            "table.insert(result, formatTimestamp(tonumber(scores[i]))); ",
+            "end; ",
+            "return result;",
+        ),
+    ]
+    .concat()
+});
+
+/// RedissonTimeSeries.COLLECT_ENTRIES (line 1764)
+pub(super) static COLLECT_ENTRIES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            KEEP_MEMBERS.as_str(),
+            COLLECT_RANGE.as_str(),
+            UNPACK_ENTRIES.as_str(),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.UNPACK_TIMESTAMPS (line 1755)
+const UNPACK_TIMESTAMPS: &str = concat!(
+    "for i = 1, #scores do ",
+    "table.insert(result, formatTimestamp(tonumber(scores[i]))); ",
+    "end; ",
+    "return result;",
+);
+
+/// RedissonTimeSeries.COLLECT_TIMESTAMPS (line 1765)
+pub(super) static COLLECT_TIMESTAMPS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            KEEP_MEMBERS.as_str(),
+            COLLECT_RANGE.as_str(),
+            UNPACK_TIMESTAMPS,
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.REMOVE_COLLECTED (line 1761)
+const REMOVE_COLLECTED: &str = "removeMembers(members); ";
+
+/// RedissonTimeSeries.POLL_VALUES (line 1766)
+pub(super) static POLL_VALUES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            REMOVE_MEMBERS,
+            KEEP_MEMBERS.as_str(),
+            COLLECT_RANGE.as_str(),
+            REMOVE_COLLECTED,
+            UNPACK_VALUES,
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.POLL_ENTRIES (line 1768)
+pub(super) static POLL_ENTRIES: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            REMOVE_MEMBERS,
+            KEEP_MEMBERS.as_str(),
+            COLLECT_RANGE.as_str(),
+            REMOVE_COLLECTED,
+            UNPACK_ENTRIES.as_str(),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.removeRangeAsync (line 1954)
+pub(super) static REMOVE_RANGE: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            concat!(
+                "local labelMode = ARGV[4]; ",
+                "local labelValue = ARGV[5]; ",
+            ),
+            REMOVE_MEMBERS,
+            concat!(
+                "local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[3]);",
+                "local doomed = {}; ",
+                "for i, v in ipairs(values) do ",
+                "local expirationDate = redis.call('zscore', KEYS[2], v); ",
+                "if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then ",
+                "local label = 0; ",
+                "if labelMode == '1' or labelMode == '2' then ",
+                "local n, t, val; ",
+                "n, t, val, label = struct.unpack('BBc0Lc0Lc0', v); ",
+            ),
+            DECODE_LABEL,
+            "end; ",
+            MATCHES_LABEL,
+            concat!(
+                "if matches then ",
+                "table.insert(doomed, v); ",
+                "end; ",
+                "end;",
+                "end;",
+                "removeMembers(doomed); ",
+                "return #doomed;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.COLLECT_LABELS (line 2094)
+pub(super) static COLLECT_LABELS: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(
+        [
+            concat!(
+        "local result = {}; ",
+        "local seen = {}; ",
+        "local low = tonumber(ARGV[2]); ",
+        "local high = tonumber(ARGV[3]); ",
+        "local head = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[3], 'limit', 0, 1); ",
+        "if #head == 0 then ",
+        "return result; ",
+        "end; ",
+        "local index = redis.call('zrank', KEYS[1], head[1]); ",
+        "while true do ",
+        "local values = redis.call('zrange', KEYS[1], index, index + 499, 'withscores'); ",
+        "if #values == 0 then ",
+        "return result; ",
+        "end; ",
+        "for i = 1, #values, 2 do ",
+        "local score = tonumber(values[i+1]); ",
+        "if score < low or score > high then ",
+        "return result; ",
+        "end; ",
+        "local expirationDate = redis.call('zscore', KEYS[2], values[i]); ",
+        "if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then ",
+        "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i]); ",
+    ),
+            DECODE_LABEL,
+            concat!(
+                "if label ~= 0 and seen[label] == nil then ",
+                "seen[label] = true; ",
+                "table.insert(result, label); ",
+                "end; ",
+                "end; ",
+                "end; ",
+                "index = index + #values/2; ",
+                "end;",
+            ),
+        ]
+        .concat(),
+    )
+});
+
+/// RedissonTimeSeries.scanIteratorAsync (line 2376)
+pub(super) static SCAN: LazyLock<Lua> = LazyLock::new(|| {
+    Lua::from_lua(concat!(
+        "local result = {}; ",
+        "local res = redis.call('zrange', KEYS[1], ARGV[1], tonumber(ARGV[1]) + tonumber(ARGV[3]) - 1); ",
+        "for i, value in ipairs(res) do ",
+        "local expirationDate = redis.call('zscore', KEYS[2], value); ",
+        "if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[2]) then ",
+        "local n, t, val, label = struct.unpack('BBc0Lc0Lc0', value); ",
+        "table.insert(result, val);",
+        "end;",
+        "end;",
+        "local nextPos = tonumber(ARGV[1]) + tonumber(ARGV[3]); ",
+        "if #res < tonumber(ARGV[3]) then ",
+        "nextPos = 0;",
+        "end;",
+        "return {tostring(nextPos), result};",
+    ))
+});
 #[cfg(test)]
 mod tests {
     use super::*;
