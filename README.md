@@ -79,6 +79,7 @@ async fn main() -> redissun::Result<()> {
 | [`TimeSeriesNative`, `TimeSeriesNatives`](https://empatixx.github.io/redissun/docs/objects/time-series-native) | Redis 8 time series (`TS.*`) | experimental |
 | [`DelayedQueue`](https://empatixx.github.io/redissun/docs/objects/delayed-queue) | list, sorted set and pub/sub | stable |
 | [`ReliableQueue`](https://empatixx.github.io/redissun/docs/objects/reliable-queue) | acknowledged queue with redelivery, priorities and a dead-letter queue (own backend) | experimental |
+| [`ReliablePubSubTopic`](https://empatixx.github.io/redissun/docs/objects/reliable-pubsub-topic) | topic with acknowledged subscriptions (own backend) | experimental |
 | [`BitSet`](https://empatixx.github.io/redissun/docs/objects/bit-set) | string | stable |
 | [`HyperLogLog`](https://empatixx.github.io/redissun/docs/objects/hyper-log-log) | HyperLogLog | stable |
 | [`BloomFilter`](https://empatixx.github.io/redissun/docs/objects/bloom-filter) | string and hash | stable |

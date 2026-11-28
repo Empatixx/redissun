@@ -34,6 +34,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RTimeSeriesNative` | `TimeSeriesNative` (experimental) |
 | `RTimeSeriesNatives` | `TimeSeriesNatives` (experimental) |
 | `RReliableQueue` (PRO) | `ReliableQueue` (experimental, own backend) |
+| `RReliablePubSubTopic` (PRO) | `ReliablePubSubTopic` (experimental, own backend) |
 | `RSetCache` | `HashSetCache` |
 | `RListMultimap` | `ListMultimap` |
 | `RSetMultimap` | `SetMultimap` |
@@ -619,6 +620,28 @@ Redisson PRO's `RReliableQueue` and redissun's `ReliableQueue` have the same fea
 | `getDeadLetterQueueSources()` | `dead_letter_sources()` |
 | `disableOperation`, `enableOperation` | `disable`, `enable` |
 | `addListener(QueueEventListener)`, `removeListener` | `events()`, then drop |
+
+## ReliablePubSubTopic
+
+Same features as Redisson PRO's `RReliablePubSubTopic`, not the same data.
+
+| Redisson | redissun |
+|---|---|
+| `getReliablePubSubTopic(name[, codec])` | `client[.with_codec(c)].reliable_pubsub_topic::<V>(name)` |
+| `setConfig(TopicConfig)`, `setConfigIfAbsent(..)` | `set_config(&TopicConfig)`, `set_config_if_absent(..)` |
+| `publish(PublishArgs)`, `publishMany(..)` | `publish(&v)` with the message options, `publish_many(MessageArgs…)` |
+| `createSubscription([SubscriptionConfig])` | `create_subscription()` with `.name`, `.dead_letter_queue`, `.delivery_limit`, `.visibility`, `.position` |
+| `getSubscription`, `hasSubscription`, `removeSubscription`, `getSubscriptions` | `subscription`, `has_subscription`, `remove_subscription`, `subscriptions` |
+| `Subscription.createPullConsumer([ConsumerConfig])`, `createPushConsumer(..)` + `MessageListener` | `pull_consumer()` with `.name`; `PullConsumer::into_stream(wait)` |
+| `PullConsumer.pull([PullArgs])`, `pullMany(..)` | `pull()`, `pull_many(n)` |
+| `Subscription.seek(Position)`, `getConsumerNames`, `hasConsumer`, `removeConsumer`, `getStatistics` | `seek`, `consumer_names`, `has_consumer`, `remove_consumer`, `statistics` |
+| `size`, `contains`, `containsMany`, `get`, `getAll`, `listAll`, `clear` | `len`, `contains`, `contains_many`, `get`, `get_many`, `list_all`, `clear` |
+| `getDeadLetterTopicSources()` | `dead_letter_sources()` |
+| `disableOperation`, `enableOperation` (`PubSubOperation`) | `disable`, `enable` |
+| `getStatistics()` | `statistics()` |
+| `addListener(PubSubEventListener)`, `removeListener` | `events()`, then drop |
+| `RetentionMode.SUBSCRIPTION_REQUIRED_DELETE_PROCESSED` / `…_RETAIN_ALL` / `SUBSCRIPTION_OPTIONAL_RETAIN_ALL` | `Retention::RequiredDeleteProcessed` / `RequiredRetainAll` / `OptionalRetainAll` |
+| `Position.latest()`, `earliest()`, `messageId(..)`, `messageIdExclusive(..)`, `timestamp(..)`, `timestampExclusive(..)` | `Position::Latest`, `Earliest`, `Id { id, inclusive }`, `Time { at, inclusive }` |
 
 ## VecDeque blocking
 

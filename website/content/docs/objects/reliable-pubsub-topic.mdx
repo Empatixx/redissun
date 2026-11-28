@@ -1,0 +1,41 @@
+---
+title: ReliablePubSubTopic
+description: A topic whose subscriptions each get every message with acknowledgements, redelivery and a dead-letter queue; the functionality of Redisson PRO's RReliablePubSubTopic. Experimental.
+---
+
+**Experimental.** `ReliablePubSubTopic<V>` has the functionality of Redisson PRO's `RReliablePubSubTopic`. Redisson's implementation is not open source, so the data and scripts are redissun's own and a Redisson PRO client cannot share the topic. Every key is in the slot of `{name}`.
+
+```rust
+use std::time::Duration;
+
+let orders = client.reliable_pubsub_topic::<String>("orders");
+let billing = orders.create_subscription().name("billing").await?;
+orders.publish("order 1").priority(5).await?;
+
+let consumer = billing.pull_consumer().name("worker-1").await?;
+if let Some(m) = consumer.pull().timeout(Duration::from_secs(1)).await? {
+    m.ack().await?;
+}
+```
+
+## How it works
+
+Each subscription is a [`ReliableQueue`](./reliable-queue) named `{name}:sub:<subscription>`: it has its own visibility, delivery limit, dead-letter queue, `ack` and `nack`, exactly as a queue. One script publishes a message to the topic's log and to every subscription. A subscription created later starts at its `Position`: `Latest` (only new messages, the default), `Earliest`, `Id { id, inclusive }` or `Time { at, inclusive }`, read from the log. `seek(position)` drops a subscription's messages and refills it from the log.
+
+The log is kept as `Retention` says: `RequiredDeleteProcessed` (the default) needs a subscription to publish and drops a message from the log once no subscription holds it (checked at the next publish); `RequiredRetainAll` keeps the log until the topic's TTL or `max_size`; `OptionalRetainAll` also accepts publishes without subscriptions.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `set_config(&TopicConfig)`, `set_config_if_absent(..)` | `visibility` and `delivery_limit` (defaults of new subscriptions), `ttl`, `max_message_size`, `delay`, `max_size`, `retention`. |
+| `publish(&v)` with `.priority`, `.delay`, `.ttl`, `.delivery_limit`, `.header`, `.timeout`; `publish_many(MessageArgs…)` | to the log and every subscription. Deduplication is not supported on a topic. |
+| `create_subscription()` with `.name`, `.dead_letter_queue`, `.delivery_limit`, `.visibility`, `.position` | an existing name is an `Error::Config`. |
+| `subscription(name)`, `has_subscription(name)`, `remove_subscription(name)`, `subscriptions()` | |
+| `Subscription::pull_consumer()` with `.name` | a `PullConsumer` with `pull()` and `pull_many(n)` (the options of `ReliableQueue::poll`), and `into_stream(wait)` for Redisson's push consumer. |
+| `Subscription::consumer_names()`, `has_consumer`, `remove_consumer`, `seek(position)`, `statistics()`, `queue()` | |
+| `len()`, `contains`, `contains_many`, `get`, `get_many`, `list_all()` | the log. |
+| `clear()`, `delete()` | `clear` empties the log and every subscription; `delete` also removes the subscriptions and the configuration. |
+| `disable(PubSubOperation::{Publish, Pull})`, `enable(..)` | a disabled operation fails with `Error::OperationDisabled`. |
+| `statistics()` | published messages, subscriptions, delayed messages. |
+| `events()` | `TopicEvent::{Published, Pulled, Acknowledged, NegativelyAcknowledged, Full, Config, Disabled, Enabled}`. |
