@@ -25,6 +25,7 @@ use crate::collections::multimap::{
 };
 use crate::collections::sorted_set::SortedSet;
 use crate::collections::time_series::TimeSeries;
+use crate::collections::time_series_native::{TimeSeriesNative, TimeSeriesNatives};
 use crate::coordination::adder::{Adder, Summable};
 use crate::coordination::gcra::Gcra;
 use crate::coordination::latch::CountDownLatch;
@@ -227,6 +228,18 @@ impl<C: Codec> Client<C> {
     #[doc(alias = "getTimeSeries")]
     pub fn time_series<V, L>(&self, name: impl Into<Arc<str>>) -> TimeSeries<V, L, C> {
         TimeSeries::new(Key::new(self.core.clone(), name), self.codec.clone())
+    }
+
+    /// Returns the Redis 8 time series stored under `name`, Redisson's `getTimeSeriesNative`. **Experimental.** Needs Redis 8.0 or the RedisTimeSeries module.
+    #[doc(alias = "getTimeSeriesNative")]
+    pub fn time_series_native(&self, name: impl Into<Arc<str>>) -> TimeSeriesNative {
+        TimeSeriesNative::new(Key::new(self.core.clone(), name))
+    }
+
+    /// The `TS.*` commands over many series, Redisson's `getTimeSeriesNatives`. **Experimental.**
+    #[doc(alias = "getTimeSeriesNatives")]
+    pub fn time_series_natives(&self) -> TimeSeriesNatives {
+        TimeSeriesNatives::new(self.core.clone())
     }
 
     /// Returns the [`HashSetCache`] stored under `name`.

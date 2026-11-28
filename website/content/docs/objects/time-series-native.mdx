@@ -1,0 +1,53 @@
+---
+title: TimeSeriesNative
+description: The time series of Redis 8 (TS.*), one series or many by label filter, as Redisson's RTimeSeriesNative and RTimeSeriesNatives. Experimental.
+---
+
+**Experimental.** `TimeSeriesNative` is one time series of Redis 8 (or the RedisTimeSeries module), and `TimeSeriesNatives` runs the commands over many series chosen by key or by label filter. They are Redisson's `RTimeSeriesNative` and `RTimeSeriesNatives`, sending the same `TS.*` commands with the same arguments. Values are `f64`, so no codec is involved.
+
+Requirements: Redis 8.0 or the module. Several aggregators in one range, `countNaN` and `countAll` need Redis 8.6; `exclude_empty` needs 8.10. On a server without time series, every method returns `Error::Unsupported` and asks the server again on the next call.
+
+```rust
+use redissun::time_series_native::{Aggregator, Filter};
+use std::time::Duration;
+
+let cpu = client.time_series_native("cpu:1");
+cpu.create().retention(Duration::from_secs(3600)).label("host", "a").await?;
+cpu.add(1_000, 0.5).await?;
+let avg = cpu.range(..).aggregate(Duration::from_secs(60), &[Aggregator::Avg]).await?;
+
+let all = client.time_series_natives();
+let latest = all.get(&Filter::new().eq("host", "a")).with_labels().await?;
+```
+
+## TimeSeriesNative
+
+| Method | Command |
+|---|---|
+| `create()`, `try_create()`, `alter()` with `.retention(d)`, `.encoding(e)`, `.chunk_size(n)`, `.duplicate_policy(p)`, `.ignore(time, value)`, `.label(n, v)`, `.labels(..)` | `TS.CREATE` (`try_create`: only when the key is missing), `TS.ALTER` |
+| `add(ts, v)`, `add_now(v)` with `.on_duplicate(p)` and the creation options | `TS.ADD` (`*` for `add_now`) |
+| `add_many(samples)` | `TS.MADD`; does not create the series |
+| `incr_by(v)`, `decr_by(v)` with `.timestamp(ts)` and the creation options | `TS.INCRBY`, `TS.DECRBY` |
+| `get()` with `.latest()` | `TS.GET` |
+| `first()`, `len()`, `is_empty()`, `first_timestamp()`, `last_timestamp()` | `TS.RANGE - + COUNT 1`, `TS.INFO` |
+| `range(r)` with `.rev()`, `.latest()`, `.filter_by_ts(&[..])`, `.filter_by_value(min, max)`, `.count(n)`, `.align(a)`, `.aggregate(bucket, &[..])`, `.bucket_timestamp(b)`, `.empty()` | `TS.RANGE`, `TS.REVRANGE`; `..` is `- +` |
+| `read(ReadFrom)` with `.block(timeout, min_count)`, `.max_count(n)` | `TS.READ`; a blocking read runs on its own connection without the command timeout |
+| `remove_range(r)` | `TS.DEL` |
+| `create_rule(dest, aggregator, bucket)` with `.align_timestamp(ts)`, `delete_rule(dest)` | `TS.CREATERULE`, `TS.DELETERULE` |
+| `labels()`, `info()` with `.debug()` | `TS.INFO` |
+| `iter()`, `iter_with(page)` | pages of `TS.RANGE`; a series that disappears midway is an error |
+
+`Object` covers the key.
+
+## TimeSeriesNatives
+
+| Method | Command |
+|---|---|
+| `add_many(series)` | one `TS.MADD` per hash slot; results in input order |
+| `get(&filter)` with `.latest()`, `.with_labels()`, `.selected_labels(&[..])` | `TS.MGET` |
+| `range(&filter, r)` with the range options, `.rev()`, `.with_labels()`, `.selected_labels(..)`, `.group_by(label, reducer)`, `.exclude_empty()` | `TS.MRANGE`, `TS.MREVRANGE` |
+| `grouped_range(&keys, r)` with the range options, `.rev()`, `.aggregate_each(bucket, &[&[..]])` | `TS.NRANGE`, `TS.NREVRANGE`, routed by the first key |
+| `query_index(&filter)` | `TS.QUERYINDEX` |
+| `label_names()`, `label_values(label)` with `.filter(&filter)` | `TS.QUERYLABELS` |
+
+`Filter::new()` builds the `FILTER` expressions: `.eq(l, v)` (`l=v`), `.ne(l, v)` (`l!=v`), `.eq_any(l, vs)` (`l=(a,b)`), `.ne_any(l, vs)`, `.has(l)` (`l!=`), `.missing(l)` (`l=`) and `.raw(expr)`. An empty filter is an `Error::Config` where one is required. The filter commands go to one master, whose module answers for the cluster, as in Redisson.

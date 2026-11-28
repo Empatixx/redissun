@@ -31,6 +31,8 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RMapCache` | `HashMapCache` |
 | `RMapCacheNative` | `MapCacheNative` |
 | `RTimeSeries` | `TimeSeries` (experimental) |
+| `RTimeSeriesNative` | `TimeSeriesNative` (experimental) |
+| `RTimeSeriesNatives` | `TimeSeriesNatives` (experimental) |
 | `RSetCache` | `HashSetCache` |
 | `RListMultimap` | `ListMultimap` |
 | `RSetMultimap` | `SetMultimap` |
@@ -569,6 +571,33 @@ Every `HashMapCache` method works and returns the same builders; see [`## HashMa
 | `delete`, `isExists`, `rename`, `expire`, `clearExpire`, `remainTimeToLive` | `Object` over the three keys |
 
 Timestamps are `i64` milliseconds. A limit or count of `0` returns nothing (Redisson: no limit), except `read_after(..).count(0)`, which means no limit. Not ported: `TrackingListener`, `copy`, `renamenx`, `expireAt`, conditional `expire`, `sizeInMemory`, `destroy`.
+
+## TimeSeriesNative
+
+| Redisson | redissun |
+|---|---|
+| `getTimeSeriesNative(name)`, `getTimeSeriesNatives()` | `client.time_series_native(name)`, `client.time_series_natives()` |
+| `create()`, `create(TSCreateArgs)` | `create()` with the creation options |
+| `createIfAbsent()`, `createIfAbsent(args)` | `try_create()` → `bool` |
+| `alter(TSAlterArgs)` | `alter()` |
+| `add(ts, v)`, `add(TSAddArgs)`, `addCurrent(v)` | `add(ts, v)` with `.on_duplicate(p)` and the creation options, `add_now(v)` |
+| `addAll(Map)` | `add_many(samples)` |
+| `incrementBy`, `decrementBy` (with `TSIncrArgs`) | `incr_by(v)`, `decr_by(v)` with `.timestamp(ts)` |
+| `removeRange(from, to)` | `remove_range(r)` |
+| `first()`, `size()`, `firstTimestamp()`, `lastTimestamp()` | `first()`, `len()`, `first_timestamp()`, `last_timestamp()` (`None` when empty) |
+| `get()`, `getLatest()` | `get()`, `get().latest()` |
+| `range(..)`, `rangeReversed(..)` (`TSRangeArgs`) | `range(r)` with `.rev()` and the range options |
+| `read(ts)`, `read(TSReadArgs)` | `read(ReadFrom)` with `.block(timeout, min_count)`, `.max_count(n)` |
+| `createRule(TSRuleArgs)`, `deleteRule(dest)` | `create_rule(dest, aggregator, bucket)` with `.align_timestamp(ts)`, `delete_rule(dest)` |
+| `getLabels()`, `getInfo()`, `getDebugInfo()` | `labels()`, `info()`, `info().debug()` |
+| `iterator()`, `iterator(n)`, `stream()`, `stream(n)` | `iter()`, `iter_with(n)` |
+| Natives: `addAll(Map)` | `add_many(series)` |
+| Natives: `getAll(TSMultiGetArgs)` | `get(&Filter)` with `.latest()`, `.with_labels()`, `.selected_labels(..)` |
+| Natives: `range`, `rangeReversed` (`TSMultiRangeArgs`) | `range(&Filter, r)` with `.rev()`, `.group_by(label, Reducer)`, `.exclude_empty()` and the range options |
+| Natives: `groupedRange`, `groupedRangeReversed` (`TSGroupedRangeArgs`) | `grouped_range(&keys, r)` with `.rev()`, `.aggregate_each(..)` |
+| Natives: `queryIndex(filters)`, `labelNames(filters)`, `labelValues(label, filters)` | `query_index(&Filter)`, `label_names()`, `label_values(label)` with `.filter(&Filter)` |
+
+`TSAggregation` → `Aggregator`, `TSReducer` → `Reducer`, `TSDuplicatePolicy` → `DuplicatePolicy`, `TSEncoding` → `Encoding`, `TSBucketTimestamp` → `BucketTimestamp`; filters are built with `Filter` instead of strings.
 
 ## VecDeque blocking
 

@@ -36,6 +36,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: docker pull redis:7.4
       - run: docker pull redis:8.8-m03-alpine
+      - run: docker pull redis:8.10-alpine
       - run: cargo test
       - run: cargo test --features tls-rustls --test tls
       - run: cargo test --features tls-rustls --test batch batches_work_over_tls

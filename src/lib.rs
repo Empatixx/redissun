@@ -89,6 +89,16 @@ pub mod sorted_set {
     pub use crate::collections::sorted_set::Extend;
 }
 
+/// The types and builders of [`TimeSeriesNative`] and [`TimeSeriesNatives`].
+pub mod time_series_native {
+    pub use crate::collections::time_series_native::{
+        Add, Aggregator, Align, Alter, BucketTimestamp, ChunkInfo, Create, CreateRule,
+        DuplicatePolicy, Encoding, Filter, Get, GroupedRange, IncrBy, Info, LabelNames,
+        LabelValues, MultiGet, MultiRange, Range, Read, ReadFrom, Reducer, Rule, Sample,
+        SeriesSample, SeriesSamples, TryCreate, TsInfo,
+    };
+}
+
 /// The builders and types [`TimeSeries`] methods return.
 pub mod time_series {
     pub use crate::collections::time_series::{
@@ -167,6 +177,7 @@ pub use collections::sorted_set::{Aggregate, SortedSet};
 pub use collections::time_series::{
     TimeSeries, TimeSeriesEntry, TimeSeriesEvent, TimeSeriesEventKind, Timestamp,
 };
+pub use collections::time_series_native::{TimeSeriesNative, TimeSeriesNatives};
 pub use collections::vec::Vec;
 pub use collections::vec_deque::VecDeque;
 pub use coordination::adder::{Adder, Summable};
