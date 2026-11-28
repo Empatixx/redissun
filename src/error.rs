@@ -41,6 +41,9 @@ pub enum Error {
     /// The map's [`MapWriter`](crate::MapWriter) failed after its retries; Redis keeps the change.
     #[error("map writer failed: {0}")]
     Writer(#[source] BoxError),
+    /// The operation is disabled on this queue or topic, Redisson's `OperationDisabledException`.
+    #[error("operation {0} is disabled")]
+    OperationDisabled(String),
 }
 
 /// Result alias used by every fallible redissun call.
