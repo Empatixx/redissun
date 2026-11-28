@@ -241,7 +241,7 @@ pub enum Align {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ReadFrom {
-    /// The samples after this timestamp.
+    /// The samples from this timestamp on, included, as Redisson's `read(timestamp)`.
     At(i64),
     /// From the oldest sample (`-`).
     Earliest,

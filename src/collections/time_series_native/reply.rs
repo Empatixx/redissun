@@ -148,6 +148,22 @@ pub(crate) fn samples(value: &Value) -> Result<Vec<Sample>> {
         .collect()
 }
 
+/// The rows of `TS.NRANGE`: `[timestamp, [value per key…]]`, Redisson's `TimeSeriesGroupedSampleDecoder`.
+pub(crate) fn grouped_samples(value: &Value) -> Result<Vec<Sample>> {
+    items(value)
+        .iter()
+        .map(|row| {
+            let row = items(row);
+            let timestamp = long(row.first().ok_or_else(malformed)?)?;
+            let values = items(row.get(1).ok_or_else(malformed)?)
+                .iter()
+                .map(double)
+                .collect::<Result<_>>()?;
+            Ok(Sample { timestamp, values })
+        })
+        .collect()
+}
+
 /// Labels as flat pairs or as pairs of pairs, Redisson's `toLabels`. A value may be nil (a selected label the series lacks).
 pub(crate) fn labels(value: &Value) -> Vec<(String, Option<String>)> {
     let parts = items(value);

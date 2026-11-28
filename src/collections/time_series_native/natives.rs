@@ -540,7 +540,7 @@ impl<'a> IntoFuture for GroupedRange<'a> {
                 .query(Request::new(cmd).key(first.as_bytes()).read())
                 .await
                 .map_err(unsupported)?;
-            reply::samples(&reply)
+            reply::grouped_samples(&reply)
         })
     }
 }

@@ -232,7 +232,7 @@ async fn redisson_read() {
     for i in 1..=3 {
         t.add(i, i as f64).await.unwrap();
     }
-    assert_eq!(stamps(&t.read(ReadFrom::At(1)).await.unwrap()), [2, 3]);
+    assert_eq!(stamps(&t.read(ReadFrom::At(2)).await.unwrap()), [2, 3]);
     assert_eq!(
         stamps(&t.read(ReadFrom::Earliest).max_count(2).await.unwrap()),
         [1, 2]
@@ -447,12 +447,11 @@ async fn redisson_natives_add_all_and_grouped_range() {
         .unwrap()
         .is_empty());
     let keys = [a.as_str(), b.as_str()];
-    match natives.grouped_range(&keys, ..).await {
-        Ok(samples) => assert!(!samples.is_empty()),
-        // TS.NRANGE needs servers that have it; any other error is a failure.
-        Err(Error::Unsupported(_)) => {}
-        Err(other) => panic!("{other:?}"),
-    }
+    let grouped = natives.grouped_range(&keys, ..).await.unwrap();
+    assert_eq!(grouped.len(), 2);
+    assert_eq!(grouped[0].timestamp, 1);
+    assert_eq!(grouped[0].values, [1.0, 10.0]);
+    assert!(grouped[1].values[1].is_nan());
     assert!(matches!(
         natives.grouped_range(&[], ..).await,
         Err(Error::Config(_))
