@@ -33,6 +33,7 @@ redissun is Redisson for Rust: the same objects, data layout and Lua scripts, wi
 | `RTimeSeries` | `TimeSeries` (experimental) |
 | `RTimeSeriesNative` | `TimeSeriesNative` (experimental) |
 | `RTimeSeriesNatives` | `TimeSeriesNatives` (experimental) |
+| `RReliableQueue` (PRO) | `ReliableQueue` (experimental, own backend) |
 | `RSetCache` | `HashSetCache` |
 | `RListMultimap` | `ListMultimap` |
 | `RSetMultimap` | `SetMultimap` |
@@ -598,6 +599,26 @@ Timestamps are `i64` milliseconds. A limit or count of `0` returns nothing (Redi
 | Natives: `queryIndex(filters)`, `labelNames(filters)`, `labelValues(label, filters)` | `query_index(&Filter)`, `label_names()`, `label_values(label)` with `.filter(&Filter)` |
 
 `TSAggregation` → `Aggregator`, `TSReducer` → `Reducer`, `TSDuplicatePolicy` → `DuplicatePolicy`, `TSEncoding` → `Encoding`, `TSBucketTimestamp` → `BucketTimestamp`; filters are built with `Filter` instead of strings.
+
+## ReliableQueue
+
+Redisson PRO's `RReliableQueue` and redissun's `ReliableQueue` have the same features, but not the same data: they cannot share a queue.
+
+| Redisson | redissun |
+|---|---|
+| `getReliableQueue(name[, codec])` | `client[.with_codec(c)].reliable_queue::<V>(name)` |
+| `setConfig(QueueConfig)`, `setConfigIfAbsent(..)` | `set_config(&QueueConfig)`, `set_config_if_absent(..)` |
+| `add(QueueAddArgs)`, `addMany(..)` with `MessageArgs` | `add(&v)` with the message options, `add_many(MessageArgs…)`; `.timeout(d)` |
+| `poll()`, `poll(QueuePollArgs)`, `pollMany(..)` | `poll()`, `poll_many(n)` with `.visibility`, `.timeout`, `.ack_mode` |
+| `acknowledge(QueueAckArgs)` | `Delivery::ack()`, `ack(&ids)` |
+| `negativeAcknowledge(QueueNegativeAckArgs.failed(..) / .rejected(..))` | `Delivery::nack(Nack::Failed { delay } / Nack::Rejected)`, `nack(&ids, ..)` |
+| `size()`, `countDelayedMessages()`, `countUnacknowledgedMessages()` | `len()`, `delayed_len()`, `unacked_len()` |
+| `contains`, `containsMany`, `get`, `getAll`, `listAll` | `contains`, `contains_many`, `get`, `get_many`, `list_all` |
+| `remove(QueueRemoveArgs)`, `removeMany(..)`, `clear()` | `remove(&ids)`, `clear()` |
+| `move(QueueMoveArgs)` | `move_to(dest, QueueMove)` |
+| `getDeadLetterQueueSources()` | `dead_letter_sources()` |
+| `disableOperation`, `enableOperation` | `disable`, `enable` |
+| `addListener(QueueEventListener)`, `removeListener` | `events()`, then drop |
 
 ## VecDeque blocking
 
