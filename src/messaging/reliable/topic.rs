@@ -6,7 +6,7 @@ use super::scripts;
 use crate::client::request::Request;
 use crate::codec::Codec;
 use crate::error::{Error, Result};
-use crate::object::{tagged, Key};
+use crate::object::Key;
 use crate::pubsub::{PatternMessage, Subscription as PubSubscription};
 use bytes::Bytes;
 use futures::future::select;
@@ -787,10 +787,7 @@ where
                 self.query(cmd).await?
             }
             Position::Time { at, inclusive } => {
-                let ms = at
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| millis(d))
-                    .unwrap_or(0);
+                let ms = at.duration_since(UNIX_EPOCH).map(millis).unwrap_or(0);
                 let mut cmd = redis::cmd("ZRANGEBYSCORE");
                 cmd.arg(&log)
                     .arg(if *inclusive {
