@@ -90,7 +90,7 @@ const RETENTION_CUTOFF: &str = concat!(
 );
 
 /// RedissonTimeSeries.WITHIN_RETENTION (line 463)
-const WITHIN_RETENTION: &str = concat!("if cutoff == nil or tonumber(timestamp) >= cutoff then ",);
+const WITHIN_RETENTION: &str = "if cutoff == nil or tonumber(timestamp) >= cutoff then ";
 
 /// RedissonTimeSeries.RETENTION_TRIM (line 490)
 const RETENTION_TRIM: &str = concat!(
@@ -109,7 +109,7 @@ pub(super) static ADD_ENTRY: LazyLock<Lua> = LazyLock::new(|| {
             ENTRY_ARGS,
             STORE_ENTRY,
             RETENTION_CUTOFF,
-            concat!("local added = 0; ",),
+            "local added = 0; ",
             WITHIN_RETENTION,
             concat!(
                 "storeEntry(nextId(), timestamp, entryValue); ",
@@ -117,7 +117,7 @@ pub(super) static ADD_ENTRY: LazyLock<Lua> = LazyLock::new(|| {
                 "end; ",
             ),
             RETENTION_TRIM,
-            concat!("return added;",),
+            "return added;",
         ]
         .concat(),
     )
@@ -159,7 +159,7 @@ pub(super) static ADD_IF_ABSENT: LazyLock<Lua> = LazyLock::new(|| {
                 "end; ",
             ),
             RETENTION_TRIM,
-            concat!("return added;",),
+            "return added;",
         ]
         .concat(),
     )
@@ -195,7 +195,7 @@ pub(super) static ADD_OR_REPLACE: LazyLock<Lua> = LazyLock::new(|| {
                 "end; ",
             ),
             RETENTION_TRIM,
-            concat!("return created;",),
+            "return created;",
         ]
         .concat(),
     )

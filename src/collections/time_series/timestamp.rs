@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(bounds(&(..i64::MIN)), None);
         assert_eq!(bounds(&(5..5)), None);
         assert_eq!(bounds(&(5..=5)), Some((5, 5)));
-        assert_eq!(bounds(&(7..=3)), None);
+        assert_eq!(bounds(&(Bound::Included(7), Bound::Included(3))), None);
     }
 
     #[test]
