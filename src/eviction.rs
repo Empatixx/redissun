@@ -26,6 +26,14 @@ pub(crate) fn arguments(latch: Option<Duration>) -> Vec<Bytes> {
     ]
 }
 
+/// The arguments of Redisson's `TimeSeriesEvictionTask`: the client's clock and the batch size. It takes no latch.
+pub(crate) fn time_series_arguments(_latch: Option<Duration>) -> Vec<Bytes> {
+    vec![
+        Bytes::from(crate::object::now_millis().to_string()),
+        Bytes::from(KEYS_LIMIT.to_string()),
+    ]
+}
+
 /// The arguments of an eviction script for one run, given the latch time of that run (`None` when it runs without a latch).
 pub(crate) type Arguments = fn(Option<Duration>) -> Vec<Bytes>;
 

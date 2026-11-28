@@ -1,0 +1,80 @@
+---
+title: TimeSeries
+description: Values ordered by timestamp with labels, per-entry TTL and retention, on Redisson's RTimeSeries layout. Experimental.
+---
+
+**Experimental.** A `TimeSeries<V, L>` holds values ordered by timestamp, each with an optional label of type `L` (use `()` for none) and an optional time to live. It is Redisson's `RTimeSeries` and shares its data with Redisson 4.8.0 clients. It runs on Redis or Valkey 6.2 or newer.
+
+```rust
+use std::time::Duration;
+
+let temperatures = client.time_series::<f64, String>("temperatures");
+temperatures.insert(1_000, &21.5).label("kitchen").await?;
+temperatures.insert(2_000, &22.0).ttl(Duration::from_secs(3600)).await?;
+let first = temperatures.get(1_000).await?;
+```
+
+## How it is stored
+
+Three keys, as in Redisson 4.8.0 (with the `redissun` prefix):
+
+- the sorted set `name`, scored by timestamp;
+- the sorted set `redissun__ts_ttl:{name}`, the same members scored by expiry (Unix milliseconds);
+- the hash `redissun__ts_seq:{name}`, fields `id` (the entry counter), `total` and `incremented`.
+
+Each member is `struct.pack('BBc0Lc0Lc0', 4, #id, id, #value, value, #field, field)`: `id` is a 20-digit zero-padded counter and `field` a flag byte (`2` no label, `3` label) followed by the encoded label. Members of the 4.7 layout still read.
+
+## Methods
+
+| Method | Notes |
+|---|---|
+| `insert(ts, &v)[.label(&l)][.ttl(d)][.retention(d)]` | adds an entry, keeping the ones already at `ts`. `false` when it is behind its retention window. Redisson's `add`. |
+| `try_insert(ts, &v)…` | adds only when no live entry is at `ts`. Redisson's `addIfAbsent`. |
+| `set(ts, &v)…` | replaces every entry at `ts`; `true` when none was live. Redisson's `addOrReplace`. |
+| `get(ts)`, `entry(ts)` | the first live entry at `ts`. Redisson's `get`, `getEntry`. |
+| `len()`, `is_empty()` | live entries. Redisson's `size`. |
+| `set_if_less(ts, &v)…`, `set_if_greater(ts, &v)…` | stores `v` only when it is less (greater) than every live value at `ts`, leaving one entry. Redisson's `addIfLess`, `addIfGreater`. |
+| `set_sum(ts, &v)…` | replaces the live entries at `ts` with their sum plus `v`. Redisson's `addAndSum`. |
+| `add(ts, &delta)…` | adds `delta` to the running total and records the total at `ts`; resolves to the total. Redisson's `addAndGet`. |
+| `extend(entries)[.ttl(d)]` | adds `(ts, v)`, `(ts, v, label)` or `TimeSeriesEntry` items. Redisson's `addAll`. |
+| `get_all(ts)`, `get_all_entries(ts)` | every live entry at `ts`, in insertion order. Redisson's `getAll`, `getAllEntries`. |
+| `remove(ts)`, `remove_entry(ts)` | removes the first live entry at `ts` and returns it. Redisson's `remove`, `getAndRemove`, `getAndRemoveEntry`. |
+| `remove_all(ts)`, `remove_all_entries(ts)` | removes every live entry at `ts`. Redisson's `removeAll`, `getAndRemoveAll`, `getAndRemoveAllEntries`. |
+| `first()`, `first_many(n)`, `first_entry()`, `first_entries(n)` | the oldest entries, oldest first. Redisson's `first`, `firstEntry`, `firstEntries`. |
+| `last()`, `last_many(n)`, `last_entry()`, `last_entries(n)` | the newest `n` entries, oldest first (as Redisson returns them). Redisson's `last`, `lastEntry`, `lastEntries`. |
+| `pop_first…`, `pop_last…` | the same, removed. Expired entries are skipped and left to the clean-up. Redisson's `pollFirst…`, `pollLast…`. |
+| `first_timestamp()`, `last_timestamp()` | Redisson's `firstTimestamp`, `lastTimestamp`. |
+| `range(r)[.rev()][.limit(n)][.label(&l)\|.unlabelled()]` | the values in a range of timestamps (`..`, `a..b`, `a..=b`, …). Redisson's `range`, `rangeReversed`, `rangeByLabel`, `rangeReversedByLabel`. |
+| `range_entries(r)…` | the same with timestamps and labels. Redisson's `entryRange…`. |
+| `remove_range(r)[.label(&l)\|.unlabelled()]` | removes the live entries in a range; resolves to how many. Redisson's `removeRange`, `removeRangeByLabel`. |
+| `labels(r)` | the distinct labels in a range, in order of first appearance. Redisson's `labels`. |
+| `read_after(ts)[.count(n)][.label(&l)\|.unlabelled()]` | the entries after `ts`, never ending inside a timestamp, for a cursor. Redisson's `readTail`. |
+| `aggregate(r, bucket, &[Aggregation])[.align_to(ts)][.filter_by_value(min, max)][.label(&l)\|.unlabelled()]` | statistics per bucket. Redisson's `aggregate`. |
+| `info()` | live and stored entries, first and last timestamp, memory, TTL, issued ids. Redisson's `info`. |
+| `iter()`, `iter_with(page)` | a `Stream` of the values in timestamp order. Redisson's `iterator`, `stream`. |
+| `events()`, `events_of(&[TimeSeriesEventKind])` | the changes; see below. Redisson's `addListener`. |
+
+`Object` (`del`, `exists`, `expire`, `ttl`, `persist`, `rename`) covers all three keys.
+
+## Several entries per timestamp
+
+A timestamp can hold many entries. `insert` keeps what is there and adds one, in insertion order; `get`, `entry` and `remove` reach the first live one, `get_all` and `remove_all` all of them. `set`, `set_if_less`, `set_if_greater`, `set_sum` and `add` leave exactly one entry at the timestamp.
+
+## TTL, retention and expired entries
+
+`.ttl(d)` makes one entry expire, measured on the writing client's clock, as in Redisson. Zero or less than a millisecond means no time to live. `.retention(d)` keeps only the entries within `d` of the highest live timestamp: an entry behind the window is not stored (`insert` resolves to `false`), and up to 500 older entries are removed.
+
+Expired entries are invisible to every read. A background task deletes them, as Redisson's eviction task does: it first runs `ClientBuilder::eviction_interval` after the handle is created and removes up to 100 entries per run.
+
+## Numbers
+
+`set_if_less`, `set_if_greater`, `set_sum`, `add` and `aggregate` read stored values as numbers in Lua, so the codec must encode numbers as text: `JsonCodec` (the default) and `StringCodec` do. Another codec gets an `Error::Config` before anything is sent.
+
+## Limits and counts
+
+Timestamps are `i64` milliseconds (`Timestamp` converts from integers and `SystemTime`), and negative ones work. A `limit(0)` or a count of `0` returns nothing without a call; Redisson reads a limit of 0 as "no limit". `read_after(..).count(0)` is the exception: it means no limit, as Redisson's `readTail` without a count.
+
+## Events
+
+`events()` reports `Added` (`zadd`), `Removed` (`zrem`), `Deleted` (`del`) and `Expired` (`expired`) of the series, Redisson's `ScoredSortedSetAddListener`, `ScoredSortedSetRemoveListener`, `DeletedObjectListener` and `ExpiredObjectListener`. Redis sends them only with `notify-keyspace-events` containing `E` and `z`, `g`, `x` for the kinds you need. Removing the last entry deletes the sorted set, so it also reports `Deleted`, as in Redisson. In a cluster a listener hears one master. Drop the listener to stop.
+

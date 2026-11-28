@@ -65,5 +65,9 @@ description: Things to know about this version.
   - Redisson's `RLocalCachedMapCache` is a PRO feature, so no Redisson client can be a peer on the sync topic; the topic uses `LocalCachedMap`'s channel and message format. The data in Redis is shared with Redisson's `RMapCache` and with `HashMapCache`.
   - `rename` moves the data and the updates log, not the local caches of other instances, which keep listening on the old name.
   - In `StoreMode::Local`, the methods that need the entries in Redis return `Error::Config`; see the object page for the list.
+- **TimeSeries and Redisson's `RTimeSeries`** (experimental).
+  - The clean-up runs on the runtime that created the handle. Expiry uses each client's clock, as in Redisson.
+  - Not ported: `copy`, `renamenx`, `expireAt`, `sizeInMemory`, `destroy`, `TrackingListener`.
+  - `events()` hears nothing unless the server's `notify-keyspace-events` enables the kinds (`E` with `z`, `g`, `x`).
 - **Short times.** Time limits and leases are rounded up to whole milliseconds. Zero is an error, except for the entry time limits of `HashMapCache` and `HashSetCache` and the entry TTLs of `MapCacheNative`, where zero means no limit. A `MapCacheNative` deadline (`.expire_at(t)`) is sent in whole Unix milliseconds, rounded down.
 - **Before 1.0**, the API can change between minor versions.
